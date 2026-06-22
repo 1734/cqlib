@@ -23,3 +23,32 @@ rule decompose_fsim_to_rxx_ryy_crz {
     match { FSIM(theta, phi) 0 1 }
     rewrite { RXX(theta) 0 1, RYY(theta) 0 1, Phase(-phi/2) 0, CRZ(-phi) 0 1 }
 }
+
+//========================Rui260622========================//
+// Direct ion-trap-style FSIM lowering to RX/RY/RZZ.
+// This expands the RXX, RYY, and RZ factors from decompose_fsim_to_rzz_phase
+// directly into the native {RX, RY, RZZ} basis.
+rule decompose_fsim_to_rx_ry_rzz {
+    match { FSIM(theta, phi) 0 1 }
+    rewrite {
+        RY(-π/2) 0,
+        RY(-π/2) 1,
+        RZZ(theta) 0 1,
+        RY(π/2) 1,
+        RY(π/2) 0,
+        RX(π/2) 0,
+        RX(π/2) 1,
+        RZZ(theta) 0 1,
+        RX(-π/2) 1,
+        RX(-π/2) 0,
+        GPhase(-phi/4),
+        RX(-π/2) 0,
+        RY(-phi/2) 0,
+        RX(π/2) 0,
+        RX(-π/2) 1,
+        RY(-phi/2) 1,
+        RX(π/2) 1,
+        RZZ(phi/2) 0 1
+    }
+}
+//========================Rui260622========================//

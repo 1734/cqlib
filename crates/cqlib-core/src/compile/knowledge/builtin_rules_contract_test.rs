@@ -331,6 +331,49 @@ fn new_rzz_native_lowering_rules_pass_layered_verify() {
     }
 }
 
+//========================Rui260622========================//
+#[test]
+fn ion_trap_direct_ising_rules_pass_layered_verify() {
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for name in [
+        "decompose_cz_to_rx_ry_rzz",
+        "decompose_cx_to_rx_ry_rzz",
+        "decompose_rxx_to_rx_ry_rzz",
+        "decompose_ryy_to_rx_ry_rzz",
+        "decompose_rzx_to_rx_ry_rzz",
+        "decompose_crz_to_rx_ry_rzz",
+        "decompose_crx_to_rx_ry_rzz",
+        "decompose_cry_to_rx_ry_rzz",
+        "decompose_fsim_to_rx_ry_rzz",
+    ] {
+        let rule = library.get_by_name(name).expect(name);
+        assert_rule_verification_passes(rule);
+    }
+}
+
+#[test]
+fn ion_trap_direct_single_rotation_rules_pass_layered_verify() {
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for name in [
+        //========================Rui260622========================//
+        "decompose_h_to_rx_ry",
+        "decompose_s_to_rx_ry",
+        "decompose_sdg_to_rx_ry",
+        "decompose_t_to_rx_ry",
+        "decompose_tdg_to_rx_ry",
+        "decompose_z_to_rx_ry",
+        "decompose_rxy_to_rx_ry",
+        "decompose_xy_to_rx_ry",
+        "decompose_xy2p_to_rx_ry",
+        "decompose_xy2m_to_rx_ry",
+        "decompose_u_to_rx_ry",
+    ] {
+        let rule = library.get_by_name(name).expect(name);
+        assert_rule_verification_passes(rule);
+    }
+}
+//========================Rui260622========================//
+
 #[test]
 fn new_ising_swapped_merge_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
@@ -414,6 +457,17 @@ fn ion_trap_rzz_intermediate_rules_are_present() {
         "decompose_rzz_to_rzx",
         "specialize_rzz_pi_to_cz",
         "decompose_swap_to_ising",
+        //========================Rui260622========================//
+        "decompose_cz_to_rx_ry_rzz",
+        "decompose_cx_to_rx_ry_rzz",
+        "decompose_rxx_to_rx_ry_rzz",
+        "decompose_ryy_to_rx_ry_rzz",
+        "decompose_rzx_to_rx_ry_rzz",
+        "decompose_crz_to_rx_ry_rzz",
+        "decompose_crx_to_rx_ry_rzz",
+        "decompose_cry_to_rx_ry_rzz",
+        "decompose_fsim_to_rx_ry_rzz",
+        //========================Rui260622========================//
     ] {
         assert!(
             library.get_by_name(name).is_some(),

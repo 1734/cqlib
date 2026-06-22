@@ -139,3 +139,41 @@ rule decompose_rzx_to_cz {
     match { RZX(theta) 0 1 }
     rewrite { CZ 0 1, H 1, RZ(theta) 1, H 1, CZ 0 1 }
 }
+
+//========================Rui260622========================//
+// Direct ion-trap-style lowering to RX/RY/RZZ.
+// These rules avoid intermediate H/RZ/CX/CZ gates when targeting a native
+// {RX, RY, RZZ} basis.
+
+// CZ = RZ(π/2) on both qubits plus RZZ(-π/2), up to global phase.
+// RZ(theta) is expanded as RX(-π/2) · RY(theta) · RX(π/2).
+rule decompose_cz_to_rx_ry_rzz {
+    match { CZ 0 1 }
+    rewrite { RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1 }
+}
+
+// CX = H(target) · CZ · H(target), with both H and CZ lowered to RX/RY/RZZ.
+rule decompose_cx_to_rx_ry_rzz {
+    match { CX 0 1 }
+    rewrite { RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, GPhase(π) }
+}
+
+// RXX is obtained from RZZ by Y-basis changes on both qubits.
+rule decompose_rxx_to_rx_ry_rzz {
+    match { RXX(theta) 0 1 }
+    rewrite { RY(-π/2) 0, RY(-π/2) 1, RZZ(theta) 0 1, RY(π/2) 1, RY(π/2) 0 }
+}
+
+// RYY is obtained from RZZ by X-basis changes on both qubits.
+rule decompose_ryy_to_rx_ry_rzz {
+    match { RYY(theta) 0 1 }
+    rewrite { RX(π/2) 0, RX(π/2) 1, RZZ(theta) 0 1, RX(-π/2) 1, RX(-π/2) 0 }
+}
+
+// RZX is obtained from RZZ by a Y-basis change on the target qubit.
+rule decompose_rzx_to_rx_ry_rzz {
+    match { RZX(theta) 0 1 }
+    rewrite { RY(-π/2) 1, RZZ(theta) 0 1, RY(π/2) 1 }
+}
+
+//========================Rui260622========================//

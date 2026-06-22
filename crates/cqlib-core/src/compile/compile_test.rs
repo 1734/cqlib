@@ -1014,6 +1014,16 @@ fn compile_lowers_single_qubit_suite_to_qcis_xy_half_basis() {
     compile_to_basis_checked(&circuit, &basis);
 }
 
+//========================Rui260622========================//
+#[test]
+fn compile_lowers_single_qubit_suite_to_ion_trap_rx_ry_basis() {
+    let circuit = single_qubit_gate_suite();
+    let basis = vec![StandardGate::RX, StandardGate::RY, StandardGate::GPhase];
+
+    compile_to_basis_checked(&circuit, &basis);
+}
+//========================Rui260622========================//
+
 #[test]
 fn compile_lowers_two_qubit_suite_to_qcis_cz_basis() {
     let circuit = two_qubit_gate_suite();
@@ -1131,6 +1141,20 @@ fn compile_lowers_controlled_rotations_to_rzx_native_basis() {
     compile_to_basis_checked(&circuit, &basis);
 }
 
+//========================Rui260622========================//
+#[test]
+fn compile_lowers_controlled_rotations_to_ion_trap_rx_ry_rzz_basis() {
+    let circuit = controlled_rotation_suite();
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
+        StandardGate::GPhase,
+    ];
+
+    compile_to_basis_checked(&circuit, &basis);
+}
+
 #[test]
 fn compile_lowers_swap_to_ising_exchange_basis() {
     let circuit = swap_gate_suite();
@@ -1165,6 +1189,21 @@ fn compile_lowers_ising_suite_to_rzz_native_basis() {
     compile_to_basis_checked(&circuit, &basis);
 }
 
+//========================Rui260622========================//
+#[test]
+fn compile_lowers_ising_suite_to_ion_trap_rx_ry_rzz_basis() {
+    let circuit = ising_gate_suite();
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
+        StandardGate::GPhase,
+    ];
+
+    compile_to_basis_checked(&circuit, &basis);
+}
+//========================Rui260622========================//
+
 #[test]
 fn compile_lowers_fsim_to_ising_exchange_basis() {
     let circuit = fsim_circuit();
@@ -1186,33 +1225,20 @@ fn compile_lowers_fsim_to_ising_exchange_basis() {
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::FSIM));
 }
 
+//========================Rui260622========================//
 #[test]
-fn compile_reports_fsim_gap_for_pure_rzz_native_basis() {
+fn compile_lowers_fsim_to_ion_trap_rx_ry_rzz_basis() {
     let circuit = fsim_circuit();
-    let err = compile(
-        &circuit,
-        CompileConfig {
-            mode: CompileMode::Normal,
-            target_basis: Some(native_basis(&[
-                StandardGate::H,
-                StandardGate::RX,
-                StandardGate::RY,
-                StandardGate::RZ,
-                StandardGate::RZZ,
-                StandardGate::GPhase,
-            ])),
-            device: None,
-            initial_layout: None,
-            resource_policy: ResourcePolicy::default(),
-            seed: None,
-        },
-    )
-    .unwrap_err();
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
+        StandardGate::GPhase,
+    ];
 
-    assert!(matches!(
-        err,
-        CompilerError::InvalidInput(reason) if reason.contains("FSIM")
-    ));
+    let result = compile_to_basis_checked(&circuit, &basis);
+
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::FSIM));
 }
 
 #[test]
