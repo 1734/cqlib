@@ -371,7 +371,6 @@ fn ion_trap_direct_single_rotation_rules_pass_layered_verify() {
     }
 }
 
-
 #[test]
 fn new_ising_swapped_merge_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
