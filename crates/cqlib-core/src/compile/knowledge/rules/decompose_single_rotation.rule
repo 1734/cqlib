@@ -69,43 +69,30 @@ rule decompose_xy2m_to_rz_ry {
     rewrite { RZ(π/2 - phi) 0, RY(-π/2) 0, RZ(phi - π/2) 0 }
 }
 
-//========================Rui260622========================//
-// Direct ion-trap-style single-qubit lowering to RX/RY.
-// These rules avoid intermediate RZ/RXY/XY/U gates when targeting a native
-// {RX, RY} single-qubit basis.
-
-// RXY(theta, phi) = RZ(-phi) · RX(theta) · RZ(phi), with both RZ rotations
-// expanded into RX/RY basis changes and adjacent RX rotations merged.
 rule decompose_rxy_to_rx_ry {
     match { RXY(theta, phi) 0 }
     rewrite { RX(-π/2) 0, RY(-phi) 0, RX(theta) 0, RY(phi) 0, RX(π/2) 0 }
 }
 
-// XY(phi) is the pi-pulse case of RXY(theta, phi).
 rule decompose_xy_to_rx_ry {
     match { XY(phi) 0 }
     rewrite { RX(-π/2) 0, RY(-phi) 0, RX(π) 0, RY(phi) 0, RX(π/2) 0 }
 }
 
-// XY2P(phi) is the +pi/2 case of RXY(theta, phi).
 rule decompose_xy2p_to_rx_ry {
     match { XY2P(phi) 0 }
     rewrite { RX(-π/2) 0, RY(-phi) 0, RX(π/2) 0, RY(phi) 0, RX(π/2) 0 }
 }
 
-// XY2M(phi) is the -pi/2 case of RXY(theta, phi).
 rule decompose_xy2m_to_rx_ry {
     match { XY2M(phi) 0 }
     rewrite { RX(-π/2) 0, RY(-phi) 0, RX(-π/2) 0, RY(phi) 0, RX(π/2) 0 }
 }
 
-// U(theta, phi, lambda) via the ZXZ form, with both RZ rotations expanded
-// directly into RX/RY basis changes.
 rule decompose_u_to_rx_ry {
     match { U(theta, phi, lambda) 0 }
     rewrite { RX(-π/2) 0, RY(lambda - π/2) 0, RX(theta) 0, RY(phi + π/2) 0, RX(π/2) 0, GPhase((phi + lambda) / 2) }
 }
-//========================Rui260622========================//
 
 rule decompose_rx_to_ry {
     match { RX(theta) 0 }

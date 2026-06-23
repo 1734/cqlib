@@ -1014,7 +1014,6 @@ fn compile_lowers_single_qubit_suite_to_qcis_xy_half_basis() {
     compile_to_basis_checked(&circuit, &basis);
 }
 
-//========================Rui260622========================//
 #[test]
 fn compile_lowers_single_qubit_suite_to_ion_trap_rx_ry_basis() {
     let circuit = single_qubit_gate_suite();
@@ -1022,7 +1021,6 @@ fn compile_lowers_single_qubit_suite_to_ion_trap_rx_ry_basis() {
 
     compile_to_basis_checked(&circuit, &basis);
 }
-//========================Rui260622========================//
 
 #[test]
 fn compile_lowers_two_qubit_suite_to_qcis_cz_basis() {
@@ -1141,7 +1139,6 @@ fn compile_lowers_controlled_rotations_to_rzx_native_basis() {
     compile_to_basis_checked(&circuit, &basis);
 }
 
-//========================Rui260622========================//
 #[test]
 fn compile_lowers_controlled_rotations_to_ion_trap_rx_ry_rzz_basis() {
     let circuit = controlled_rotation_suite();
@@ -1189,7 +1186,6 @@ fn compile_lowers_ising_suite_to_rzz_native_basis() {
     compile_to_basis_checked(&circuit, &basis);
 }
 
-//========================Rui260622========================//
 #[test]
 fn compile_lowers_ising_suite_to_ion_trap_rx_ry_rzz_basis() {
     let circuit = ising_gate_suite();
@@ -1202,7 +1198,6 @@ fn compile_lowers_ising_suite_to_ion_trap_rx_ry_rzz_basis() {
 
     compile_to_basis_checked(&circuit, &basis);
 }
-//========================Rui260622========================//
 
 #[test]
 fn compile_lowers_fsim_to_ising_exchange_basis() {
@@ -1225,7 +1220,6 @@ fn compile_lowers_fsim_to_ising_exchange_basis() {
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::FSIM));
 }
 
-//========================Rui260622========================//
 #[test]
 fn compile_lowers_fsim_to_ion_trap_rx_ry_rzz_basis() {
     let circuit = fsim_circuit();

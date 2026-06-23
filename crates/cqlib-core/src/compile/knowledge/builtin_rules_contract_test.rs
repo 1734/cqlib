@@ -331,7 +331,6 @@ fn new_rzz_native_lowering_rules_pass_layered_verify() {
     }
 }
 
-//========================Rui260622========================//
 #[test]
 fn ion_trap_direct_ising_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
@@ -355,7 +354,6 @@ fn ion_trap_direct_ising_rules_pass_layered_verify() {
 fn ion_trap_direct_single_rotation_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
     for name in [
-        //========================Rui260622========================//
         "decompose_h_to_rx_ry",
         "decompose_s_to_rx_ry",
         "decompose_sdg_to_rx_ry",
@@ -372,7 +370,7 @@ fn ion_trap_direct_single_rotation_rules_pass_layered_verify() {
         assert_rule_verification_passes(rule);
     }
 }
-//========================Rui260622========================//
+
 
 #[test]
 fn new_ising_swapped_merge_rules_pass_layered_verify() {
@@ -457,7 +455,6 @@ fn ion_trap_rzz_intermediate_rules_are_present() {
         "decompose_rzz_to_rzx",
         "specialize_rzz_pi_to_cz",
         "decompose_swap_to_ising",
-        //========================Rui260622========================//
         "decompose_cz_to_rx_ry_rzz",
         "decompose_cx_to_rx_ry_rzz",
         "decompose_rxx_to_rx_ry_rzz",
@@ -467,7 +464,6 @@ fn ion_trap_rzz_intermediate_rules_are_present() {
         "decompose_crx_to_rx_ry_rzz",
         "decompose_cry_to_rx_ry_rzz",
         "decompose_fsim_to_rx_ry_rzz",
-        //========================Rui260622========================//
     ] {
         assert!(
             library.get_by_name(name).is_some(),

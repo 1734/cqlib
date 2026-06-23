@@ -79,11 +79,6 @@ rule decompose_cry_to_rzz {
     rewrite { RX(π/2) 1, RZ(theta/2) 1, RZZ(-theta/2) 0 1, RX(-π/2) 1 }
 }
 
-//========================Rui260622========================//
-// Direct ion-trap-style controlled-rotation lowering to RX/RY/RZZ.
-// These rules avoid intermediate H/RZ/CX/CZ gates when targeting a native
-// {RX, RY, RZZ} basis.
-
 rule decompose_crz_to_rx_ry_rzz {
     match { CRZ(theta) 0 1 }
     rewrite { RX(-π/2) 1, RY(theta/2) 1, RX(π/2) 1, RZZ(-theta/2) 0 1 }
@@ -98,7 +93,6 @@ rule decompose_cry_to_rx_ry_rzz {
     match { CRY(theta) 0 1 }
     rewrite { RY(theta/2) 1, RX(π/2) 1, RZZ(-theta/2) 0 1, RX(-π/2) 1 }
 }
-//========================Rui260622========================//
 
 rule decompose_crz_to_cz {
     match { CRZ(theta) 0 1 }
