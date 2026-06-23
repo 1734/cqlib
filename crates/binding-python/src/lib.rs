@@ -15,7 +15,7 @@ pub mod compile;
 pub mod device;
 pub mod ir;
 pub mod qis;
-// pub mod visualization;
+pub mod visualization;
 
 use pyo3::prelude::*;
 
@@ -28,6 +28,7 @@ fn binding_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     device::register_device_module(m)?;
     ir::register_ir_module(m)?;
     qis::register_qis_module(m)?;
+    visualization::register_visualization_module(m)?;
 
     Ok(())
 }
