@@ -337,6 +337,7 @@ fn ion_trap_direct_ising_rules_pass_layered_verify() {
     for name in [
         "decompose_cz_to_rx_ry_rzz",
         "decompose_cx_to_rx_ry_rzz",
+        "decompose_cy_to_rx_ry_rzz",
         "decompose_rxx_to_rx_ry_rzz",
         "decompose_ryy_to_rx_ry_rzz",
         "decompose_rzx_to_rx_ry_rzz",
@@ -344,6 +345,68 @@ fn ion_trap_direct_ising_rules_pass_layered_verify() {
         "decompose_crx_to_rx_ry_rzz",
         "decompose_cry_to_rx_ry_rzz",
         "decompose_fsim_to_rx_ry_rzz",
+        "decompose_swap_to_rx_ry_rzz",
+    ] {
+        let rule = library.get_by_name(name).expect(name);
+        assert_rule_verification_passes(rule);
+    }
+}
+
+#[test]
+fn ion_trap_direct_ccx_rules_pass_layered_verify() {
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for name in ["decompose_ccx_to_rx_ry_rzz"] {
+        let rule = library.get_by_name(name).expect(name);
+        assert_rule_verification_passes(rule);
+    }
+}
+
+#[test]
+fn ion_trap_direct_mc_gate_rules_pass_layered_verify() {
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for name in [
+        "decompose_mch0_to_rx_ry",
+        "decompose_mcrxx0_to_rx_ry_rzz",
+        "decompose_mcrxy0_to_rx_ry",
+        "decompose_mcryy0_to_rx_ry_rzz",
+        "decompose_mcrz0_to_rx_ry",
+        "decompose_mcrzx0_to_rx_ry_rzz",
+        "decompose_mcs0_to_rx_ry",
+        "decompose_mcsdg0_to_rx_ry",
+        "decompose_mcswap0_to_rx_ry_rzz",
+        "decompose_mct0_to_rx_ry",
+        "decompose_mctdg0_to_rx_ry",
+        "decompose_mcu0_to_rx_ry",
+        "decompose_mcx0_to_rx",
+        "decompose_mcxy0_to_rx_ry",
+        "decompose_mcx2p0_to_rx",
+        "decompose_mcx2m0_to_rx",
+        "decompose_mcxy2p0_to_rx_ry",
+        "decompose_mcxy2m0_to_rx_ry",
+        "decompose_mcy0_to_ry",
+        "decompose_mcy2p0_to_ry",
+        "decompose_mcy2m0_to_ry",
+        "decompose_mcz0_to_rx_ry",
+        "decompose_mcphase0_to_rx_ry",
+        "decompose_mccx0_to_rx_ry_rzz",
+        "decompose_mcccx0_to_rx_ry_rzz",
+        "decompose_mccy0_to_rx_ry_rzz",
+        "decompose_mccz0_to_rx_ry_rzz",
+        "decompose_mcfsim0_to_rx_ry_rzz",
+        "decompose_mcx1_to_rx_ry_rzz",
+        "decompose_mcx2_to_rx_ry_rzz",
+        "decompose_mcy1_to_rx_ry_rzz",
+        "decompose_mcz1_to_rx_ry_rzz",
+        "decompose_mcrx1_to_rx_ry_rzz",
+        "decompose_mcry1_to_rx_ry_rzz",
+        "decompose_mcrz1_to_rx_ry_rzz",
+        "decompose_mcy2_to_rx_ry_rzz",
+        "decompose_mcz2_to_rx_ry_rzz",
+        "decompose_mcs1_to_rx_ry_rzz",
+        "decompose_mcsdg1_to_rx_ry_rzz",
+        "decompose_mct1_to_rx_ry_rzz",
+        "decompose_mctdg1_to_rx_ry_rzz",
+        "decompose_mcphase1_to_rx_ry_rzz",
     ] {
         let rule = library.get_by_name(name).expect(name);
         assert_rule_verification_passes(rule);
@@ -360,6 +423,7 @@ fn ion_trap_direct_single_rotation_rules_pass_layered_verify() {
         "decompose_t_to_rx_ry",
         "decompose_tdg_to_rx_ry",
         "decompose_z_to_rx_ry",
+        "decompose_phase_to_rx_ry",
         "decompose_rxy_to_rx_ry",
         "decompose_xy_to_rx_ry",
         "decompose_xy2p_to_rx_ry",
@@ -456,6 +520,7 @@ fn ion_trap_rzz_intermediate_rules_are_present() {
         "decompose_swap_to_ising",
         "decompose_cz_to_rx_ry_rzz",
         "decompose_cx_to_rx_ry_rzz",
+        "decompose_cy_to_rx_ry_rzz",
         "decompose_rxx_to_rx_ry_rzz",
         "decompose_ryy_to_rx_ry_rzz",
         "decompose_rzx_to_rx_ry_rzz",
@@ -463,6 +528,8 @@ fn ion_trap_rzz_intermediate_rules_are_present() {
         "decompose_crx_to_rx_ry_rzz",
         "decompose_cry_to_rx_ry_rzz",
         "decompose_fsim_to_rx_ry_rzz",
+        "decompose_swap_to_rx_ry_rzz",
+        "decompose_ccx_to_rx_ry_rzz",
     ] {
         assert!(
             library.get_by_name(name).is_some(),

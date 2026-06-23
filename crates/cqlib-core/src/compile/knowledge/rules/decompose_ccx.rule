@@ -40,3 +40,24 @@ rule decompose_ccx_to_cz {
         H 1
     }
 }
+
+rule decompose_ccx_to_rx_ry_rzz {
+    match { CCX 0 1 2 }
+    rewrite {
+        RY(π/2) 2, RX(π) 2, GPhase(π/2),
+        RY(π/2) 2, RX(π) 2, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RX(-π/2) 2, RY(π/2) 2, RX(π/2) 2, RZZ(-π/2) 1 2, RY(π/2) 2, RX(π) 2, GPhase(π),
+        RX(-π/2) 2, RY(-π/4) 2, RX(π/2) 2, GPhase(-π/8),
+        RY(π/2) 2, RX(π) 2, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 2, RY(π/2) 2, RX(π/2) 2, RZZ(-π/2) 0 2, RY(π/2) 2, RX(π) 2, GPhase(π),
+        RX(-π/2) 2, RY(π/4) 2, RX(π/2) 2, GPhase(π/8),
+        RY(π/2) 2, RX(π) 2, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RX(-π/2) 2, RY(π/2) 2, RX(π/2) 2, RZZ(-π/2) 1 2, RY(π/2) 2, RX(π) 2, GPhase(π),
+        RX(-π/2) 2, RY(-π/4) 2, RX(π/2) 2, GPhase(-π/8),
+        RY(π/2) 2, RX(π) 2, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 2, RY(π/2) 2, RX(π/2) 2, RZZ(-π/2) 0 2, RY(π/2) 2, RX(π) 2, GPhase(π),
+        RX(-π/2) 1, RY(π/4) 1, RX(π/2) 1, GPhase(π/8),
+        RX(-π/2) 2, RY(π/4) 2, RX(π/2) 2, GPhase(π/8),
+        RY(π/2) 2, RX(π) 2, GPhase(π/2),
+        RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, GPhase(π),
+        RX(-π/2) 0, RY(π/4) 0, RX(π/2) 0, GPhase(π/8),
+        RX(-π/2) 1, RY(-π/4) 1, RX(π/2) 1, GPhase(-π/8),
+        RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, GPhase(π)
+    }
+}

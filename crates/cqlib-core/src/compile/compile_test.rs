@@ -1075,6 +1075,27 @@ fn compile_lowers_ccx_to_clifford_t_cz_basis() {
 }
 
 #[test]
+fn compile_lowers_ccx_to_ion_trap_rx_ry_rzz_basis() {
+    let circuit = {
+        let mut circuit = Circuit::new(3);
+        circuit
+            .ccx(Qubit::new(0), Qubit::new(1), Qubit::new(2))
+            .unwrap();
+        circuit
+    };
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
+        StandardGate::GPhase,
+    ];
+
+    let result = compile_to_basis_checked(&circuit, &basis);
+
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CCX));
+}
+
+#[test]
 fn compile_lowers_two_qubit_suite_to_cx_native_basis() {
     let circuit = two_qubit_gate_suite_without_fsim();
     let basis = vec![
@@ -1102,6 +1123,19 @@ fn compile_lowers_two_qubit_suite_to_cz_native_basis() {
         StandardGate::RY,
         StandardGate::RZ,
         StandardGate::CZ,
+        StandardGate::GPhase,
+    ];
+
+    compile_to_basis_checked(&circuit, &basis);
+}
+
+#[test]
+fn compile_lowers_two_qubit_suite_to_ion_trap_rx_ry_rzz_basis() {
+    let circuit = two_qubit_gate_suite();
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
         StandardGate::GPhase,
     ];
 
@@ -1168,6 +1202,21 @@ fn compile_lowers_swap_to_ising_exchange_basis() {
     let result = compile_to_basis_checked(&circuit, &basis);
 
     assert!(standard_ops(&result.circuit).contains(&StandardGate::RXX));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+}
+
+#[test]
+fn compile_lowers_swap_to_ion_trap_rx_ry_rzz_basis() {
+    let circuit = swap_gate_suite();
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
+        StandardGate::GPhase,
+    ];
+
+    let result = compile_to_basis_checked(&circuit, &basis);
+
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::SWAP));
 }
 
@@ -1239,6 +1288,22 @@ fn compile_lowers_fsim_to_ion_trap_rx_ry_rzz_basis() {
 fn compile_lowers_multi_controlled_suite_to_qcis_cz_basis() {
     let circuit = multi_controlled_gate_suite();
     let basis = qcis_cz_basis();
+    let result = compile_to_basis_checked(&circuit, &basis);
+
+    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(!contains_high_level_gate(&result.circuit));
+}
+
+#[test]
+fn compile_lowers_multi_controlled_suite_to_ion_trap_rx_ry_rzz_basis() {
+    let circuit = multi_controlled_gate_suite();
+    let basis = vec![
+        StandardGate::RX,
+        StandardGate::RY,
+        StandardGate::RZZ,
+        StandardGate::GPhase,
+    ];
+
     let result = compile_to_basis_checked(&circuit, &basis);
 
     assert!(step_changed(&result, "decompose.mc_gates"));
