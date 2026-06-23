@@ -20,7 +20,7 @@ pub mod error_mitigation;
 pub mod ir;
 pub mod qis;
 pub(crate) mod util;
-// pub mod visualization;
+pub mod visualization;
 
 pub use error_mitigation::ErrorMitigation;
 pub use error_mitigation::ErrorMitigationError;

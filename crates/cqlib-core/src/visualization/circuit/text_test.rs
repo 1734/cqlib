@@ -12,12 +12,10 @@
 
 use super::*;
 use crate::circuit::circuit_param::ParameterValue;
-use crate::circuit::{Circuit, Parameter, Qubit};
-use crate::circuit::{ConditionView, Directive, Instruction, Operation, StandardGate};
-use crate::visualization::circuit::builder::build_visual_circuit;
+use crate::circuit::{Circuit, ClassicalExpr, ClassicalType, Parameter, Qubit};
+use crate::visualization::circuit::layout::build_visual_circuit;
 use crate::visualization::circuit::text::draw_text_from_visual;
 use crate::visualization::circuit::{ParameterDisplayMode, VisualBuildOptions};
-use smallvec::smallvec;
 use std::f64::consts::PI;
 
 fn norm(s: &str) -> String {
@@ -36,6 +34,17 @@ fn norm(s: &str) -> String {
 
 fn assert_diagram(actual: &str, expected: &str) {
     assert_eq!(norm(actual), norm(expected));
+}
+
+#[test]
+fn text_drawer_options_default_matches_public_api() {
+    let options = TextDrawerOptions::default();
+
+    assert!(options.show_params);
+    assert!(!options.decompose_circuit_gates);
+    assert_eq!(options.line_width, 80);
+    assert!(!options.initial_state);
+    assert!(!options.reverse_bits);
 }
 
 #[test]
@@ -259,22 +268,18 @@ fn test_reverse_bits() {
 #[test]
 fn test_if_label() {
     let mut circuit = Circuit::new(2);
-    let condition = ConditionView::new(Qubit::new(0), 1);
-    let body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::X),
-        qubits: smallvec![Qubit::new(1)],
-        params: smallvec![],
-        label: None,
-    }];
-    circuit.if_else(condition, body, None).unwrap();
+    let condition = ClassicalExpr::bool_literal(true);
+    circuit
+        .if_(condition, |body| body.x(Qubit::new(1)))
+        .unwrap();
 
     let text = circuit_to_text(&circuit, &TextDrawerOptions::default()).unwrap();
     let resp = r#"
-        ┌───────────┐     ┌───────┐ 
- Q0: ───┤           ├─────┤       ├─
-        │ If q0=1-0 │     │ End-0 │ 
- Q1: ───┤           ├──X──┤       ├─
-        └───────────┘     └───────┘ 
+
+ Q0: ───────────────────────────────
+        ┌───────────┐     ┌───────┐
+ Q1: ───┤ If-0 true ├──X──┤ End-0 ├─
+        └───────────┘     └───────┘
 
 "#;
     assert_diagram(&text, resp);
@@ -284,30 +289,22 @@ fn test_if_label() {
 fn test_if_else() {
     let mut circuit = Circuit::new(2);
     circuit.measure(Qubit::new(0)).unwrap();
-    let condition = ConditionView::new(Qubit::new(0), 0);
-    let true_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::X),
-        qubits: smallvec![Qubit::new(1)],
-        params: smallvec![],
-        label: None,
-    }];
-    let false_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::Z),
-        qubits: smallvec![Qubit::new(1)],
-        params: smallvec![],
-        label: None,
-    }];
+    let condition = ClassicalExpr::bool_literal(false);
     circuit
-        .if_else(condition, true_body, Some(false_body))
+        .if_else(
+            condition,
+            |body| body.x(Qubit::new(1)),
+            |body| body.z(Qubit::new(1)),
+        )
         .unwrap();
 
     let text = circuit_to_text(&circuit, &TextDrawerOptions::default()).unwrap();
     let resp = r#"
-           ┌───────────┐     ┌────────┐     ┌───────┐ 
- Q0: ───M──┤           ├─────┤        ├─────┤       ├─
-           │ If q0=0-0 │     │ Else-0 │     │ End-0 │ 
- Q1: ──────┤           ├──X──┤        ├──Z──┤       ├─
-           └───────────┘     └────────┘     └───────┘ 
+
+ Q0: ───M──────────────────────────────────────────────
+           ┌────────────┐     ┌────────┐     ┌───────┐
+ Q1: ──────┤ If-0 false ├──X──┤ Else-0 ├──Z──┤ End-0 ├─
+           └────────────┘     └────────┘     └───────┘
 
 "#;
     assert_diagram(&text, resp);
@@ -316,36 +313,79 @@ fn test_if_else() {
 #[test]
 fn test_while() {
     let mut circuit = Circuit::new(2);
-    let condition = ConditionView::new(Qubit::new(0), 0);
-    let body = vec![
-        Operation {
-            instruction: Instruction::Standard(StandardGate::H),
-            qubits: smallvec![Qubit::new(0)],
-            params: smallvec![],
-            label: None,
-        },
-        Operation {
-            instruction: Instruction::Standard(StandardGate::CX),
-            qubits: smallvec![Qubit::new(0), Qubit::new(1)],
-            params: smallvec![],
-            label: None,
-        },
-        Operation {
-            instruction: Instruction::Directive(Directive::Measure),
-            qubits: smallvec![Qubit::new(0)],
-            params: smallvec![],
-            label: None,
-        },
-    ];
-    circuit.while_loop(condition, body).unwrap();
+    let condition = ClassicalExpr::bool_literal(false);
+    circuit
+        .while_(condition, |body| {
+            body.h(Qubit::new(0))?;
+            body.cx(Qubit::new(0), Qubit::new(1))?;
+            body.measure(Qubit::new(0)).map(|_| ())
+        })
+        .unwrap();
 
     let text = circuit_to_text(&circuit, &TextDrawerOptions::default()).unwrap();
     let resp = r#"
-        ┌──────────────┐           ┌───────┐ 
- Q0: ───┤              ├──H──■──M──┤       ├─
-        │ While q0=0-0 │     │     │ End-0 │ 
- Q1: ───┤              ├─────X─────┤       ├─
-        └──────────────┘           └───────┘ 
+        ┌───────────────┐           ┌───────┐ 
+ Q0: ───┤               ├──H──■──M──┤       ├─
+        │ While-0 false │     │     │ End-0 │ 
+ Q1: ───┤               ├─────X─────┤       ├─
+        └───────────────┘           └───────┘ 
+
+"#;
+    assert_diagram(&text, resp);
+}
+
+#[test]
+fn test_for_switch_break_continue_markers() {
+    let mut circuit = Circuit::new(2);
+    circuit.h(Qubit::new(1)).unwrap();
+    let loop_var = circuit.var(ClassicalType::uint(3).unwrap());
+    circuit
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(3, 0).unwrap(),
+            ClassicalExpr::uint_literal(3, 3).unwrap(),
+            ClassicalExpr::uint_literal(3, 1).unwrap(),
+            |body, _| body.x(Qubit::new(0)),
+        )
+        .unwrap();
+    circuit
+        .switch(ClassicalExpr::uint_literal(2, 1).unwrap(), |cases| {
+            cases.value(0, |body| body.h(Qubit::new(0)))?;
+            cases.default(|body| body.z(Qubit::new(0)))
+        })
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(Qubit::new(0))?;
+            body.break_loop()
+        })
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(Qubit::new(0))?;
+            body.continue_loop()
+        })
+        .unwrap();
+
+    let text = circuit_to_text(&circuit, &TextDrawerOptions::default()).unwrap();
+    let resp = r#"
+           ┌──────────────────┐     ┌───────┐  ┌────────────┐  ┌──────────┐    »
+ Q0: ──────┤ For-0 range(0,3) ├──X──┤ End-0 ├──┤ Switch-1 1 ├──┤ Case-1 0 ├──H─»
+           └──────────────────┘     └───────┘  └────────────┘  └──────────┘    »
+ Q1: ───H──────────────────────────────────────────────────────────────────────»
+                                                                               »
+
+«        ┌───────────┐     ┌───────┐  ┌──────────────┐     ┌───────┐  ┌───────┐ »
+« Q0: ───┤ Default-1 ├──Z──┤ End-1 ├──┤ While-2 true ├──X──┤ Break ├──┤ End-2 ├─»
+«        └───────────┘     └───────┘  └──────────────┘     └───────┘  └───────┘ »
+« Q1: ──────────────────────────────────────────────────────────────────────────»
+«                                                                               »
+
+«        ┌──────────────┐     ┌──────────┐  ┌───────┐
+« Q0: ───┤ While-3 true ├──X──┤ Continue ├──┤ End-3 ├─
+«        └──────────────┘     └──────────┘  └───────┘
+« Q1: ────────────────────────────────────────────────
+«
 
 "#;
     assert_diagram(&text, resp);

@@ -10,10 +10,9 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! # Visualization IR Builder
+//! Visualization IR builder.
 //!
-//! This module converts [`Circuit`](crate::circuit::Circuit) operations into
-//! backend-agnostic [`VisualCircuit`](crate::visualization::VisualCircuit) IR.
+//! This module converts [`Circuit`] operations into backend-agnostic [`VisualCircuit`] IR.
 //!
 //! The builder is responsible for:
 //! - mapping qubits to lanes,
@@ -22,18 +21,21 @@
 //! - scheduling operations into non-overlapping columns.
 
 use crate::circuit::gate::{Directive, Instruction, StandardGate};
-use crate::circuit::{Circuit, ControlFlow, Operation, Qubit};
-use crate::visualization::circuit::error::VisualizationError;
-use crate::visualization::circuit::model::{
+use crate::circuit::{
+    Circuit, ClassicalControlOp, ClassicalDataOp, ClassicalExpr, ClassicalExprKind, Operation,
+    Qubit,
+};
+use crate::visualization::VisualizationError;
+use crate::visualization::circuit::ir::{
     VisualChildren, VisualCircuit, VisualCondition, VisualControlFlowKind, VisualOpStyle,
     VisualOperation,
 };
-use crate::visualization::circuit::parameter_formatter::{
-    ParameterFormatOptions, ParameterFormatter,
-};
+use crate::visualization::circuit::params::{ParameterFormatOptions, ParameterFormatter};
 use std::collections::HashMap;
 
 /// Build-time options for visualization IR.
+///
+/// These options affect IR construction only and are shared by text and figure backends.
 #[derive(Debug, Clone, Copy)]
 pub struct VisualBuildOptions {
     /// If true, decompose circuit-gates before layout.
@@ -65,7 +67,7 @@ impl Default for VisualBuildOptions {
 ///
 /// Returns [`VisualizationError`] when operations reference unknown qubits or invalid parameter indices.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use cqlib_core::circuit::{Circuit, Qubit};
@@ -120,10 +122,10 @@ fn build_visual_circuit_from_ops(
             .collect::<Result<Vec<_>, _>>()?;
         let (style, label, span_box) = classify_instruction(&op.instruction)?;
         let children = build_children_for_instruction(source, qubits, &op.instruction, options)?;
-        let span_cols = estimate_span_cols(style, children.as_ref());
+        let span_cols = estimate_span_cols(&style, children.as_ref());
         let covered_lanes = compute_covered_lanes(
             &lanes,
-            style,
+            &style,
             qubits.len(),
             options.reserve_full_span_for_multi_qubit,
         );
@@ -154,60 +156,117 @@ fn build_visual_circuit_from_ops(
     })
 }
 
+/// Build nested visual children for structured control-flow instructions.
+///
+/// Child circuits keep the parent's qubit lane list so branch/body drawings stay aligned
+/// with the surrounding circuit, even when a child only touches a subset of qubits.
 fn build_children_for_instruction(
     source: &Circuit,
     parent_qubits: &[Qubit],
     instruction: &Instruction,
     options: &VisualBuildOptions,
 ) -> Result<Option<VisualChildren>, VisualizationError> {
-    let children = match instruction {
-        Instruction::ControlFlowGate(flow) => Some(build_children_for_flow(
-            source,
-            parent_qubits,
-            flow,
-            options,
-        )?),
-        _ => None,
-    };
-    Ok(children)
+    match instruction {
+        Instruction::ClassicalControl(flow) => {
+            build_children_for_flow(source, parent_qubits, flow, options)
+        }
+        _ => Ok(None),
+    }
 }
 
+/// Convert a classical-control operation into visual child IR.
+///
+/// The source circuit is reused for parameter lookup, while operations come from the
+/// control-flow body being rendered.
 fn build_children_for_flow(
     source: &Circuit,
     parent_qubits: &[Qubit],
-    flow: &ControlFlow,
+    flow: &ClassicalControlOp,
     options: &VisualBuildOptions,
-) -> Result<VisualChildren, VisualizationError> {
+) -> Result<Option<VisualChildren>, VisualizationError> {
     match flow {
-        ControlFlow::IfElse(gate) => {
-            let then_circuit =
-                build_visual_circuit_from_ops(source, parent_qubits, gate.true_body(), options)?;
-            let else_circuit = if let Some(body) = gate.false_body() {
+        ClassicalControlOp::If(gate) => {
+            let then_circuit = build_visual_circuit_from_ops(
+                source,
+                parent_qubits,
+                gate.then_body().operations(),
+                options,
+            )?;
+            let else_circuit = if let Some(body) = gate.else_body() {
                 Some(Box::new(build_visual_circuit_from_ops(
                     source,
                     parent_qubits,
-                    body,
+                    body.operations(),
                     options,
                 )?))
             } else {
                 None
             };
-            Ok(VisualChildren::IfElse {
+            Ok(Some(VisualChildren::IfElse {
                 then_circuit: Box::new(then_circuit),
                 else_circuit,
-            })
+            }))
         }
-        ControlFlow::WhileLoop(gate) => {
-            let body_circuit =
-                build_visual_circuit_from_ops(source, parent_qubits, gate.body(), options)?;
-            Ok(VisualChildren::While {
+        ClassicalControlOp::While(gate) => {
+            let body_circuit = build_visual_circuit_from_ops(
+                source,
+                parent_qubits,
+                gate.body().operations(),
+                options,
+            )?;
+            Ok(Some(VisualChildren::While {
                 body_circuit: Box::new(body_circuit),
-            })
+            }))
         }
+        ClassicalControlOp::For(gate) => {
+            let body_circuit = build_visual_circuit_from_ops(
+                source,
+                parent_qubits,
+                gate.body().operations(),
+                options,
+            )?;
+            Ok(Some(VisualChildren::For {
+                body_circuit: Box::new(body_circuit),
+            }))
+        }
+        ClassicalControlOp::Switch(gate) => {
+            let mut case_circuits = Vec::with_capacity(gate.cases().len());
+            for case in gate.cases() {
+                case_circuits.push((
+                    case.value().to_string(),
+                    Box::new(build_visual_circuit_from_ops(
+                        source,
+                        parent_qubits,
+                        case.body().operations(),
+                        options,
+                    )?),
+                ));
+            }
+            let default_circuit = if let Some(body) = gate.default() {
+                Some(Box::new(build_visual_circuit_from_ops(
+                    source,
+                    parent_qubits,
+                    body.operations(),
+                    options,
+                )?))
+            } else {
+                None
+            };
+            Ok(Some(VisualChildren::Switch {
+                case_circuits,
+                default_circuit,
+            }))
+        }
+        ClassicalControlOp::Break | ClassicalControlOp::Continue => Ok(None),
     }
 }
 
-fn estimate_span_cols(style: VisualOpStyle, children: Option<&VisualChildren>) -> usize {
+/// Estimate how many logical columns a visual operation must reserve.
+///
+/// Ordinary operations occupy one column. Control-flow blocks reserve enough columns for
+/// visible branch/body children plus small margins and separators so later operations do
+/// not overlap the expanded drawing.
+fn estimate_span_cols(style: &VisualOpStyle, children: Option<&VisualChildren>) -> usize {
     if !matches!(style, VisualOpStyle::ControlFlow { .. }) {
         return 1;
     }
@@ -230,10 +289,34 @@ fn estimate_span_cols(style: VisualOpStyle, children: Option<&VisualChildren>) -
             let body_cols = body_circuit.num_columns.max(1);
             MARGIN + body_cols + MARGIN
         }
+        Some(VisualChildren::For { body_circuit }) => {
+            let body_cols = body_circuit.num_columns.max(1);
+            MARGIN + body_cols + MARGIN
+        }
+        Some(VisualChildren::Switch {
+            case_circuits,
+            default_circuit,
+        }) => {
+            let case_cols = case_circuits
+                .iter()
+                .map(|(_, circuit)| circuit.num_columns.max(1))
+                .sum::<usize>();
+            let default_cols = default_circuit
+                .as_ref()
+                .map(|circuit| circuit.num_columns.max(1))
+                .unwrap_or(0);
+            let branch_count = case_circuits.len() + usize::from(default_circuit.is_some());
+            let separators = branch_count.saturating_sub(1) * SEP;
+            MARGIN + case_cols + default_cols + separators + MARGIN
+        }
         None => 3,
     }
 }
 
+/// Map operation qubits to visual lane indices.
+///
+/// The returned order matches the operation operand order, which is important for controls,
+/// targets, and measurement labels.
 fn map_lanes(
     op: &Operation,
     qubit_to_lane: &HashMap<Qubit, usize>,
@@ -248,6 +331,10 @@ fn map_lanes(
     Ok(lanes)
 }
 
+/// Classify a circuit instruction into draw style, label, and span-box policy.
+///
+/// The classification is intentionally rendering-agnostic; text and figure backends consume
+/// the same [`VisualOpStyle`] and labels.
 fn classify_instruction(
     instruction: &Instruction,
 ) -> Result<(VisualOpStyle, String, bool), VisualizationError> {
@@ -303,13 +390,21 @@ fn classify_instruction(
             Ok((VisualOpStyle::Reset, "R".to_string(), false))
         }
         Instruction::Delay => Ok((VisualOpStyle::Delay, "D".to_string(), false)),
-        Instruction::ControlFlowGate(flow) => {
+        Instruction::ClassicalControl(flow) => {
             let (style, label) = classify_control_flow(flow);
             Ok((style, label, false))
+        }
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+        | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => {
+            Ok((VisualOpStyle::Measure, "M".to_string(), false))
+        }
+        Instruction::ClassicalData(ClassicalDataOp::Store { .. }) => {
+            Ok((VisualOpStyle::Gate, "STORE".to_string(), true))
         }
     }
 }
 
+/// Use a stable fallback label for unnamed module-like gates.
 fn fallback_if_empty(label: &str, default_label: &str) -> String {
     let trimmed = label.trim();
     if trimmed.is_empty() {
@@ -319,41 +414,97 @@ fn fallback_if_empty(label: &str, default_label: &str) -> String {
     }
 }
 
-fn classify_control_flow(flow: &ControlFlow) -> (VisualOpStyle, String) {
+/// Build a compact label and style marker for structured classical control flow.
+fn classify_control_flow(flow: &ClassicalControlOp) -> (VisualOpStyle, String) {
     match flow {
-        ControlFlow::IfElse(gate) => {
-            let cond = gate.condition();
-            let has_false_branch = gate.false_body().is_some();
+        ClassicalControlOp::If(gate) => {
+            let condition = VisualCondition {
+                label: classical_expr_label(gate.condition()),
+            };
+            let has_false_branch = gate.else_body().is_some();
             (
                 VisualOpStyle::ControlFlow {
                     kind: VisualControlFlowKind::IfElseBlock {
                         has_false_branch,
-                        condition: VisualCondition {
-                            qubit_id: cond.qubit.id() as usize,
-                            target: cond.target,
-                        },
+                        condition: condition.clone(),
                     },
                 },
-                format!("IF q{}={}", cond.qubit.id(), cond.target),
+                format!("IF {}", condition.label),
             )
         }
-        ControlFlow::WhileLoop(gate) => {
-            let cond = gate.condition();
+        ClassicalControlOp::While(gate) => {
+            let condition = VisualCondition {
+                label: classical_expr_label(gate.condition()),
+            };
             (
                 VisualOpStyle::ControlFlow {
                     kind: VisualControlFlowKind::WhileBlock {
-                        condition: VisualCondition {
-                            qubit_id: cond.qubit.id() as usize,
-                            target: cond.target,
-                        },
+                        condition: condition.clone(),
                     },
                 },
-                format!("WH q{}={}", cond.qubit.id(), cond.target),
+                format!("WH {}", condition.label),
             )
         }
+        ClassicalControlOp::For(gate) => {
+            let range = VisualCondition {
+                label: format!(
+                    "range({},{})",
+                    classical_expr_label(gate.start()),
+                    classical_expr_label(gate.stop()),
+                ),
+            };
+            (
+                VisualOpStyle::ControlFlow {
+                    kind: VisualControlFlowKind::ForBlock {
+                        range: range.clone(),
+                    },
+                },
+                format!("FOR {}", range.label),
+            )
+        }
+        ClassicalControlOp::Switch(gate) => {
+            let target = VisualCondition {
+                label: classical_expr_label(gate.target()),
+            };
+            (
+                VisualOpStyle::ControlFlow {
+                    kind: VisualControlFlowKind::SwitchBlock {
+                        target: target.clone(),
+                    },
+                },
+                format!("SW {}", target.label),
+            )
+        }
+        ClassicalControlOp::Break => (
+            VisualOpStyle::ControlFlow {
+                kind: VisualControlFlowKind::Break,
+            },
+            "Break".to_string(),
+        ),
+        ClassicalControlOp::Continue => (
+            VisualOpStyle::ControlFlow {
+                kind: VisualControlFlowKind::Continue,
+            },
+            "Continue".to_string(),
+        ),
     }
 }
 
+/// Format classical expressions for compact display in control-flow labels.
+///
+/// Unsupported expression shapes fall back to `Debug` so visualization remains available
+/// while preserving enough detail for inspection.
+fn classical_expr_label(expr: &ClassicalExpr) -> String {
+    match expr.kind() {
+        ClassicalExprKind::BoolLiteral(value) => value.to_string(),
+        ClassicalExprKind::BitLiteral(value) => format!("bit({value})"),
+        ClassicalExprKind::UIntLiteral { value, .. } => value.to_string(),
+        ClassicalExprKind::BitVecLiteral { value, .. } => format!("bits({value})"),
+        _ => format!("{expr:?}"),
+    }
+}
+
+/// Choose the target label for controlled standard gates.
 fn controlled_target_label_for_standard(gate: StandardGate) -> String {
     match gate {
         StandardGate::CX | StandardGate::CCX => "X".to_string(),
@@ -365,9 +516,14 @@ fn controlled_target_label_for_standard(gate: StandardGate) -> String {
     }
 }
 
+/// Determine which lanes must be reserved for column scheduling.
+///
+/// Multi-qubit gates usually reserve their full vertical span so wires and boxes do not
+/// collide with unrelated operations placed between their operands. Control-flow blocks
+/// reserve every lane because their child region spans the full circuit display.
 fn compute_covered_lanes(
     lanes: &[usize],
-    style: VisualOpStyle,
+    style: &VisualOpStyle,
     num_qubits: usize,
     reserve_full_span: bool,
 ) -> Vec<usize> {
@@ -387,6 +543,10 @@ fn compute_covered_lanes(
         return lanes.to_vec();
     }
 
+    if matches!(style, VisualOpStyle::ControlFlow { .. }) {
+        return (0..num_qubits).collect();
+    }
+
     if lanes.is_empty() {
         return vec![0];
     }
@@ -400,6 +560,7 @@ fn compute_covered_lanes(
     lanes.to_vec()
 }
 
+/// Find the earliest column that is free on every covered lane.
 fn compute_column(covered_lanes: &[usize], next_free: &[usize]) -> usize {
     let mut column = 0usize;
     for lane in covered_lanes {
@@ -408,6 +569,7 @@ fn compute_column(covered_lanes: &[usize], next_free: &[usize]) -> usize {
     column
 }
 
+/// Public-facing gate label used by visualization backends.
 fn standard_gate_label(gate: StandardGate) -> String {
     match gate {
         StandardGate::SDG => "SD".to_string(),
@@ -417,6 +579,7 @@ fn standard_gate_label(gate: StandardGate) -> String {
     }
 }
 
+/// Remove leading control markers from labels such as `CRX` when drawing the target box.
 fn strip_control_prefix(label: &str) -> String {
     let mut out = label.to_string();
     while out.starts_with('C') && out.len() > 1 {

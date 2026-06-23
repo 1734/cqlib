@@ -15,6 +15,7 @@
 use super::*;
 use crate::circuit::Qubit;
 use crate::visualization::VisualCondition;
+use crate::visualization::circuit::ir::flatten_control_flow_visual;
 
 #[test]
 fn test_visual_op_style_clone() {
@@ -67,8 +68,7 @@ fn test_visual_control_flow_kind_clone() {
     let if_else = VisualControlFlowKind::IfElseBlock {
         has_false_branch: true,
         condition: VisualCondition {
-            qubit_id: 0,
-            target: 1,
+            label: "true".to_string(),
         },
     };
     let cloned = if_else.clone();
@@ -76,8 +76,7 @@ fn test_visual_control_flow_kind_clone() {
 
     let while_block = VisualControlFlowKind::WhileBlock {
         condition: VisualCondition {
-            qubit_id: 1,
-            target: 0,
+            label: "false".to_string(),
         },
     };
     let while_clone = while_block.clone();
@@ -87,37 +86,34 @@ fn test_visual_control_flow_kind_clone() {
 #[test]
 fn test_visual_control_flow_kind_equality() {
     let cond1 = VisualCondition {
-        qubit_id: 0,
-        target: 1,
+        label: "true".to_string(),
     };
     let cond2 = VisualCondition {
-        qubit_id: 0,
-        target: 1,
+        label: "true".to_string(),
     };
     let cond3 = VisualCondition {
-        qubit_id: 0,
-        target: 0,
+        label: "false".to_string(),
     };
 
     assert_eq!(
         VisualControlFlowKind::IfElseBlock {
             has_false_branch: true,
-            condition: cond1
+            condition: cond1.clone()
         },
         VisualControlFlowKind::IfElseBlock {
             has_false_branch: true,
-            condition: cond2
+            condition: cond2.clone()
         }
     );
 
     assert_ne!(
         VisualControlFlowKind::IfElseBlock {
             has_false_branch: true,
-            condition: cond1
+            condition: cond1.clone()
         },
         VisualControlFlowKind::IfElseBlock {
             has_false_branch: false,
-            condition: cond2
+            condition: cond2.clone()
         }
     );
 
@@ -133,21 +129,18 @@ fn test_visual_control_flow_kind_all_variants() {
         VisualControlFlowKind::IfElseBlock {
             has_false_branch: true,
             condition: VisualCondition {
-                qubit_id: 0,
-                target: 1,
+                label: "true".to_string(),
             },
         },
         VisualControlFlowKind::IfElseBlock {
             has_false_branch: false,
             condition: VisualCondition {
-                qubit_id: 0,
-                target: 0,
+                label: "false".to_string(),
             },
         },
         VisualControlFlowKind::WhileBlock {
             condition: VisualCondition {
-                qubit_id: 1,
-                target: 1,
+                label: "loop".to_string(),
             },
         },
         VisualControlFlowKind::IfStart,
@@ -163,32 +156,26 @@ fn test_visual_control_flow_kind_all_variants() {
 }
 
 #[test]
-fn test_visual_condition_clone_copy() {
+fn test_visual_condition_clone() {
     let cond = VisualCondition {
-        qubit_id: 5,
-        target: 1,
+        label: "condition".to_string(),
     };
     let cloned = cond.clone();
     assert_eq!(cond, cloned);
 
-    let copied = cond;
-    assert_eq!(copied.qubit_id, 5);
-    assert_eq!(copied.target, 1);
+    assert_eq!(cloned.label, "condition");
 }
 
 #[test]
 fn test_visual_condition_equality() {
     let cond1 = VisualCondition {
-        qubit_id: 0,
-        target: 1,
+        label: "true".to_string(),
     };
     let cond2 = VisualCondition {
-        qubit_id: 0,
-        target: 1,
+        label: "true".to_string(),
     };
     let cond3 = VisualCondition {
-        qubit_id: 0,
-        target: 0,
+        label: "false".to_string(),
     };
 
     assert_eq!(cond1, cond2);
@@ -238,8 +225,7 @@ fn test_visual_operation_with_children() {
             kind: VisualControlFlowKind::IfElseBlock {
                 has_false_branch: false,
                 condition: VisualCondition {
-                    qubit_id: 0,
-                    target: 1,
+                    label: "true".to_string(),
                 },
             },
         },
@@ -424,11 +410,269 @@ fn test_visual_operation_debug_format() {
 #[test]
 fn test_visual_condition_debug_format() {
     let cond = VisualCondition {
-        qubit_id: 3,
-        target: 1,
+        label: "condition".to_string(),
     };
     let debug_str = format!("{cond:?}");
     assert!(debug_str.contains("VisualCondition"));
-    assert!(debug_str.contains("qubit_id: 3"));
-    assert!(debug_str.contains("target: 1"));
+    assert!(debug_str.contains("condition"));
+}
+
+fn test_qubits(count: usize) -> Vec<Qubit> {
+    (0..count)
+        .map(|idx| Qubit::new(u32::try_from(idx).unwrap()))
+        .collect()
+}
+
+fn test_visual_circuit(num_qubits: usize, operations: Vec<VisualOperation>) -> VisualCircuit {
+    VisualCircuit {
+        qubits: test_qubits(num_qubits),
+        num_columns: operations.len(),
+        operations,
+    }
+}
+
+fn test_gate(lanes: Vec<usize>, label: &str) -> VisualOperation {
+    VisualOperation {
+        column: 0,
+        covered_lanes: lanes.clone(),
+        lanes,
+        label: label.to_string(),
+        params: Vec::new(),
+        style: VisualOpStyle::Gate,
+        span_box: false,
+        children: None,
+        span_cols: 1,
+    }
+}
+
+fn test_control_transfer(
+    label: &str,
+    kind: VisualControlFlowKind,
+    num_qubits: usize,
+) -> VisualOperation {
+    VisualOperation {
+        column: 0,
+        lanes: Vec::new(),
+        covered_lanes: (0..num_qubits).collect(),
+        label: label.to_string(),
+        params: Vec::new(),
+        style: VisualOpStyle::ControlFlow { kind },
+        span_box: false,
+        children: None,
+        span_cols: 1,
+    }
+}
+
+fn test_if_op(
+    num_qubits: usize,
+    lanes: Vec<usize>,
+    then_circuit: VisualCircuit,
+    else_circuit: Option<VisualCircuit>,
+) -> VisualOperation {
+    VisualOperation {
+        column: 0,
+        lanes,
+        covered_lanes: (0..num_qubits).collect(),
+        label: "IF true".to_string(),
+        params: Vec::new(),
+        style: VisualOpStyle::ControlFlow {
+            kind: VisualControlFlowKind::IfElseBlock {
+                has_false_branch: else_circuit.is_some(),
+                condition: VisualCondition {
+                    label: "true".to_string(),
+                },
+            },
+        },
+        span_box: false,
+        children: Some(VisualChildren::IfElse {
+            then_circuit: Box::new(then_circuit),
+            else_circuit: else_circuit.map(Box::new),
+        }),
+        span_cols: 3,
+    }
+}
+
+fn covered_for_label<'a>(visual: &'a VisualCircuit, label: &str) -> &'a [usize] {
+    visual
+        .operations
+        .iter()
+        .find(|op| op.label == label)
+        .map(|op| op.covered_lanes.as_slice())
+        .unwrap_or_else(|| panic!("missing flattened operation {label}"))
+}
+
+fn column_for_label(visual: &VisualCircuit, label: &str) -> usize {
+    visual
+        .operations
+        .iter()
+        .find(|op| op.label == label)
+        .map(|op| op.column)
+        .unwrap_or_else(|| panic!("missing flattened operation {label}"))
+}
+
+#[test]
+fn flatten_if_markers_prefer_then_body_lanes() {
+    let then_circuit =
+        test_visual_circuit(3, vec![test_gate(vec![1], "X"), test_gate(vec![2], "Z")]);
+    let visual = test_visual_circuit(3, vec![test_if_op(3, vec![1, 2], then_circuit, None)]);
+
+    let flattened = flatten_control_flow_visual(&visual);
+
+    assert_eq!(covered_for_label(&flattened, "If-0 true"), &[1, 2]);
+    assert_eq!(covered_for_label(&flattened, "End-0"), &[1, 2]);
+}
+
+#[test]
+fn flatten_if_else_markers_use_branch_lane_union_span() {
+    let then_circuit = test_visual_circuit(3, vec![test_gate(vec![0], "X")]);
+    let else_circuit = test_visual_circuit(3, vec![test_gate(vec![2], "Z")]);
+    let visual = test_visual_circuit(
+        3,
+        vec![test_if_op(3, vec![0, 2], then_circuit, Some(else_circuit))],
+    );
+
+    let flattened = flatten_control_flow_visual(&visual);
+
+    assert_eq!(covered_for_label(&flattened, "If-0 true"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "Else-0"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "End-0"), &[0, 1, 2]);
+}
+
+#[test]
+fn flatten_switch_markers_use_all_case_body_lane_span() {
+    let visual = test_visual_circuit(
+        3,
+        vec![VisualOperation {
+            column: 0,
+            lanes: vec![0, 1, 2],
+            covered_lanes: vec![0, 1, 2],
+            label: "SW 1".to_string(),
+            params: Vec::new(),
+            style: VisualOpStyle::ControlFlow {
+                kind: VisualControlFlowKind::SwitchBlock {
+                    target: VisualCondition {
+                        label: "1".to_string(),
+                    },
+                },
+            },
+            span_box: false,
+            children: Some(VisualChildren::Switch {
+                case_circuits: vec![
+                    (
+                        "0".to_string(),
+                        Box::new(test_visual_circuit(3, vec![test_gate(vec![0], "X")])),
+                    ),
+                    (
+                        "1".to_string(),
+                        Box::new(test_visual_circuit(3, vec![test_gate(vec![2], "Z")])),
+                    ),
+                ],
+                default_circuit: Some(Box::new(test_visual_circuit(
+                    3,
+                    vec![test_gate(vec![1], "H")],
+                ))),
+            }),
+            span_cols: 5,
+        }],
+    );
+
+    let flattened = flatten_control_flow_visual(&visual);
+
+    assert_eq!(covered_for_label(&flattened, "Switch-0 1"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "Case-0 0"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "Case-0 1"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "Default-0"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "End-0"), &[0, 1, 2]);
+}
+
+#[test]
+fn flatten_while_ignores_empty_break_lanes_for_parent_span() {
+    let body = test_visual_circuit(
+        3,
+        vec![
+            test_gate(vec![0], "X"),
+            test_control_transfer("Break", VisualControlFlowKind::Break, 3),
+        ],
+    );
+    let visual = test_visual_circuit(
+        3,
+        vec![VisualOperation {
+            column: 0,
+            lanes: vec![0],
+            covered_lanes: vec![0, 1, 2],
+            label: "WH true".to_string(),
+            params: Vec::new(),
+            style: VisualOpStyle::ControlFlow {
+                kind: VisualControlFlowKind::WhileBlock {
+                    condition: VisualCondition {
+                        label: "true".to_string(),
+                    },
+                },
+            },
+            span_box: false,
+            children: Some(VisualChildren::While {
+                body_circuit: Box::new(body),
+            }),
+            span_cols: 3,
+        }],
+    );
+
+    let flattened = flatten_control_flow_visual(&visual);
+
+    assert_eq!(covered_for_label(&flattened, "While-0 true"), &[0]);
+    assert_eq!(covered_for_label(&flattened, "Break"), &[0]);
+    assert_eq!(covered_for_label(&flattened, "End-0"), &[0]);
+}
+
+#[test]
+fn flatten_control_markers_reserve_all_lanes_for_scheduling() {
+    let body = test_visual_circuit(2, vec![test_gate(vec![0], "X")]);
+    let visual = test_visual_circuit(
+        2,
+        vec![
+            VisualOperation {
+                column: 0,
+                lanes: vec![0],
+                covered_lanes: vec![0, 1],
+                label: "WH true".to_string(),
+                params: Vec::new(),
+                style: VisualOpStyle::ControlFlow {
+                    kind: VisualControlFlowKind::WhileBlock {
+                        condition: VisualCondition {
+                            label: "true".to_string(),
+                        },
+                    },
+                },
+                span_box: false,
+                children: Some(VisualChildren::While {
+                    body_circuit: Box::new(body),
+                }),
+                span_cols: 3,
+            },
+            test_gate(vec![1], "Z"),
+        ],
+    );
+
+    let flattened = flatten_control_flow_visual(&visual);
+
+    assert_eq!(covered_for_label(&flattened, "While-0 true"), &[0]);
+    assert!(column_for_label(&flattened, "Z") > column_for_label(&flattened, "End-0"));
+}
+
+#[test]
+fn flatten_empty_control_flow_keeps_fallback_span() {
+    let visual = test_visual_circuit(
+        3,
+        vec![test_if_op(
+            3,
+            Vec::new(),
+            test_visual_circuit(3, Vec::new()),
+            None,
+        )],
+    );
+
+    let flattened = flatten_control_flow_visual(&visual);
+
+    assert_eq!(covered_for_label(&flattened, "If-0 true"), &[0, 1, 2]);
+    assert_eq!(covered_for_label(&flattened, "End-0"), &[0, 1, 2]);
 }

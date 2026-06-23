@@ -13,29 +13,11 @@
 use super::*;
 use crate::circuit::circuit_param::ParameterValue;
 use crate::circuit::{
-    Circuit, ConditionView, Instruction, Operation, Parameter, Qubit, StandardGate, UnitaryGate,
+    Circuit, ClassicalExpr, ClassicalType, Parameter, Qubit, StandardGate, UnitaryGate,
 };
 use crate::visualization::circuit::{ParameterDisplayMode, ParameterFormatOptions};
-use smallvec::smallvec;
-use std::env;
+use crate::visualization::test_utils::assert_svg_visual_match;
 use std::f64::consts::PI;
-use std::fs;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone)]
-struct RgbImage {
-    width: u32,
-    height: u32,
-    data: Vec<u8>,
-}
-
-#[derive(Debug)]
-struct VisualCasePaths {
-    actual_svg: PathBuf,
-    actual_png: PathBuf,
-    reference_png: PathBuf,
-    diff_png: PathBuf,
-}
 
 fn q(index: usize) -> Qubit {
     let id = u32::try_from(index).expect("qubit index should fit in u32");
@@ -48,168 +30,20 @@ fn measure_all(circuit: &mut Circuit) {
     }
 }
 
-fn visual_threshold() -> f64 {
-    env::var("CQLIB_VISUAL_THRESHOLD")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.995)
-}
+#[test]
+fn figure_drawer_options_default_uses_cqlib_style() {
+    let options = FigureDrawerOptions::default();
 
-fn ensure_dir(path: &Path) {
-    fs::create_dir_all(path).expect("failed to create test directory");
-}
-
-fn visual_case_paths(filename: &str) -> VisualCasePaths {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let figure_root = manifest_dir
-        .join("src")
-        .join("visualization")
-        .join("circuit")
-        .join("figure");
-    let references_dir = figure_root.join("references");
-    let diffs_dir = figure_root.join("diffs");
-    ensure_dir(&figure_root);
-    ensure_dir(&references_dir);
-    ensure_dir(&diffs_dir);
-    VisualCasePaths {
-        actual_svg: figure_root.join(filename.replace(".png", ".svg")),
-        actual_png: figure_root.join(filename),
-        reference_png: references_dir.join(filename),
-        diff_png: diffs_dir.join(format!("diff_{filename}")),
-    }
-}
-
-fn load_png_rgb(path: &Path) -> RgbImage {
-    let pixmap = resvg::tiny_skia::Pixmap::load_png(path)
-        .unwrap_or_else(|e| panic!("failed to load png `{}`: {e}", path.display()));
-    let width = pixmap.width();
-    let height = pixmap.height();
-    let src = pixmap.data();
-    let mut data = vec![255u8; (width as usize) * (height as usize) * 3];
-
-    for idx in 0..(width as usize * height as usize) {
-        let s = idx * 4;
-        let d = idx * 3;
-        let r = u32::from(src[s]);
-        let g = u32::from(src[s + 1]);
-        let b = u32::from(src[s + 2]);
-        let a = u32::from(src[s + 3]);
-
-        // tiny-skia stores premultiplied rgba, so composite over white here.
-        let out_r = (r + ((255 * (255 - a) + 127) / 255)).min(255);
-        let out_g = (g + ((255 * (255 - a) + 127) / 255)).min(255);
-        let out_b = (b + ((255 * (255 - a) + 127) / 255)).min(255);
-
-        data[d] = out_r as u8;
-        data[d + 1] = out_g as u8;
-        data[d + 2] = out_b as u8;
-    }
-
-    RgbImage {
-        width,
-        height,
-        data,
-    }
-}
-
-fn pad_rgb_to_canvas(img: &RgbImage, width: u32, height: u32) -> Vec<u8> {
-    let mut out = vec![255u8; (width as usize) * (height as usize) * 3];
-    for y in 0..img.height {
-        let src_offset = (y as usize) * (img.width as usize) * 3;
-        let dst_offset = (y as usize) * (width as usize) * 3;
-        let row_bytes = (img.width as usize) * 3;
-        out[dst_offset..dst_offset + row_bytes]
-            .copy_from_slice(&img.data[src_offset..src_offset + row_bytes]);
-    }
-    out
-}
-
-fn similarity_ratio(a: &[u8], b: &[u8]) -> f64 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-    let mse = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| {
-            let d = f64::from(*x) - f64::from(*y);
-            d * d
-        })
-        .sum::<f64>()
-        / (a.len() as f64);
-    if mse <= 1e-12 {
-        return 1.0;
-    }
-    (1.0 - mse / (255.0 * 255.0)).max(0.0)
-}
-
-fn save_diff_png(
-    a: &[u8],
-    b: &[u8],
-    width: u32,
-    height: u32,
-    output_path: &Path,
-) -> Result<(), String> {
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| "failed to allocate diff pixmap".to_string())?;
-    let dst = pixmap.data_mut();
-    const AMP: u16 = 4;
-
-    for idx in 0..(width as usize * height as usize) {
-        let i3 = idx * 3;
-        let i4 = idx * 4;
-        let dr = (i16::from(a[i3]) - i16::from(b[i3])).unsigned_abs() as u16;
-        let dg = (i16::from(a[i3 + 1]) - i16::from(b[i3 + 1])).unsigned_abs() as u16;
-        let db = (i16::from(a[i3 + 2]) - i16::from(b[i3 + 2])).unsigned_abs() as u16;
-        dst[i4] = (dr.saturating_mul(AMP).min(255)) as u8;
-        dst[i4 + 1] = (dg.saturating_mul(AMP).min(255)) as u8;
-        dst[i4 + 2] = (db.saturating_mul(AMP).min(255)) as u8;
-        dst[i4 + 3] = 255;
-    }
-
-    pixmap
-        .save_png(output_path)
-        .map_err(|e| format!("failed to save diff png `{}`: {e}", output_path.display()))
-}
-
-fn save_diff_and_similarity(actual_png: &Path, reference_png: &Path, diff_png: &Path) -> f64 {
-    let actual = load_png_rgb(actual_png);
-    if !reference_png.exists() {
-        fs::copy(actual_png, reference_png).unwrap_or_else(|e| {
-            panic!(
-                "failed to bootstrap reference `{}` from `{}`: {e}",
-                reference_png.display(),
-                actual_png.display()
-            )
-        });
-        return 1.0;
-    }
-
-    let reference = load_png_rgb(reference_png);
-    let width = actual.width.max(reference.width);
-    let height = actual.height.max(reference.height);
-    let actual_padded = pad_rgb_to_canvas(&actual, width, height);
-    let reference_padded = pad_rgb_to_canvas(&reference, width, height);
-    let ratio = similarity_ratio(&actual_padded, &reference_padded);
-    save_diff_png(&actual_padded, &reference_padded, width, height, diff_png)
-        .expect("failed to write diff png");
-    ratio
+    assert!(options.show_params);
+    assert_eq!(options.style, FigureDrawStyle::Cqlib);
+    assert_eq!(options.dpi, 160);
+    assert!(options.gate_styles.is_empty());
 }
 
 fn assert_visual_match(circuit: &Circuit, options: FigureDrawerOptions, filename: &str) {
-    let paths = visual_case_paths(filename);
-
-    render_figure_to_file(circuit, &paths.actual_svg.to_string_lossy(), &options)
-        .expect("failed to render svg");
-    render_figure_to_file(circuit, &paths.actual_png.to_string_lossy(), &options)
-        .expect("failed to render png");
-
-    let ratio = save_diff_and_similarity(&paths.actual_png, &paths.reference_png, &paths.diff_png);
-    let threshold = visual_threshold();
-    assert!(
-        ratio >= threshold,
-        "Similarity ratio {ratio:.4} < {threshold:.4} for {filename}"
-    );
+    assert_svg_visual_match(&["circuit", "figure"], filename, |output_path| {
+        render_figure_to_file(circuit, &output_path.to_string_lossy(), &options)
+    });
 }
 
 fn make_bell() -> Circuit {
@@ -366,51 +200,119 @@ fn make_module_for_decompose() -> Circuit {
 fn make_while_control_flow() -> Circuit {
     let mut circuit = Circuit::new(3);
     circuit.measure(q(1)).unwrap();
-    let condition = ConditionView::new(q(1), 1);
-    let body = vec![
-        Operation {
-            instruction: Instruction::Standard(StandardGate::H),
-            qubits: smallvec![q(0)],
-            params: smallvec![],
-            label: None,
-        },
-        Operation {
-            instruction: Instruction::Standard(StandardGate::CX),
-            qubits: smallvec![q(0), q(2)],
-            params: smallvec![],
-            label: None,
-        },
-        Operation {
-            instruction: Instruction::Directive(crate::circuit::Directive::Measure),
-            qubits: smallvec![q(0)],
-            params: smallvec![],
-            label: None,
-        },
-    ];
-    circuit.while_loop(condition, body).unwrap();
+    let condition = ClassicalExpr::bool_literal(true);
+    circuit
+        .while_(condition, |body| {
+            body.h(q(0))?;
+            body.cx(q(0), q(2))?;
+            body.measure(q(0)).map(|_| ())
+        })
+        .unwrap();
     circuit.reset(q(2)).unwrap();
+    circuit
+}
+
+fn make_for_control_flow() -> Circuit {
+    let mut circuit = Circuit::new(2);
+    let loop_var = circuit.var(ClassicalType::uint(3).unwrap());
+    circuit
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(3, 0).unwrap(),
+            ClassicalExpr::uint_literal(3, 4).unwrap(),
+            ClassicalExpr::uint_literal(3, 1).unwrap(),
+            |body, _| {
+                body.h(q(0))?;
+                body.cx(q(0), q(1))
+            },
+        )
+        .unwrap();
+    circuit.measure(q(1)).unwrap();
+    circuit
+}
+
+fn make_switch_control_flow() -> Circuit {
+    let mut circuit = Circuit::new(2);
+    circuit
+        .switch(ClassicalExpr::uint_literal(2, 1).unwrap(), |cases| {
+            cases.value(0, |body| body.x(q(0)))?;
+            cases.value(1, |body| body.z(q(1)))?;
+            cases.default(|body| {
+                body.h(q(0))?;
+                body.cx(q(0), q(1))
+            })
+        })
+        .unwrap();
+    circuit
+}
+
+fn make_break_control_flow() -> Circuit {
+    let mut circuit = Circuit::new(2);
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(q(0))?;
+            body.break_loop()
+        })
+        .unwrap();
+    circuit.z(q(1)).unwrap();
+    circuit
+}
+
+fn make_continue_control_flow() -> Circuit {
+    let mut circuit = Circuit::new(2);
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.h(q(0))?;
+            body.continue_loop()
+        })
+        .unwrap();
+    circuit.z(q(1)).unwrap();
+    circuit
+}
+
+fn make_advanced_control_flow() -> Circuit {
+    let mut circuit = Circuit::new(1);
+    let loop_var = circuit.var(ClassicalType::uint(3).unwrap());
+    circuit
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(3, 0).unwrap(),
+            ClassicalExpr::uint_literal(3, 3).unwrap(),
+            ClassicalExpr::uint_literal(3, 1).unwrap(),
+            |body, _| body.x(q(0)),
+        )
+        .unwrap();
+    circuit
+        .switch(ClassicalExpr::uint_literal(2, 1).unwrap(), |cases| {
+            cases.value(0, |body| body.h(q(0)))?;
+            cases.default(|body| body.z(q(0)))
+        })
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(q(0))?;
+            body.break_loop()
+        })
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(q(0))?;
+            body.continue_loop()
+        })
+        .unwrap();
     circuit
 }
 
 fn make_if_no_else_control_flow() -> Circuit {
     let mut circuit = Circuit::new(3);
     circuit.measure(q(0)).unwrap();
-    let condition = ConditionView::new(q(0), 0);
-    let true_body = vec![
-        Operation {
-            instruction: Instruction::Standard(StandardGate::X),
-            qubits: smallvec![q(1)],
-            params: smallvec![],
-            label: None,
-        },
-        Operation {
-            instruction: Instruction::Standard(StandardGate::RZ),
-            qubits: smallvec![q(2)],
-            params: smallvec![0.32.into()],
-            label: None,
-        },
-    ];
-    circuit.if_else(condition, true_body, None).unwrap();
+    let condition = ClassicalExpr::bool_literal(false);
+    circuit
+        .if_(condition, |body| {
+            body.x(q(1))?;
+            body.rz(q(2), 0.32)
+        })
+        .unwrap();
     circuit
 }
 
@@ -446,6 +348,14 @@ fn test_bell_default_style() {
         FigureDrawerOptions::default(),
         "bell_default.png",
     );
+}
+
+#[test]
+fn test_canvas_background_is_white() {
+    let svg = circuit_to_figure(&make_bell(), &FigureDrawerOptions::default()).unwrap();
+
+    assert!(svg.contains("fill=\"#ffffff\""));
+    assert!(!svg.contains("fill=\"#dcdcdc\""));
 }
 
 #[test]
@@ -640,21 +550,9 @@ fn test_unitary() {
 #[test]
 fn test_control_flow_expansion() {
     let mut circuit = Circuit::new(2);
-    let condition = ConditionView::new(q(0), 1);
-    let true_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::X),
-        qubits: smallvec![q(1)],
-        params: smallvec![],
-        label: None,
-    }];
-    let false_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::Z),
-        qubits: smallvec![q(1)],
-        params: smallvec![],
-        label: None,
-    }];
+    let condition = ClassicalExpr::bool_literal(true);
     circuit
-        .if_else(condition, true_body, Some(false_body))
+        .if_else(condition, |body| body.x(q(1)), |body| body.z(q(1)))
         .unwrap();
 
     assert_visual_match(
@@ -679,6 +577,51 @@ fn test_control_flow_if_without_else() {
         &make_if_no_else_control_flow(),
         FigureDrawerOptions::default(),
         "if_no_else_control_flow.png",
+    );
+}
+
+#[test]
+fn test_control_flow_for() {
+    assert_visual_match(
+        &make_for_control_flow(),
+        FigureDrawerOptions::default(),
+        "for_control_flow.png",
+    );
+}
+
+#[test]
+fn test_control_flow_switch() {
+    assert_visual_match(
+        &make_switch_control_flow(),
+        FigureDrawerOptions::default(),
+        "switch_control_flow.png",
+    );
+}
+
+#[test]
+fn test_control_flow_break() {
+    assert_visual_match(
+        &make_break_control_flow(),
+        FigureDrawerOptions::default(),
+        "break_control_flow.png",
+    );
+}
+
+#[test]
+fn test_control_flow_continue() {
+    assert_visual_match(
+        &make_continue_control_flow(),
+        FigureDrawerOptions::default(),
+        "continue_control_flow.png",
+    );
+}
+
+#[test]
+fn test_advanced_control_flow() {
+    assert_visual_match(
+        &make_advanced_control_flow(),
+        FigureDrawerOptions::default(),
+        "advanced_control_flow.png",
     );
 }
 

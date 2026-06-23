@@ -15,15 +15,23 @@
 use super::*;
 use crate::circuit::circuit_param::ParameterValue;
 use crate::circuit::parameter::Parameter;
-use crate::circuit::{Circuit, ConditionView, Instruction, Operation, Qubit, StandardGate};
+use crate::circuit::{Circuit, ClassicalExpr, ClassicalType, Qubit};
 use crate::visualization::ParameterDisplayMode;
-use crate::visualization::circuit::model::{VisualChildren, VisualControlFlowKind, VisualOpStyle};
-use smallvec::smallvec;
+use crate::visualization::circuit::ir::{VisualChildren, VisualControlFlowKind, VisualOpStyle};
 use std::f64::consts::PI;
 
 fn q(index: usize) -> Qubit {
     let id = u32::try_from(index).expect("qubit index should fit in u32");
     Qubit::new(id)
+}
+
+#[test]
+fn visual_build_options_default_preserves_circuit_gates() {
+    let options = VisualBuildOptions::default();
+
+    assert!(!options.decompose_circuit_gates);
+    assert!(options.reserve_full_span_for_multi_qubit);
+    assert_eq!(options.parameter_format.mode, ParameterDisplayMode::Numeric);
 }
 
 #[test]
@@ -235,27 +243,15 @@ fn test_phase_gate_labeled_as_p() {
 #[test]
 fn test_if_else_control_flow_children() {
     let mut circuit = Circuit::new(2);
-    let condition = ConditionView::new(q(0), 1);
-    let true_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::X),
-        qubits: smallvec![q(1)],
-        params: smallvec![],
-        label: None,
-    }];
-    let false_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::Z),
-        qubits: smallvec![q(1)],
-        params: smallvec![],
-        label: None,
-    }];
+    let condition = ClassicalExpr::bool_literal(true);
     circuit
-        .if_else(condition, true_body, Some(false_body))
+        .if_else(condition, |body| body.x(q(1)), |body| body.z(q(1)))
         .unwrap();
 
     let visual = build_visual_circuit(&circuit, &VisualBuildOptions::default()).unwrap();
     assert_eq!(visual.operations.len(), 1);
     let op = &visual.operations[0];
-    assert!(op.label.starts_with("IF q0=1"));
+    assert!(op.label.starts_with("IF true"));
     assert!(matches!(
         op.style,
         VisualOpStyle::ControlFlow {
@@ -283,14 +279,8 @@ fn test_if_else_control_flow_children() {
 #[test]
 fn test_if_without_else_control_flow() {
     let mut circuit = Circuit::new(2);
-    let condition = ConditionView::new(q(0), 0);
-    let true_body = vec![Operation {
-        instruction: Instruction::Standard(StandardGate::X),
-        qubits: smallvec![q(1)],
-        params: smallvec![],
-        label: None,
-    }];
-    circuit.if_else(condition, true_body, None).unwrap();
+    let condition = ClassicalExpr::bool_literal(false);
+    circuit.if_(condition, |body| body.x(q(1))).unwrap();
 
     let visual = build_visual_circuit(&circuit, &VisualBuildOptions::default()).unwrap();
     let op = &visual.operations[0];
@@ -309,32 +299,144 @@ fn test_if_without_else_control_flow() {
 #[test]
 fn test_while_loop_control_flow_children() {
     let mut circuit = Circuit::new(2);
-    let condition = ConditionView::new(q(0), 0);
-    let body = vec![
-        Operation {
-            instruction: Instruction::Standard(StandardGate::H),
-            qubits: smallvec![q(0)],
-            params: smallvec![],
-            label: None,
-        },
-        Operation {
-            instruction: Instruction::Standard(StandardGate::CX),
-            qubits: smallvec![q(0), q(1)],
-            params: smallvec![],
-            label: None,
-        },
-    ];
-    circuit.while_loop(condition, body).unwrap();
+    let condition = ClassicalExpr::bool_literal(false);
+    circuit
+        .while_(condition, |body| {
+            body.h(q(0))?;
+            body.cx(q(0), q(1))
+        })
+        .unwrap();
 
     let visual = build_visual_circuit(&circuit, &VisualBuildOptions::default()).unwrap();
     assert_eq!(visual.operations.len(), 1);
     let op = &visual.operations[0];
-    assert!(op.label.starts_with("WH q0=0"));
+    assert!(op.label.starts_with("WH false"));
     match op.children.as_ref() {
         Some(VisualChildren::While { body_circuit }) => {
             assert_eq!(body_circuit.operations.len(), 2);
             assert_eq!(body_circuit.operations[0].label, "H");
             assert_eq!(body_circuit.operations[1].label, "X");
+        }
+        _ => panic!("expected While children"),
+    }
+}
+
+#[test]
+fn test_for_loop_control_flow_children() {
+    let mut circuit = Circuit::new(2);
+    let loop_var = circuit.var(ClassicalType::uint(3).unwrap());
+    circuit
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(3, 0).unwrap(),
+            ClassicalExpr::uint_literal(3, 4).unwrap(),
+            ClassicalExpr::uint_literal(3, 1).unwrap(),
+            |body, _| body.cx(q(0), q(1)),
+        )
+        .unwrap();
+
+    let visual = build_visual_circuit(&circuit, &VisualBuildOptions::default()).unwrap();
+    assert_eq!(visual.operations.len(), 1);
+    let op = &visual.operations[0];
+    assert!(op.label.starts_with("FOR"));
+    assert!(matches!(
+        op.style,
+        VisualOpStyle::ControlFlow {
+            kind: VisualControlFlowKind::ForBlock { .. }
+        }
+    ));
+    match op.children.as_ref() {
+        Some(VisualChildren::For { body_circuit }) => {
+            assert_eq!(body_circuit.operations.len(), 1);
+            assert_eq!(body_circuit.operations[0].label, "X");
+        }
+        _ => panic!("expected For children"),
+    }
+}
+
+#[test]
+fn test_switch_control_flow_children() {
+    let mut circuit = Circuit::new(1);
+    circuit
+        .switch(ClassicalExpr::uint_literal(2, 1).unwrap(), |cases| {
+            cases.value(0, |body| body.x(q(0)))?;
+            cases.value(1, |body| body.z(q(0)))?;
+            cases.default(|body| body.h(q(0)))
+        })
+        .unwrap();
+
+    let visual = build_visual_circuit(&circuit, &VisualBuildOptions::default()).unwrap();
+    assert_eq!(visual.operations.len(), 1);
+    let op = &visual.operations[0];
+    assert!(op.label.starts_with("SW 1"));
+    assert!(matches!(
+        op.style,
+        VisualOpStyle::ControlFlow {
+            kind: VisualControlFlowKind::SwitchBlock { .. }
+        }
+    ));
+    match op.children.as_ref() {
+        Some(VisualChildren::Switch {
+            case_circuits,
+            default_circuit,
+        }) => {
+            assert_eq!(case_circuits.len(), 2);
+            assert_eq!(case_circuits[0].0, "0");
+            assert_eq!(case_circuits[0].1.operations[0].label, "X");
+            assert_eq!(case_circuits[1].0, "1");
+            assert_eq!(case_circuits[1].1.operations[0].label, "Z");
+            assert_eq!(default_circuit.as_ref().unwrap().operations[0].label, "H");
+        }
+        _ => panic!("expected Switch children"),
+    }
+}
+
+#[test]
+fn test_break_and_continue_control_flow_markers() {
+    let mut break_circuit = Circuit::new(1);
+    break_circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(q(0))?;
+            body.break_loop()
+        })
+        .unwrap();
+
+    let break_visual =
+        build_visual_circuit(&break_circuit, &VisualBuildOptions::default()).unwrap();
+    match break_visual.operations[0].children.as_ref() {
+        Some(VisualChildren::While { body_circuit }) => {
+            assert_eq!(body_circuit.operations.len(), 2);
+            assert_eq!(body_circuit.operations[1].label, "Break");
+            assert!(matches!(
+                body_circuit.operations[1].style,
+                VisualOpStyle::ControlFlow {
+                    kind: VisualControlFlowKind::Break
+                }
+            ));
+        }
+        _ => panic!("expected While children"),
+    }
+
+    let mut continue_circuit = Circuit::new(1);
+    continue_circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(q(0))?;
+            body.continue_loop()
+        })
+        .unwrap();
+
+    let continue_visual =
+        build_visual_circuit(&continue_circuit, &VisualBuildOptions::default()).unwrap();
+    match continue_visual.operations[0].children.as_ref() {
+        Some(VisualChildren::While { body_circuit }) => {
+            assert_eq!(body_circuit.operations.len(), 2);
+            assert_eq!(body_circuit.operations[1].label, "Continue");
+            assert!(matches!(
+                body_circuit.operations[1].style,
+                VisualOpStyle::ControlFlow {
+                    kind: VisualControlFlowKind::Continue
+                }
+            ));
         }
         _ => panic!("expected While children"),
     }

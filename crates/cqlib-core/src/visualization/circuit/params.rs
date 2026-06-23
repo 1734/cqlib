@@ -12,14 +12,13 @@
 
 //! Parameter label formatting policies for visualization IR.
 //!
-//! This module decouples "how parameters look" from the IR build pipeline.
-//! Builder code only collects parameters and delegates the display strategy to
-//! [`ParameterFormatter`].
+//! This module decouples parameter display from the IR build pipeline. Builder code
+//! collects parameters and delegates formatting to [`ParameterFormatter`].
 
 use crate::circuit::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::parameter::Parameter;
-use crate::visualization::circuit::error::VisualizationError;
+use crate::visualization::VisualizationError;
 use std::f64::consts::PI;
 
 /// Display mode used by the parameter formatter.
@@ -36,6 +35,21 @@ pub enum ParameterDisplayMode {
 }
 
 /// Options for visualization parameter formatting.
+///
+/// Controls numeric precision, scientific-notation thresholds, and π-fraction matching.
+///
+/// # Examples
+///
+/// ```rust
+/// use cqlib_core::visualization::{ParameterDisplayMode, ParameterFormatOptions};
+///
+/// let options = ParameterFormatOptions {
+///     mode: ParameterDisplayMode::PiFractionPreferred,
+///     decimal_precision: 3,
+///     ..ParameterFormatOptions::default()
+/// };
+/// assert_eq!(options.decimal_precision, 3);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ParameterFormatOptions {
     /// Display mode strategy.
@@ -66,6 +80,9 @@ impl Default for ParameterFormatOptions {
 }
 
 /// Parameter formatter used by visualization IR builder.
+///
+/// The formatter resolves fixed and symbolic circuit parameters into display labels according
+/// to [`ParameterFormatOptions`].
 #[derive(Debug, Clone, Copy)]
 pub struct ParameterFormatter {
     options: ParameterFormatOptions,
@@ -73,11 +90,32 @@ pub struct ParameterFormatter {
 
 impl ParameterFormatter {
     /// Create a formatter with the given options.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Parameter display and numeric-formatting policy.
+    ///
+    /// # Returns
+    ///
+    /// A formatter that can convert fixed or symbolic circuit parameters into display labels.
     pub fn new(options: ParameterFormatOptions) -> Self {
         Self { options }
     }
 
     /// Format one circuit parameter entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `circuit` - Circuit that owns the symbolic parameter table.
+    /// * `param` - Fixed value or symbolic parameter reference to format.
+    ///
+    /// # Returns
+    ///
+    /// A short label suitable for text and figure rendering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualizationError::ParameterIndexOutOfBounds`] when a symbolic index is invalid.
     pub fn format_circuit_param(
         &self,
         circuit: &Circuit,
