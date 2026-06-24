@@ -1295,7 +1295,7 @@ fn compile_ghz5_routes_on_line_device() {
 }
 
 #[test]
-fn compile_toffoli_on_4q_line_device_requires_target_basis_for_ccx_lowering() {
+fn compile_toffoli_on_4q_line_device_decomposes_ccx_before_routing() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let q2 = Qubit::new(2);
@@ -1310,8 +1310,9 @@ fn compile_toffoli_on_4q_line_device_requires_target_basis_for_ccx_lowering() {
         .unwrap();
     circuit.h(Qubit::new(3)).unwrap();
     let device = Device::line("test-device", 4).unwrap();
+    let topology = device.topology().clone();
 
-    let err = compile(
+    let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
@@ -1322,14 +1323,97 @@ fn compile_toffoli_on_4q_line_device_requires_target_basis_for_ccx_lowering() {
             seed: Some(17),
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(matches!(
-        err,
-        CompilerError::InvalidInput(reason)
-            if reason.contains("layout requires unitary operations with more than two qubits")
-                && reason.contains("CCX")
-    ));
+    assert!(step_changed(&result, "decompose.routing_basis"));
+    assert!(
+        result
+            .steps
+            .iter()
+            .any(|step| step.name == "route.sabre" && !step.skipped)
+    );
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CCX));
+    assert_two_qubit_operations_supported_by_topology(&result.circuit, &topology);
+    assert!(result.circuit.qubits().len() <= topology.num_qubits());
+}
+
+#[test]
+fn compile_toffoli_routing_basis_prefers_cz_native_decomposition() {
+    let mut circuit = Circuit::new(3);
+    circuit
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+            vec![Qubit::new(0), Qubit::new(1), Qubit::new(2)],
+            Vec::<ParameterValue>::new(),
+            None,
+        )
+        .unwrap();
+    let device = Device::line("cz-native-line", 3)
+        .unwrap()
+        .with_native_gates(native_basis(&[
+            StandardGate::H,
+            StandardGate::T,
+            StandardGate::TDG,
+            StandardGate::CZ,
+            StandardGate::GPhase,
+        ]));
+    let topology = device.topology().clone();
+
+    let result = compile(
+        &circuit,
+        CompileConfig {
+            mode: CompileMode::Normal,
+            target_basis: None,
+            device: Some(device),
+            initial_layout: None,
+            resource_policy: ResourcePolicy::default(),
+            seed: Some(19),
+        },
+    )
+    .unwrap();
+
+    assert!(step_changed(&result, "decompose.routing_basis"));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CCX));
+    assert!(standard_ops(&result.circuit).contains(&StandardGate::CZ));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CX));
+    assert_two_qubit_operations_supported_by_topology(&result.circuit, &topology);
+    assert!(result.circuit.qubits().len() <= topology.num_qubits());
+}
+
+#[test]
+fn compile_routing_basis_preserves_existing_two_qubit_standard_gates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rzz(q0, q1, 0.37).unwrap();
+    circuit.crz(q0, q1, 0.19).unwrap();
+    circuit.fsim(q0, q1, 0.11, -0.23).unwrap();
+    let device = Device::line("two-qubit-line", 2).unwrap();
+
+    let result = compile(
+        &circuit,
+        CompileConfig {
+            mode: CompileMode::Normal,
+            target_basis: None,
+            device: Some(device),
+            initial_layout: None,
+            resource_policy: ResourcePolicy::default(),
+            seed: Some(23),
+        },
+    )
+    .unwrap();
+
+    let routing_basis = result
+        .steps
+        .iter()
+        .find(|step| step.name == "decompose.routing_basis")
+        .expect("routing basis step should be reported");
+    assert!(!routing_basis.changed);
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![StandardGate::RZZ, StandardGate::CRZ, StandardGate::FSIM]
+    );
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
 }
 
 #[test]

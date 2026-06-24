@@ -33,6 +33,8 @@ from .routing import RoutedCircuit as RoutedCircuit
 from .routing import SabreRouteResult as SabreRouteResult
 from .routing import route_sabre as route_sabre
 from .routing import route_with_layout as route_with_layout
+from .routing_basis import LowerToRoutingBasis as LowerToRoutingBasis
+from .routing_basis import lower_to_routing_basis as lower_to_routing_basis
 from .rewrite import KnowledgeRewriteResult as KnowledgeRewriteResult
 from .rewrite import KnowledgeRewriteStats as KnowledgeRewriteStats
 from .rewrite import KnowledgeRewriter as KnowledgeRewriter

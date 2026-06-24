@@ -18,6 +18,7 @@ pub mod layout;
 pub mod result;
 mod rewrite;
 pub mod routing;
+mod routing_basis;
 
 use pyo3::prelude::*;
 
@@ -29,6 +30,7 @@ use rewrite::{
     PyKnowledgeRewriteResult, PyKnowledgeRewriteStats, PyKnowledgeRewriter, PyRewriteConfig,
     PyRewriteMode, py_rewrite_circuit,
 };
+use routing_basis::{PyLowerToRoutingBasis, py_lower_to_routing_basis};
 
 /// Registers transform bindings as `_native.compile.transform`.
 pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -42,9 +44,11 @@ pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResul
     m.add_class::<PyKnowledgeRewriter>()?;
     m.add_class::<PyKnowledgeRewriteStats>()?;
     m.add_class::<PyKnowledgeRewriteResult>()?;
+    m.add_class::<PyLowerToRoutingBasis>()?;
     m.add_class::<PyTransformResult>()?;
     m.add_function(pyo3::wrap_pyfunction!(py_canonicalize_circuit, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_rewrite_circuit, &m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(py_lower_to_routing_basis, &m)?)?;
 
     decompose::register_decompose_module(&m)?;
     layout::register_layout_module(&m)?;

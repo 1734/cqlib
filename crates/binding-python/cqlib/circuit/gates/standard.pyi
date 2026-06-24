@@ -82,6 +82,11 @@ class StandardGate:
     Y2M: StandardGate
     FSIM: StandardGate
 
+    @staticmethod
+    def all() -> list[StandardGate]:
+        """Return all unbound standard gate definitions in enum order."""
+        ...
+
     @property
     def num_qubits(self) -> int:
         """Total number of qubits this gate acts on."""

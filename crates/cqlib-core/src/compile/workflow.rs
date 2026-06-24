@@ -21,9 +21,9 @@
 //! The normal workflow follows the stable pass order:
 //! canonicalize input, expand circuit-backed definitions, apply production
 //! knowledge rewrite, decompose unitary and multi-controlled gates,
-//! canonicalize again, optimize the decomposed circuit, optionally route on a
-//! device, optionally translate to the resolved target basis, and canonicalize
-//! the output.
+//! canonicalize again, optimize the decomposed circuit, optionally lower to a
+//! routing-compatible basis, optionally route on a device, optionally translate
+//! to the resolved target basis, and canonicalize the output.
 //!
 //! The enhanced workflow uses the same required correctness stages but raises
 //! rewrite budgets, uses stronger SABRE trial settings, performs a
@@ -48,8 +48,8 @@ use crate::compile::transform::decompose::{
 };
 use crate::compile::transform::layout::build_physical_layout_graph;
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, KnowledgeRewriter, LayoutObjective, RewriteConfig,
-    TransformResult, Transformer, route_sabre, route_with_layout,
+    Canonicalizer, CircuitAnalysis, KnowledgeRewriter, LayoutObjective, LowerToRoutingBasis,
+    RewriteConfig, TransformResult, Transformer, route_sabre, route_with_layout,
 };
 
 use super::{CompileConfig, CompileMode, CompileResult};
@@ -119,6 +119,7 @@ impl CompilerWorkflow {
         self.lower_init(&mut state)?;
         self.lower_decompose(&mut state)?;
         self.lower_optimize(&mut state)?;
+        self.lower_routing_basis(&mut state)?;
         self.lower_physical(&mut state)?;
         self.lower_target(&mut state)?;
         self.lower_output(&mut state)?;
@@ -176,6 +177,16 @@ impl CompilerWorkflow {
                     .transform(circuit, Some(analysis))
             },
         )
+    }
+
+    /// Applies optional routing-basis lowering before physical routing.
+    ///
+    /// This stage is intentionally separate from final target-basis
+    /// translation. It only guarantees that standard gates unsupported by
+    /// SABRE's arity model, such as `CCX`, are lowered to operations with at
+    /// most two qubits before layout and routing run.
+    fn lower_routing_basis(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        self.apply_routing_basis_decomposition(state)
     }
 
     /// Applies optional physical lowering from logical to physical qubits.
@@ -271,6 +282,36 @@ impl CompilerWorkflow {
             "translation",
             "decompose.mc_gates",
             |circuit, analysis| DecomposeMcGates::new(config).transform(circuit, Some(analysis)),
+        )
+    }
+
+    fn apply_routing_basis_decomposition(
+        &self,
+        state: &mut WorkflowState,
+    ) -> Result<(), CompilerError> {
+        if self.config.device.is_none() {
+            record_skipped(
+                state,
+                "translation",
+                "decompose.routing_basis",
+                "no target device configured",
+            );
+            return Ok(());
+        }
+
+        let preferred_basis = self.config.target_basis.clone().or_else(|| {
+            self.config
+                .device
+                .as_ref()
+                .map(|device| device.native_gates().to_vec())
+        });
+        apply_circuit_transform(
+            state,
+            "translation",
+            "decompose.routing_basis",
+            |circuit, analysis| {
+                LowerToRoutingBasis::new(preferred_basis).transform(circuit, Some(analysis))
+            },
         )
     }
 
