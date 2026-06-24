@@ -262,11 +262,14 @@ def test_compile_workflow_reports_public_step_order_and_skip_reasons():
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "optimize.post_decomposition",
+            "decompose.routing_basis",
             "route.sabre",
             "translate.target_basis",
             "canonicalize.output",
         ],
     )
+    assert step(result, "decompose.routing_basis").skipped
+    assert step(result, "decompose.routing_basis").reason
     assert step(result, "route.sabre").skipped
     assert step(result, "route.sabre").reason
     assert step(result, "translate.target_basis").skipped

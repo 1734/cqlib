@@ -176,12 +176,17 @@ pytest tests/python/
 |------------------------|----------------------------------------------------------|
 | API Reference (Rust)   | [docs.rs/cqlib-core](https://docs.rs/cqlib-core)         |
 | API Reference (Python) | [qc.zdxlz.com/docs](https://qc.zdxlz.com/)               |
-| Source Repository      | [gitee.com/cq-lib/cqlib](https://gitee.com/cq-lib/cqlib) |
+| Source Repository (Gitee) | [gitee.com/cq-lib/cqlib](https://gitee.com/cq-lib/cqlib) |
+| Source Repository (GitHub) | [github.com/cq-lib/cqlib](https://github.com/cq-lib/cqlib) |
 
 ## Contributing
 
-Contributions are welcome. Please refer to the repository's issue tracker for discussion. When contributing, open a pull
-request against the `main` branch and ensure all tests pass.
+Contributions are welcome. Please read the [Contributing Guide](CONTRIBUTING.md) before submitting changes. All
+participants are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). If you need to report a security issue,
+please follow the [Security Policy](SECURITY.md).
+
+Please use the repository issue tracker for discussion. When contributing, open a pull request against the `main` branch
+and ensure all relevant tests pass.
 
 ## License
 

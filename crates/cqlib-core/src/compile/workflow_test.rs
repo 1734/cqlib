@@ -159,6 +159,7 @@ fn normal_workflow_reports_staged_order() {
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "optimize.post_decomposition",
+            "decompose.routing_basis",
             "route.sabre",
             "translate.target_basis",
             "canonicalize.output",
@@ -166,6 +167,7 @@ fn normal_workflow_reports_staged_order() {
     );
     assert!(result.steps[9].skipped);
     assert!(result.steps[10].skipped);
+    assert!(result.steps[11].skipped);
 }
 
 #[test]
@@ -196,6 +198,7 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "optimize.post_decomposition",
+            "decompose.routing_basis",
             "route.sabre",
             "optimize.post_routing",
             "translate.target_basis",
@@ -206,6 +209,7 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
     assert!(enhanced.steps[9].skipped);
     assert!(enhanced.steps[10].skipped);
     assert!(enhanced.steps[11].skipped);
+    assert!(enhanced.steps[12].skipped);
     assert!(enhanced.circuit.operations().is_empty());
 }
 

@@ -10,23 +10,9 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! C binding for Cqlib quantum computing library.
-//!
-//! This module provides C-compatible APIs for quantum circuit operations,
-//! parameter management, IR format parsing (QCIS, OpenQASM2), and device
-//! topology/properties management.
-//!
-//! # Module Structure
-//!
-//! - [`circuit`]: Quantum circuit operations and gates
-//! - [`ir`]: IR format parsing (QCIS, OpenQASM2)
-//! - [`device`]: Device topology and qubit properties
-//! - [`qis`]: Quantum information science operations
+//! Minimal C binding for Cqlib quantum circuits.
 
 // Allow clippy warnings for FFI functions that dereference raw pointers
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod circuit;
-pub mod device;
-pub mod ir;
-pub mod qis;

@@ -1,6 +1,6 @@
 fail_fast: false
 repos:
-  # 1. 基础文件检查 (通用)
+  # 1. Basic file checks (general)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -9,9 +9,9 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files
-        args: ['--maxkb=1024'] # 防止上传超过 1MB 的文件
+        args: ['--maxkb=1024'] # Prevent files larger than 1 MB from being committed
 
-  # 2. Rust 检查 (Core & Bindings)
+  # 2. Rust checks (core and bindings)
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:
@@ -24,9 +24,9 @@ repos:
       - id: clippy
         name: Cargo Clippy
         description: Lint Rust code
-        args: ["--", "-D", "warnings"] # 将警告视为错误
+        args: ["--", "-D", "warnings"] # Treat warnings as errors
 
-  # 3. Python 检查 (Binding-Python)
+  # 3. Python checks (binding-python)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.17
     hooks:
@@ -34,19 +34,19 @@ repos:
         args: [ --fix ]
       - id: ruff-format
 
-  # 4. C++ 格式化 (Binding-Cpp)
+  # 4. C/C++ formatting
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v22.1.5
     hooks:
       - id: clang-format
         types_or: [c++, c]
 
-  # 5. 拼写检查 (防止 API 拼写错误)
+  # 5. Spell checking (prevent API spelling mistakes)
   - repo: https://github.com/crate-ci/typos
-    rev: v1
+    rev: v1.47.2
     hooks:
       - id: typos
-        # 排除不需要检查的文件
+        # Exclude files that do not need spell checking
         exclude: |
             (?x)^(
                 .*\.lock|

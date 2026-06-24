@@ -11,428 +11,94 @@
 // that they have been altered from the originals.
 
 use binding_c::circuit::{
-    circuit_ccx, circuit_crx, circuit_crx_param, circuit_cry, circuit_cry_param, circuit_crz,
-    circuit_crz_param, circuit_cx, circuit_cy, circuit_cz, circuit_free, circuit_fsim,
-    circuit_fsim_param, circuit_h, circuit_measure, circuit_new, circuit_num_qubits, circuit_reset,
-    circuit_rx, circuit_rxx, circuit_rxx_param, circuit_rxy, circuit_rxy_param, circuit_ry,
-    circuit_ryy, circuit_ryy_param, circuit_rz, circuit_rzx, circuit_rzx_param, circuit_rzz,
-    circuit_rzz_param, circuit_s, circuit_swap, circuit_sx, circuit_t, circuit_x, circuit_x2m,
-    circuit_x2p, circuit_y, circuit_y2m, circuit_y2p, circuit_z, param_evaluate, param_free,
-    param_parse,
+    circuit_assign_params, circuit_cx, circuit_cz, circuit_free, circuit_h, circuit_measure,
+    circuit_new, circuit_num_operations, circuit_num_parameters, circuit_num_qubits, circuit_reset,
+    circuit_rx, circuit_rx_param, circuit_ry, circuit_ry_param, circuit_rz, circuit_rz_param,
+    circuit_validate, circuit_x, circuit_y, circuit_z, param_evaluate, param_free, param_parse,
 };
-use binding_c::device::{
-    device_add_qubit_properties, device_free, device_get_default_single_qubit_error,
-    device_get_default_two_qubit_error, device_get_t1, device_new, device_num_qubits,
-    device_set_default_single_qubit_error, device_set_default_two_qubit_error, qubit_prop_free,
-    qubit_prop_get_t1, qubit_prop_new, qubit_prop_set_t1, topology_free, topology_new_line,
-    topology_num_qubits,
-};
-use binding_c::ir::{qasm2_load, qcis_load};
-use binding_c::qis::{
-    density_matrix_cx, density_matrix_free, density_matrix_h, density_matrix_new,
-    density_matrix_noise_cx, density_matrix_noise_free, density_matrix_noise_h,
-    density_matrix_noise_new, density_matrix_noise_num_qubits, density_matrix_num_qubits,
-    density_matrix_probabilities, density_matrix_x, hamiltonian_add_term, hamiltonian_free,
-    hamiltonian_new, hamiltonian_num_qubits, hamiltonian_num_terms, observable_expectation_dm,
-    observable_expectation_sv, pauli_string_free, pauli_string_free_string, pauli_string_get_pauli,
-    pauli_string_new, pauli_string_num_qubits, pauli_string_set_pauli, pauli_string_to_string,
-    statevector_cx, statevector_free, statevector_h, statevector_new, statevector_num_qubits,
-    statevector_probabilities, statevector_x,
-};
+use std::ffi::CString;
 
 #[test]
-fn test_circuit_lifecycle() {
-    // 1. Create Circuit
-    let num_qubits = 3;
-    let ptr = circuit_new(num_qubits);
-    assert!(!ptr.is_null(), "Circuit pointer should not be null");
+fn circuit_lifecycle_and_basic_gates() {
+    let circuit = circuit_new(2);
+    assert!(!circuit.is_null());
+    assert_eq!(circuit_num_qubits(circuit), 2);
+    assert_eq!(circuit_num_operations(circuit), 0);
 
-    // 2. Check Property
-    let count = circuit_num_qubits(ptr);
-    assert_eq!(count, num_qubits, "Qubit count mismatch");
+    assert_eq!(circuit_h(circuit, 0), 0);
+    assert_eq!(circuit_x(circuit, 1), 0);
+    assert_eq!(circuit_y(circuit, 0), 0);
+    assert_eq!(circuit_z(circuit, 1), 0);
+    assert_eq!(circuit_rx(circuit, 0, 0.25), 0);
+    assert_eq!(circuit_ry(circuit, 1, 0.5), 0);
+    assert_eq!(circuit_rz(circuit, 0, 0.75), 0);
+    assert_eq!(circuit_cx(circuit, 0, 1), 0);
+    assert_eq!(circuit_cz(circuit, 1, 0), 0);
+    assert_eq!(circuit_measure(circuit, 0), 0);
+    assert_eq!(circuit_reset(circuit, 1), 0);
 
-    // 3. Apply Gates (Success cases)
-    let res_h = circuit_h(ptr, 0);
-    assert_eq!(res_h, 0, "H gate should return 0 on success");
-
-    let res_rx = circuit_rx(ptr, 1, 3.14159);
-    assert_eq!(res_rx, 0, "RX gate should return 0 on success");
-
-    let res_cx = circuit_cx(ptr, 0, 1);
-    assert_eq!(res_cx, 0, "CX gate should return 0 on success");
-
-    // 4. Apply Gates (Error cases)
-    let res_err_bounds = circuit_h(ptr, 99); // Invalid index
-    assert_eq!(
-        res_err_bounds, -2,
-        "Should return -2 for index out of bounds"
-    );
-
-    // 5. Free Memory
-    circuit_free(ptr);
+    assert_eq!(circuit_num_operations(circuit), 11);
+    assert_eq!(circuit_validate(circuit), 0);
+    circuit_free(circuit);
 }
 
 #[test]
-fn test_null_pointer_safety() {
-    // Functions should handle null pointers gracefully without crashing
+fn circuit_error_codes_are_stable() {
+    assert_eq!(circuit_num_qubits(std::ptr::null()), 0);
+    assert_eq!(circuit_num_operations(std::ptr::null()), 0);
+    assert_eq!(circuit_num_parameters(std::ptr::null()), 0);
+    assert_eq!(circuit_validate(std::ptr::null()), -1);
+    assert_eq!(circuit_h(std::ptr::null_mut(), 0), -1);
     circuit_free(std::ptr::null_mut());
 
-    let count = circuit_num_qubits(std::ptr::null());
-    assert_eq!(count, 0);
-
-    let res = circuit_h(std::ptr::null_mut(), 0);
-    assert_eq!(res, -1);
+    let circuit = circuit_new(1);
+    assert_eq!(circuit_h(circuit, 1), -2);
+    assert_eq!(circuit_cx(circuit, 0, 1), -2);
+    assert_eq!(circuit_rx(circuit, 0, f64::NAN), -3);
+    circuit_free(circuit);
 }
 
 #[test]
-fn test_circuit_gates() {
-    let ptr = circuit_new(4);
-    assert!(!ptr.is_null());
+fn symbolic_parameters_can_be_evaluated_and_assigned() {
+    let theta = CString::new("theta").unwrap();
+    let phi = CString::new("phi").unwrap();
+    let theta_ptr = param_parse(theta.as_ptr());
+    let phi_ptr = param_parse(phi.as_ptr());
+    assert!(!theta_ptr.is_null());
+    assert!(!phi_ptr.is_null());
 
-    // Test various gates
-    assert_eq!(circuit_x(ptr, 0), 0);
-    assert_eq!(circuit_y(ptr, 0), 0);
-    assert_eq!(circuit_z(ptr, 0), 0);
-    assert_eq!(circuit_s(ptr, 0), 0);
-    assert_eq!(circuit_t(ptr, 0), 0);
-    assert_eq!(circuit_sx(ptr, 0), 0);
+    let bindings = CString::new("theta:0.5,phi:1.25").unwrap();
+    assert!((param_evaluate(theta_ptr, bindings.as_ptr()) - 0.5).abs() < 1e-12);
+    assert!((param_evaluate(phi_ptr, bindings.as_ptr()) - 1.25).abs() < 1e-12);
 
-    // Test two-qubit gates
-    assert_eq!(circuit_cz(ptr, 0, 1), 0);
-    assert_eq!(circuit_cy(ptr, 0, 1), 0);
-    assert_eq!(circuit_swap(ptr, 0, 1), 0);
+    let circuit = circuit_new(2);
+    assert_eq!(circuit_rx_param(circuit, 0, theta_ptr), 0);
+    assert_eq!(circuit_ry_param(circuit, 1, phi_ptr), 0);
+    assert_eq!(circuit_rz_param(circuit, 0, theta_ptr), 0);
+    assert_eq!(circuit_cx(circuit, 0, 1), 0);
+    assert_eq!(circuit_num_operations(circuit), 4);
+    assert_eq!(circuit_num_parameters(circuit), 2);
 
-    // Test parameterized gates
-    assert_eq!(circuit_ry(ptr, 0, 1.0), 0);
-    assert_eq!(circuit_rz(ptr, 0, 2.0), 0);
-    assert_eq!(circuit_rx(ptr, 0, 0.5), 0);
+    let assigned = circuit_assign_params(circuit, bindings.as_ptr());
+    assert!(!assigned.is_null());
+    assert_eq!(circuit_num_operations(assigned), 4);
+    assert_eq!(circuit_num_parameters(assigned), 0);
+    assert_eq!(circuit_validate(assigned), 0);
 
-    // Test rotation gates
-    assert_eq!(circuit_x2p(ptr, 0), 0);
-    assert_eq!(circuit_x2m(ptr, 0), 0);
-    assert_eq!(circuit_y2p(ptr, 0), 0);
-    assert_eq!(circuit_y2m(ptr, 0), 0);
-
-    // Test advanced parameterized gates
-    assert_eq!(circuit_rxy(ptr, 0, 0.1, 0.2), 0);
-    assert_eq!(circuit_rxx(ptr, 0, 1, 0.3), 0);
-    assert_eq!(circuit_ryy(ptr, 0, 1, 0.4), 0);
-    assert_eq!(circuit_rzz(ptr, 0, 1, 0.5), 0);
-    assert_eq!(circuit_rzx(ptr, 0, 1, 0.6), 0);
-    assert_eq!(circuit_crx(ptr, 0, 1, 0.7), 0);
-    assert_eq!(circuit_cry(ptr, 0, 1, 0.8), 0);
-    assert_eq!(circuit_crz(ptr, 0, 1, 0.9), 0);
-    // toffoli gate with valid target
-    assert_eq!(circuit_ccx(ptr, 0, 1, 2), 0);
-    // out-of-bounds target should return error code
-    assert_eq!(circuit_ccx(ptr, 0, 1, 4), -2);
-    assert_eq!(circuit_measure(ptr, 0), 0);
-    assert_eq!(circuit_reset(ptr, 0), 0);
-    assert_eq!(circuit_fsim(ptr, 0, 1, 0.2, 0.3), 0);
-
-    circuit_free(ptr);
+    circuit_free(assigned);
+    circuit_free(circuit);
+    param_free(theta_ptr);
+    param_free(phi_ptr);
 }
 
 #[test]
-fn test_parameter_parsing() {
-    // Test parameter parsing
-    let expr = std::ffi::CString::new("theta").unwrap();
-    let param_ptr = param_parse(expr.as_ptr());
-    assert!(!param_ptr.is_null(), "Parameter parsing should succeed");
+fn invalid_parameters_return_null_or_error() {
+    assert!(param_parse(std::ptr::null()).is_null());
+    assert_eq!(param_evaluate(std::ptr::null(), std::ptr::null()), 0.0);
 
-    // Evaluate with bindings
-    let bindings = std::ffi::CString::new("theta:3.14159").unwrap();
-    let result = param_evaluate(param_ptr, bindings.as_ptr());
-    assert!(
-        (result - 3.14159).abs() < 1e-6,
-        "Parameter evaluation failed"
-    );
-
-    param_free(param_ptr);
-}
-
-#[test]
-fn test_symbolic_gates() {
-    let ptr = circuit_new(3);
-    assert!(!ptr.is_null());
-
-    let theta = std::ffi::CString::new("theta").unwrap();
-    let phi = std::ffi::CString::new("phi").unwrap();
-    let th_ptr = param_parse(theta.as_ptr());
-    let ph_ptr = param_parse(phi.as_ptr());
-    assert!(!th_ptr.is_null() && !ph_ptr.is_null());
-
-    assert_eq!(circuit_rxy_param(ptr, 0, th_ptr, ph_ptr), 0);
-    assert_eq!(circuit_rxx_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_ryy_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_rzz_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_rzx_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_crx_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_cry_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_crz_param(ptr, 0, 1, th_ptr), 0);
-    assert_eq!(circuit_fsim_param(ptr, 0, 1, th_ptr, ph_ptr), 0);
-
-    param_free(th_ptr);
-    param_free(ph_ptr);
-    circuit_free(ptr);
-}
-
-#[test]
-fn test_qcis_parsing() {
-    // QCIS uses CZ, not CX. Also uses H for Hadamard.
-    let qcis = std::ffi::CString::new("H Q0\nCZ Q0 Q1\n").unwrap();
-    let ptr = qcis_load(qcis.as_ptr());
-    assert!(!ptr.is_null(), "QCIS parsing should succeed");
-
-    let num = circuit_num_qubits(ptr);
-    assert_eq!(num, 2, "QCIS should create circuit with 2 qubits");
-
-    circuit_free(ptr);
-}
-
-#[test]
-fn test_qasm2_parsing() {
-    let qasm =
-        std::ffi::CString::new("OPENQASM 2.0;\nqreg q[2];\nh q[0];\ncx q[0],q[1];\n").unwrap();
-    let ptr = qasm2_load(qasm.as_ptr());
-    assert!(!ptr.is_null(), "QASM2 parsing should succeed");
-
-    let num = circuit_num_qubits(ptr);
-    assert_eq!(num, 2, "QASM2 should create circuit with 2 qubits");
-
-    circuit_free(ptr);
-}
-
-// Device FFI functionality tests
-#[test]
-fn test_device_and_topology() {
-    // Test topology creation
-    let qubits = [0u32, 1, 2];
-    let topo = topology_new_line(qubits.as_ptr(), 3);
-    assert!(!topo.is_null(), "Topology should not be null");
-    assert_eq!(
-        topology_num_qubits(topo),
-        3,
-        "Topology should have 3 qubits"
-    );
-
-    // Test device creation
-    let device = device_new(
-        std::ffi::CStr::from_bytes_with_nul(b"TestDevice\0")
-            .unwrap()
-            .as_ptr(),
-        topo,
-    );
-    assert!(!device.is_null(), "Device should not be null");
-    assert_eq!(device_num_qubits(device), 3, "Device should have 3 qubits");
-
-    // Test gate error setters/getters
-    assert_eq!(
-        device_set_default_single_qubit_error(device, 0.01),
-        0,
-        "Should set single-qubit error"
-    );
-    assert_eq!(
-        device_get_default_single_qubit_error(device),
-        0.01,
-        "Should get single-qubit error"
-    );
-
-    assert_eq!(
-        device_set_default_two_qubit_error(device, 0.02),
-        0,
-        "Should set two-qubit error"
-    );
-    assert_eq!(
-        device_get_default_two_qubit_error(device),
-        0.02,
-        "Should get two-qubit error"
-    );
-
-    // Test qubit properties
-    let qubit_prop = qubit_prop_new(0.001);
-    assert!(!qubit_prop.is_null(), "QubitProp should not be null");
-    assert_eq!(qubit_prop_set_t1(qubit_prop, 50.0), 0, "Should set T1");
-    assert_eq!(qubit_prop_get_t1(qubit_prop), 50.0, "Should get T1");
-
-    assert_eq!(
-        device_add_qubit_properties(device, 0, qubit_prop),
-        0,
-        "Should add qubit properties"
-    );
-    assert_eq!(device_get_t1(device, 0), 50.0, "Should retrieve qubit T1");
-
-    // Cleanup
-    qubit_prop_free(qubit_prop);
-    device_free(device);
-    topology_free(topo);
-}
-
-#[test]
-fn test_device_null_pointer_safety() {
-    // Verify Device FFI handles null pointers gracefully
-    assert_eq!(
-        device_num_qubits(std::ptr::null()),
-        0,
-        "NULL device should return 0 qubits"
-    );
-    device_free(std::ptr::null_mut()); // Should not crash
-
-    // Verify getters on NULL return default/error values
-    assert_eq!(
-        device_get_default_single_qubit_error(std::ptr::null()),
-        -1.0,
-        "NULL device should return -1.0"
-    );
-}
-
-#[test]
-fn test_statevector_lifecycle() {
-    let ptr = statevector_new(2);
-    assert!(!ptr.is_null());
-
-    assert_eq!(statevector_num_qubits(ptr), 2);
-
-    assert_eq!(statevector_h(ptr, 0), 0);
-    assert_eq!(statevector_cx(ptr, 0, 1), 0);
-
-    let mut probs = [0.0f64; 4];
-    assert_eq!(statevector_probabilities(ptr, probs.as_mut_ptr(), 4), 0);
-    assert!((probs[0] - 0.5).abs() < 1e-10);
-    assert!((probs[3] - 0.5).abs() < 1e-10);
-
-    statevector_free(ptr);
-}
-
-#[test]
-fn test_density_matrix_lifecycle() {
-    let ptr = density_matrix_new(2);
-    assert!(!ptr.is_null());
-
-    assert_eq!(density_matrix_num_qubits(ptr), 2);
-
-    assert_eq!(density_matrix_h(ptr, 0), 0);
-    assert_eq!(density_matrix_cx(ptr, 0, 1), 0);
-
-    let mut probs = [0.0f64; 4];
-    assert_eq!(density_matrix_probabilities(ptr, probs.as_mut_ptr(), 4), 0);
-    assert!((probs[0] - 0.5).abs() < 1e-10);
-    assert!((probs[3] - 0.5).abs() < 1e-10);
-
-    density_matrix_free(ptr);
-}
-
-#[test]
-fn test_density_matrix_noise_lifecycle() {
-    let ptr = density_matrix_noise_new(2);
-    assert!(!ptr.is_null());
-
-    assert_eq!(density_matrix_noise_num_qubits(ptr), 2);
-
-    assert_eq!(density_matrix_noise_h(ptr, 0), 0);
-    assert_eq!(density_matrix_noise_cx(ptr, 0, 1), 0);
-
-    density_matrix_noise_free(ptr);
-}
-
-#[test]
-fn test_pauli_string_operations() {
-    let ptr = pauli_string_new(3);
-    assert!(!ptr.is_null());
-
-    assert_eq!(pauli_string_num_qubits(ptr), 3);
-
-    assert_eq!(pauli_string_set_pauli(ptr, 0, 1), 0); // X
-    assert_eq!(pauli_string_set_pauli(ptr, 1, 3), 0); // Z
-    assert_eq!(pauli_string_set_pauli(ptr, 2, 0), 0); // I
-
-    assert_eq!(pauli_string_get_pauli(ptr, 0), 1);
-    assert_eq!(pauli_string_get_pauli(ptr, 1), 3);
-    assert_eq!(pauli_string_get_pauli(ptr, 2), 0);
-
-    let str_ptr = pauli_string_to_string(ptr);
-    assert!(!str_ptr.is_null());
-    let cstr = unsafe { std::ffi::CStr::from_ptr(str_ptr) };
-    assert_eq!(cstr.to_str().unwrap(), "XZI");
-    pauli_string_free_string(str_ptr);
-
-    pauli_string_free(ptr);
-}
-
-#[test]
-fn test_hamiltonian_operations() {
-    let ptr = hamiltonian_new(2);
-    assert!(!ptr.is_null());
-
-    assert_eq!(hamiltonian_num_qubits(ptr), 2);
-
-    let term1 = std::ffi::CString::new("XX").unwrap();
-    assert_eq!(hamiltonian_add_term(ptr, term1.as_ptr(), 1.0, 0.0), 0);
-
-    let term2 = std::ffi::CString::new("ZZ").unwrap();
-    assert_eq!(hamiltonian_add_term(ptr, term2.as_ptr(), 0.5, 0.0), 0);
-
-    assert_eq!(hamiltonian_num_terms(ptr), 2);
-
-    hamiltonian_free(ptr);
-}
-
-#[test]
-fn test_observable_expectation() {
-    // Create Hamiltonian H = Z
-    let h_ptr = hamiltonian_new(1);
-    let term = std::ffi::CString::new("Z").unwrap();
-    assert_eq!(hamiltonian_add_term(h_ptr, term.as_ptr(), 1.0, 0.0), 0);
-
-    // Create statevector |1>
-    let sv_ptr = statevector_new(1);
-    assert_eq!(statevector_x(sv_ptr, 0), 0);
-
-    // Compute <1|Z|1>
-    let mut real = 0.0;
-    let mut imag = 0.0;
-    assert_eq!(
-        observable_expectation_sv(h_ptr, sv_ptr, &mut real, &mut imag),
-        0
-    );
-    assert!((real - (-1.0)).abs() < 1e-10);
-    assert!(imag.abs() < 1e-10);
-
-    // Test with density matrix
-    let dm_ptr = density_matrix_new(1);
-    assert_eq!(density_matrix_x(dm_ptr, 0), 0);
-    assert_eq!(
-        observable_expectation_dm(h_ptr, dm_ptr, &mut real, &mut imag),
-        0
-    );
-    assert!((real - (-1.0)).abs() < 1e-10);
-    assert!(imag.abs() < 1e-10);
-
-    hamiltonian_free(h_ptr);
-    statevector_free(sv_ptr);
-    density_matrix_free(dm_ptr);
-}
-
-#[test]
-fn test_qis_null_pointer_safety() {
-    // Test null pointers for qis functions
-    statevector_free(std::ptr::null_mut());
-    density_matrix_free(std::ptr::null_mut());
-    density_matrix_noise_free(std::ptr::null_mut());
-    pauli_string_free(std::ptr::null_mut());
-    hamiltonian_free(std::ptr::null_mut());
-
-    assert_eq!(statevector_num_qubits(std::ptr::null()), 0);
-    assert_eq!(density_matrix_num_qubits(std::ptr::null()), 0);
-    assert_eq!(density_matrix_noise_num_qubits(std::ptr::null()), 0);
-    assert_eq!(pauli_string_num_qubits(std::ptr::null()), 0);
-    assert_eq!(hamiltonian_num_qubits(std::ptr::null()), 0);
-
-    assert_eq!(statevector_h(std::ptr::null_mut(), 0), -1);
-    assert_eq!(density_matrix_h(std::ptr::null_mut(), 0), -1);
-    assert_eq!(pauli_string_set_pauli(std::ptr::null_mut(), 0, 1), -1);
-    assert_eq!(
-        hamiltonian_add_term(std::ptr::null_mut(), std::ptr::null(), 1.0, 0.0),
-        -1
-    );
+    let circuit = circuit_new(1);
+    assert_eq!(circuit_rx_param(circuit, 0, std::ptr::null()), -1);
+    assert!(circuit_assign_params(std::ptr::null(), std::ptr::null()).is_null());
+    circuit_free(circuit);
+    param_free(std::ptr::null_mut());
 }

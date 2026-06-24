@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from cqlib.circuit import Circuit, Instruction, StandardGate
+from cqlib.circuit import Circuit, Instruction, StandardGate, UnitaryGate
 from cqlib.compile import CompilerConfigError
 from cqlib.compile.knowledge import RuleKind
 from cqlib.compile.transform import (
@@ -27,14 +27,18 @@ from cqlib.compile.transform import (
     KnowledgeRewriteResult,
     KnowledgeRewriteStats,
     KnowledgeRewriter,
+    LowerToRoutingBasis,
     RewriteConfig,
     RewriteMode,
     TransformResult,
     canonicalize_circuit,
+    lower_to_routing_basis,
     rewrite_circuit,
 )
 from cqlib.compile.transform.decompose import expand_definitions
-from cqlib.compile.transform.result import TransformResult as ResultModuleTransformResult
+from cqlib.compile.transform.result import (
+    TransformResult as ResultModuleTransformResult,
+)
 
 
 def test_transform_module_and_public_types_are_registered() -> None:
@@ -47,6 +51,7 @@ def test_transform_module_and_public_types_are_registered() -> None:
     assert KnowledgeRewriter.__module__ == "cqlib.compile.transform"
     assert KnowledgeRewriteStats.__module__ == "cqlib.compile.transform"
     assert KnowledgeRewriteResult.__module__ == "cqlib.compile.transform"
+    assert LowerToRoutingBasis.__module__ == "cqlib.compile.transform"
     assert TransformResult is ResultModuleTransformResult
 
 
@@ -161,7 +166,9 @@ def test_canonicalization_releases_gil(run) -> None:
 def test_zero_round_limit_is_rejected_when_run() -> None:
     canonicalizer = Canonicalizer(CanonicalizeConfig(round_limit=0))
 
-    with pytest.raises(CompilerConfigError, match="round_limit must be greater than zero"):
+    with pytest.raises(
+        CompilerConfigError, match="round_limit must be greater than zero"
+    ):
         canonicalizer.run(Circuit(1))
 
 
@@ -242,7 +249,8 @@ def test_rewriter_lowers_to_explicit_target_basis() -> None:
 
     assert rewriter.config == config
     assert [
-        operation.instruction.instruction.name for operation in result.circuit.operations
+        operation.instruction.instruction.name
+        for operation in result.circuit.operations
     ] == ["H", "CZ", "H"]
     assert result.stats.rules_applied >= 1
 
@@ -250,11 +258,15 @@ def test_rewriter_lowers_to_explicit_target_basis() -> None:
 def test_rewrite_rejects_invalid_configuration_and_unsatisfied_basis() -> None:
     with pytest.raises(CompilerConfigError, match="must not be empty"):
         RewriteConfig(target_instructions=[])
-    with pytest.raises(CompilerConfigError, match="unsupported rewrite target instruction"):
+    with pytest.raises(
+        CompilerConfigError, match="unsupported rewrite target instruction"
+    ):
         RewriteConfig(target_instructions=[Instruction.delay()])
 
     zero_round_rewriter = KnowledgeRewriter(RewriteConfig(max_rounds=0))
-    with pytest.raises(CompilerConfigError, match="max_rounds must be greater than zero"):
+    with pytest.raises(
+        CompilerConfigError, match="max_rounds must be greater than zero"
+    ):
         zero_round_rewriter.run(Circuit(1))
 
     circuit = Circuit(1)
@@ -263,5 +275,58 @@ def test_rewrite_rejects_invalid_configuration_and_unsatisfied_basis() -> None:
         mode=RewriteMode.lowering(),
         target_instructions=[Instruction.from_standard_gate(StandardGate.CZ)],
     )
-    with pytest.raises(CompilerConfigError, match="target instruction basis not satisfied"):
+    with pytest.raises(
+        CompilerConfigError, match="target instruction basis not satisfied"
+    ):
         rewrite_circuit(circuit, config)
+
+
+def test_lower_to_routing_basis_lowers_toffoli_to_two_qubit_ops() -> None:
+    circuit = Circuit(3)
+    circuit.ccx(0, 1, 2)
+
+    result = lower_to_routing_basis(circuit)
+
+    assert result.changed is True
+    names = [
+        operation.instruction.instruction.name
+        for operation in result.circuit.operations
+    ]
+    assert "CCX" not in names
+    assert "CX" in names
+    assert len(circuit.operations) == 1
+
+
+def test_lower_to_routing_basis_prefers_cz_only_basis() -> None:
+    circuit = Circuit(3)
+    circuit.ccx(0, 1, 2)
+    basis = [
+        Instruction.from_standard_gate(StandardGate.H),
+        Instruction.from_standard_gate(StandardGate.T),
+        Instruction.from_standard_gate(StandardGate.TDG),
+        Instruction.from_standard_gate(StandardGate.CZ),
+        Instruction.from_standard_gate(StandardGate.GPhase),
+    ]
+    transform = LowerToRoutingBasis(preferred_basis=basis)
+
+    result = transform.run(circuit)
+    names = [
+        operation.instruction.instruction.name
+        for operation in result.circuit.operations
+    ]
+
+    assert transform.preferred_basis == basis
+    assert "CCX" not in names
+    assert "CX" not in names
+    assert "CZ" in names
+
+
+def test_lower_to_routing_basis_reports_route_sabre_contract() -> None:
+    circuit = Circuit(3)
+    circuit.unitary(UnitaryGate("three_q", 3), [0, 1, 2])
+
+    with pytest.raises(
+        CompilerConfigError,
+        match="routing-basis lowering did not satisfy route.sabre input contract",
+    ):
+        lower_to_routing_basis(circuit)

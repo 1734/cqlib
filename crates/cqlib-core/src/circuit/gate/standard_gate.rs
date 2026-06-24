@@ -185,6 +185,45 @@ const GATE_INFO_TABLE: [(u8, u8, u8); 36] = [
     (0, 2, 2), // FSIM
 ];
 
+const ALL_STANDARD_GATES: [StandardGate; 36] = [
+    StandardGate::I,
+    StandardGate::H,
+    StandardGate::RX,
+    StandardGate::RXX,
+    StandardGate::RXY,
+    StandardGate::RY,
+    StandardGate::RYY,
+    StandardGate::RZ,
+    StandardGate::RZX,
+    StandardGate::RZZ,
+    StandardGate::S,
+    StandardGate::SDG,
+    StandardGate::SWAP,
+    StandardGate::T,
+    StandardGate::TDG,
+    StandardGate::U,
+    StandardGate::X,
+    StandardGate::XY,
+    StandardGate::X2P,
+    StandardGate::X2M,
+    StandardGate::XY2P,
+    StandardGate::XY2M,
+    StandardGate::Y,
+    StandardGate::Y2P,
+    StandardGate::Y2M,
+    StandardGate::Z,
+    StandardGate::Phase,
+    StandardGate::GPhase,
+    StandardGate::CX,
+    StandardGate::CCX,
+    StandardGate::CY,
+    StandardGate::CZ,
+    StandardGate::CRX,
+    StandardGate::CRY,
+    StandardGate::CRZ,
+    StandardGate::FSIM,
+];
+
 impl fmt::Display for StandardGate {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
@@ -192,6 +231,11 @@ impl fmt::Display for StandardGate {
 }
 
 impl StandardGate {
+    /// Returns all standard gates in enum discriminant order.
+    pub fn all() -> &'static [Self] {
+        &ALL_STANDARD_GATES
+    }
+
     /// Returns the unitary matrix representation of the gate.
     ///
     /// The matrix is returned as a `Cow<Array2<Complex<f64>>>`.

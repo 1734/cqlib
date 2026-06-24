@@ -63,6 +63,19 @@ impl PyStandardGate {
         ))
     }
 
+    /// Returns all standard gate definitions in enum order.
+    ///
+    /// The returned gates are unbound definitions. Parametric gates can be
+    /// called to bind concrete or symbolic parameters.
+    #[staticmethod]
+    fn all() -> Vec<Self> {
+        StandardGate::all()
+            .iter()
+            .copied()
+            .map(|gate| PyStandardGate::from(gate, Vec::new()))
+            .collect()
+    }
+
     /// Binds parameters to the gate.
     ///
     /// Enables callable syntax: `StandardGate.RX(3.14)` returns a new gate instance
@@ -346,6 +359,21 @@ mod tests {
 
         assert_eq!(inverse.inner, StandardGate::RX);
         assert_eq!(inverse.params, vec![-theta]);
+    }
+
+    #[test]
+    fn all_mirrors_core_standard_gate_order() {
+        let gates = PyStandardGate::all();
+
+        assert_eq!(gates.len(), StandardGate::all().len());
+        assert!(
+            gates
+                .iter()
+                .zip(StandardGate::all())
+                .all(
+                    |(py_gate, core_gate)| py_gate.inner == *core_gate && py_gate.params.is_empty()
+                )
+        );
     }
 }
 

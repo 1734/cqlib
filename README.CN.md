@@ -172,11 +172,14 @@ pytest tests/python/
 |-----------------|----------------------------------------------------------|
 | API 参考 (Rust)   | [docs.rs/cqlib-core](https://docs.rs/cqlib-core)         |
 | API 参考 (Python) | [qc.zdxlz.com/docs](https://qc.zdxlz.com/)               |
-| 源码仓库            | [gitee.com/cq-lib/cqlib](https://gitee.com/cq-lib/cqlib) |
+| 源码仓库 (Gitee)    | [gitee.com/cq-lib/cqlib](https://gitee.com/cq-lib/cqlib) |
+| 源码仓库 (GitHub)   | [github.com/cq-lib/cqlib](https://github.com/cq-lib/cqlib) |
 
 ## 参与贡献
 
-欢迎贡献代码。请通过仓库 Issue 进行讨论。提交 Pull Request 时，请基于 `main` 分支，并确保所有测试通过。
+欢迎贡献代码。提交改动前请阅读 [贡献指南](CONTRIBUTING.CN.md)，并遵守 [行为准则](CODE_OF_CONDUCT.CN.md)。如果你需要报告安全问题，请参考 [安全策略](SECURITY.CN.md)。
+
+请通过仓库 Issue 进行讨论。提交 Pull Request 时，请基于 `main` 分支，并确保相关测试通过。
 
 ## 许可证
 
