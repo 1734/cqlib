@@ -394,7 +394,7 @@ fn dump_gate_definition(gate: &CircuitGate, output: &mut String) -> Result<(), Q
         return Err(Qasm3DumpError::MeasureInGateNotAllowed);
     }
 
-    let params: Vec<String> = gate.symbols().iter().cloned().collect();
+    let params: Vec<String> = gate.signature_params().iter().cloned().collect();
     let params = if params.is_empty() {
         String::new()
     } else {

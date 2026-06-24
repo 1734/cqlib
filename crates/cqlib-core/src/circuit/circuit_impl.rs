@@ -1776,13 +1776,16 @@ impl Circuit {
                     // Apply substitution from the *parent* scope (if we are deep in recursion)
                     // We need simultaneous substitution here too
                     param = Self::apply_param_map(param, param_map);
+                    if param.get_symbols().is_empty() {
+                        param.evaluate(&None)?;
+                    }
                     resolved_params.push(param);
                 }
 
                 // 2. Build maps for the next level
                 // Param Map: Inner Symbol -> Resolved Value
                 let mut next_param_map = HashMap::new();
-                for (i, sym) in cg.symbols().iter().enumerate() {
+                for (i, sym) in cg.signature_params().iter().enumerate() {
                     if i < resolved_params.len() {
                         next_param_map.insert(sym.clone(), resolved_params[i].clone());
                     }
@@ -1837,6 +1840,9 @@ impl Circuit {
                     };
 
                     param = Self::apply_param_map(param, param_map);
+                    if param.get_symbols().is_empty() {
+                        param.evaluate(&None)?;
+                    }
 
                     mapped_params.push(ParameterValue::from(param));
                 }
@@ -1848,14 +1854,12 @@ impl Circuit {
                     _ => op.instruction.clone(),
                 };
 
-                target_circuit
-                    .append(
-                        instruction,
-                        mapped_qubits,
-                        mapped_params,
-                        op.label.as_deref(),
-                    )
-                    .unwrap();
+                target_circuit.append(
+                    instruction,
+                    mapped_qubits,
+                    mapped_params,
+                    op.label.as_deref(),
+                )?;
                 Ok(())
             }
         }
@@ -1941,16 +1945,21 @@ impl Circuit {
         for param in self.parameters.iter() {
             if let Ok(val) = param.evaluate(bindings) {
                 index_map.push(CircuitParam::Fixed(val));
-            } else {
-                let mut tp = param.clone();
-                if let Some(bindings) = bindings {
-                    for (k, v) in bindings.iter() {
-                        tp = tp.replace(k, Parameter::from(*v));
-                    }
-                    let s = tp.simplify();
-                    tp = s.map_err(|e| CircuitError::UnresolvedParameter(format!("{:?}", e)))?;
-                }
+                continue;
+            }
 
+            let mut tp = param.clone();
+            if let Some(bindings) = bindings {
+                for (k, v) in bindings.iter() {
+                    tp = tp.replace(k, Parameter::from(*v));
+                }
+                let s = tp.simplify();
+                tp = s.map_err(|e| CircuitError::UnresolvedParameter(format!("{:?}", e)))?;
+            }
+
+            if tp.get_symbols().is_empty() {
+                index_map.push(CircuitParam::Fixed(tp.evaluate(&None)?));
+            } else {
                 // Intern the new parameter (deduplicates automatically)
                 let (idx, is_new) = new_circuit.parameters.insert_full(tp.clone());
 

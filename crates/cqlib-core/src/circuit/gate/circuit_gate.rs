@@ -140,6 +140,7 @@ pub struct CircuitGate {
     pub name: Arc<String>,
     pub(crate) num_qubits: usize,
     pub(crate) num_params: usize,
+    pub(crate) signature_params: IndexSet<String>,
     pub(crate) circuit: Arc<FrozenCircuit>,
 }
 
@@ -172,14 +173,65 @@ impl CircuitGate {
     /// ```
     pub fn new(name: impl Into<String>, circuit: FrozenCircuit) -> Result<Self, CircuitError> {
         let num_qubits = circuit.circuit.qubits().len();
-        let num_params = circuit.circuit.symbols().len();
+        let signature_params = circuit.circuit.symbols().clone();
+        let num_params = signature_params.len();
 
         Ok(Self {
             name: Arc::new(name.into()),
             num_qubits,
             num_params,
+            signature_params,
             circuit: Arc::new(circuit),
         })
+    }
+
+    /// Creates a new circuit-based gate with an explicit call signature.
+    ///
+    /// This is useful for frontends whose gate signatures are declared separately
+    /// from the symbols that happen to appear in the implementation. Declared but
+    /// unused parameters remain part of the gate arity.
+    pub fn with_signature(
+        name: impl Into<String>,
+        circuit: FrozenCircuit,
+        params: impl IntoIterator<Item = String>,
+    ) -> Result<Self, CircuitError> {
+        let mut signature_params = IndexSet::new();
+        for param in params {
+            if !signature_params.insert(param.clone()) {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "duplicate circuit gate parameter '{param}'"
+                )));
+            }
+        }
+
+        for symbol in circuit.circuit.symbols() {
+            if !signature_params.contains(symbol) {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "circuit gate implementation references undeclared parameter '{symbol}'"
+                )));
+            }
+        }
+
+        let num_qubits = circuit.circuit.qubits().len();
+        let num_params = signature_params.len();
+
+        Ok(Self {
+            name: Arc::new(name.into()),
+            num_qubits,
+            num_params,
+            signature_params,
+            circuit: Arc::new(circuit),
+        })
+    }
+
+    /// Returns the positional parameter signature used when invoking this gate.
+    pub fn signature_params(&self) -> &IndexSet<String> {
+        &self.signature_params
+    }
+
+    /// Returns the symbols actually referenced by this gate's backing circuit.
+    pub fn used_symbols(&self) -> &IndexSet<String> {
+        self.circuit.circuit.symbols()
     }
 
     /// Returns the set of symbolic parameter names used in the circuit.
@@ -198,7 +250,7 @@ impl CircuitGate {
     /// assert!(symbols.is_empty());
     /// ```
     pub fn symbols(&self) -> IndexSet<String> {
-        self.circuit.circuit.symbols().clone()
+        self.used_symbols().clone()
     }
 
     /// Returns the number of qubits this gate acts on.
@@ -304,6 +356,40 @@ impl CircuitGate {
     pub fn inverse(&self) -> Result<Self, CircuitError> {
         let inverted_circuit = self.circuit.circuit.inverse()?;
         let frozen_inverted = FrozenCircuit::new(inverted_circuit);
-        CircuitGate::new(format!("{}_dg", self.name), frozen_inverted)
+        CircuitGate::with_signature(
+            format!("{}_dg", self.name),
+            frozen_inverted,
+            self.signature_params.iter().cloned(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit::{Circuit, Parameter, Qubit};
+
+    #[test]
+    fn signature_params_are_distinct_from_used_symbols() {
+        let mut circuit = Circuit::new(1);
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+
+        let gate = CircuitGate::with_signature(
+            "declared",
+            FrozenCircuit::new(circuit),
+            ["unused".to_string(), "used".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(gate.num_params(), 2);
+        assert_eq!(
+            gate.signature_params().iter().cloned().collect::<Vec<_>>(),
+            vec!["unused".to_string(), "used".to_string()]
+        );
+        assert!(gate.symbols().contains("used"));
+        assert!(!gate.symbols().contains("unused"));
+        assert_eq!(gate.used_symbols(), &gate.symbols());
     }
 }

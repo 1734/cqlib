@@ -525,7 +525,7 @@ pub fn circuit_to_symbolic_matrix(
                 }
             }
             Instruction::CircuitGate(circuit_gate) => {
-                let symbols = circuit_gate.symbols();
+                let symbols = circuit_gate.signature_params();
                 let expected = symbols.len();
                 let actual = params.len();
                 if actual != expected {
