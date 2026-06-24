@@ -46,8 +46,6 @@ use crate::circuit::classical::{ClassicalValue, ClassicalVar};
 use crate::circuit::classical_expr::ClassicalExpr;
 use crate::circuit::control_flow::ControlBody;
 use crate::circuit::error::CircuitError;
-use crate::circuit::gate::ClassicalDataOp;
-use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::instruction::Instruction;
 use crate::circuit::operation::{Operation, ValueOperation};
 use alloc::collections::BTreeSet;
@@ -111,21 +109,12 @@ impl ValueControlBody {
 
     /// Returns true if this body directly or recursively contains measurement.
     pub fn has_measurement(&self) -> bool {
-        self.operations.iter().any(|operation| {
-            matches!(
-                &operation.instruction,
-                ValueInstruction::Instruction(Instruction::Directive(Directive::Measure))
-                    | ValueInstruction::Instruction(Instruction::ClassicalData(
-                        ClassicalDataOp::MeasureBit { .. }
-                    ))
-                    | ValueInstruction::Instruction(Instruction::ClassicalData(
-                        ClassicalDataOp::MeasureBits { .. }
-                    ))
-            ) || matches!(
-                &operation.instruction,
-                ValueInstruction::ClassicalControl(control) if control.has_measurement()
-            )
-        })
+        self.operations
+            .iter()
+            .any(|operation| match &operation.instruction {
+                ValueInstruction::Instruction(instruction) => instruction.has_measurement(),
+                ValueInstruction::ClassicalControl(control) => control.has_measurement(),
+            })
     }
 
     /// Returns true if this body directly or recursively reads `value`.
@@ -133,13 +122,8 @@ impl ValueControlBody {
         self.operations
             .iter()
             .any(|operation| match &operation.instruction {
-                ValueInstruction::Instruction(Instruction::ClassicalData(
-                    ClassicalDataOp::Store {
-                        value: expression, ..
-                    },
-                )) => expression.values().contains(&value),
+                ValueInstruction::Instruction(instruction) => instruction.reads_value(value),
                 ValueInstruction::ClassicalControl(control) => control.reads_value(value),
-                _ => false,
             })
     }
 }
@@ -586,7 +570,7 @@ mod tests {
     use super::*;
     use crate::circuit::ClassicalType;
     use crate::circuit::bit::Qubit;
-    use crate::circuit::gate::StandardGate;
+    use crate::circuit::gate::{ClassicalDataOp, StandardGate};
     use std::num::NonZeroU32;
 
     #[test]

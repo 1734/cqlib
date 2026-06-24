@@ -390,7 +390,13 @@ fn collect_control_gates(
 }
 
 fn dump_gate_definition(gate: &CircuitGate, output: &mut String) -> Result<(), Qasm3DumpError> {
-    if operations_contain_measurement(gate.circuit.circuit.operations()) {
+    if gate
+        .circuit
+        .circuit
+        .operations()
+        .iter()
+        .any(|operation| operation.instruction.has_measurement())
+    {
         return Err(Qasm3DumpError::MeasureInGateNotAllowed);
     }
 
@@ -431,7 +437,12 @@ fn dump_unitary_gate_definition(
     frozen: &FrozenCircuit,
     output: &mut String,
 ) -> Result<(), Qasm3DumpError> {
-    if operations_contain_measurement(frozen.circuit.operations()) {
+    if frozen
+        .circuit
+        .operations()
+        .iter()
+        .any(|operation| operation.instruction.has_measurement())
+    {
         return Err(Qasm3DumpError::MeasureInGateNotAllowed);
     }
     let qubits: Vec<String> = (0..frozen.circuit.qubits().len())
@@ -453,16 +464,6 @@ fn dump_unitary_gate_definition(
     )?;
     writeln!(output, "}}")?;
     Ok(())
-}
-
-fn operations_contain_measurement(operations: &[Operation]) -> bool {
-    operations.iter().any(|op| match &op.instruction {
-        Instruction::Directive(Directive::Measure)
-        | Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-        | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => true,
-        Instruction::ClassicalControl(control) => control.has_measurement(),
-        _ => false,
-    })
 }
 
 fn dump_operations(
@@ -516,7 +517,7 @@ fn dump_operations(
                 if consumes_store
                     && operations[index + 2..]
                         .iter()
-                        .any(|operation| operation_reads_value(operation, *result))
+                        .any(|operation| operation.instruction.reads_value(*result))
                 {
                     return Err(Qasm3DumpError::UnsupportedClassicalData(format!(
                         "measurement value {} is read after being stored into a mutable variable",
@@ -526,7 +527,7 @@ fn dump_operations(
                 if !consumes_store
                     && !operations[index + 1..]
                         .iter()
-                        .any(|operation| operation_reads_value(operation, *result))
+                        .any(|operation| operation.instruction.reads_value(*result))
                 {
                     destination = MeasurementDestination::Discard(*result);
                 }
@@ -610,7 +611,7 @@ fn collect_skipped_classical_values(
                 let remaining_start = index + 1 + usize::from(consumes_store);
                 let read_later = operations[remaining_start..]
                     .iter()
-                    .any(|operation| operation_reads_value(operation, *result));
+                    .any(|operation| operation.instruction.reads_value(*result));
                 if !read_later {
                     skipped.insert(*result);
                 }
@@ -693,7 +694,7 @@ fn measurement_destination(
         instruction,
         Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
     ) {
-        if let Some(bit) = stored_measurement_bit(*target, result, value) {
+        if let Some(bit) = value.measurement_store_bit(*target, result) {
             return Ok((MeasurementDestination::VarBit(*target, bit), true));
         }
     }
@@ -701,40 +702,6 @@ fn measurement_destination(
     Err(Qasm3DumpError::UnsupportedClassicalData(
         "measurement is followed by an unsupported store".to_string(),
     ))
-}
-
-fn stored_measurement_bit(
-    target: ClassicalVar,
-    result: ClassicalValue,
-    expression: &ClassicalExpr,
-) -> Option<u32> {
-    let ClassicalType::BitVec(width) = target.ty() else {
-        return None;
-    };
-    let ClassicalExprKind::PackBits { bits } = expression.kind() else {
-        return None;
-    };
-    if bits.len() != width.get() as usize {
-        return None;
-    }
-
-    let mut measured_index = None;
-    for (index, bit) in bits.iter().enumerate() {
-        match bit.kind() {
-            ClassicalExprKind::Value(value) if *value == result => {
-                if measured_index.replace(index as u32).is_some() {
-                    return None;
-                }
-            }
-            ClassicalExprKind::ExtractBit {
-                value,
-                index: source_index,
-            } if *source_index == index as u32
-                && matches!(value.kind(), ClassicalExprKind::Var(var) if *var == target) => {}
-            _ => return None,
-        }
-    }
-    measured_index
 }
 
 fn dump_measurement(
@@ -802,17 +769,6 @@ fn is_full_register_measurement(qubits: &[String], qubit_count: usize) -> bool {
             .iter()
             .enumerate()
             .all(|(index, qubit)| qubit == &format!("q[{index}]"))
-}
-
-fn operation_reads_value(operation: &Operation, value: ClassicalValue) -> bool {
-    match &operation.instruction {
-        Instruction::ClassicalData(ClassicalDataOp::Store {
-            value: expression, ..
-        }) => expression.values().contains(&value),
-        Instruction::ClassicalData(_) => false,
-        Instruction::ClassicalControl(control) => control.reads_value(value),
-        _ => false,
-    }
 }
 
 fn dump_standard_gate(

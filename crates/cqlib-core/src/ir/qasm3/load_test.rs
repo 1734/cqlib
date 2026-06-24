@@ -59,6 +59,17 @@ fn assert_err(source: &str, matches: impl FnOnce(&Qasm3ParseError) -> bool) -> Q
     err
 }
 
+fn loads_without_panicking(source: &str) -> Result<Circuit, Qasm3ParseError> {
+    std::panic::catch_unwind(|| loads(source)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic payload");
+        panic!("OpenQASM 3 loader panicked for valid input: {message}");
+    })
+}
+
 #[test]
 fn loads_bell_circuit() {
     let circuit = loads(
@@ -252,9 +263,9 @@ fn loads_parameters_and_register_order() {
         include "stdgates.inc";
         input angle[64] theta;
         qubit[2] q;
-        qubit anc;
+        qubit and;
         rx(pi / 2) q[1];
-        rz(theta) anc;
+        rz(theta) and;
         "#,
     )
     .unwrap();
@@ -746,4 +757,153 @@ fn rejects_unsupported_defcal() {
             | Qasm3ParseError::SemanticError(_)
             | Qasm3ParseError::UnsupportedFeature(_)
     ));
+}
+
+#[test]
+fn loads_top_level_scope_without_panicking() {
+    let circuit = loads_without_panicking(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        {
+            qubit q;
+            x q;
+        }
+        "#,
+    )
+    .expect("top-level scope is accepted by statementOrScope");
+
+    assert_eq!(circuit.num_qubits(), 1);
+    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+}
+
+#[test]
+fn loads_single_quoted_include_without_panicking() {
+    let circuit = loads_without_panicking(
+        r#"
+        OPENQASM 3.0;
+        include 'stdgates.inc';
+        qubit q;
+        x q;
+        "#,
+    )
+    .expect("StringLiteral accepts single-quoted strings");
+
+    assert_eq!(circuit.num_qubits(), 1);
+    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+}
+
+#[test]
+fn preserves_classical_initializer_statement_order() {
+    let circuit = loads(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit q;
+        x q;
+        bool flag = true;
+        z q;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 3);
+    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::Store { .. })
+    ));
+    assert_standard_gate(&circuit, 2, StandardGate::Z, &[0]);
+}
+
+#[test]
+fn normalizes_actual_header_when_comment_contains_short_header() {
+    let circuit = loads(
+        r#"
+        // OPENQASM 3;
+        OPENQASM 3;
+        include "stdgates.inc";
+        qubit q;
+        x q;
+        "#,
+    )
+    .expect("header normalization must ignore comments");
+
+    assert_eq!(circuit.num_qubits(), 1);
+    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+}
+
+#[test]
+fn loads_scalar_measurement_assignment_with_unicode_identifiers() {
+    let circuit = loads(
+        r#"
+        OPENQASM 3.0;
+        qubit[1] 量子;
+        bit 结果;
+        结果 = measure 量子[0];
+        "#,
+    )
+    .expect("Identifier accepts valid Unicode letters");
+
+    assert_eq!(circuit.num_qubits(), 1);
+    assert_eq!(circuit.operations().len(), 1);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+    ));
+}
+
+#[test]
+fn loads_classical_declaration_in_control_flow_scope() {
+    let circuit = loads(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit q;
+        if (true) {
+            bit flag = false;
+            if (flag) {
+                x q;
+            }
+        }
+        "#,
+    )
+    .expect("scope accepts classicalDeclarationStatement");
+
+    assert_eq!(circuit.num_qubits(), 1);
+    assert_eq!(circuit.classical_vars(), &[ClassicalType::Bit]);
+}
+
+#[test]
+fn rejects_pragma_without_remaining_line_content() {
+    let err = loads(
+        r#"
+        OPENQASM 3.0;
+        pragma
+        qubit q;
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Qasm3ParseError::ParseError(_)),
+        "pragma requires RemainingLineContent, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_nested_block_comment() {
+    let err = loads(
+        r#"
+        OPENQASM 3.0;
+        /* outer /* inner */ outer */
+        qubit q;
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Qasm3ParseError::ParseError(_)),
+        "BlockComment is non-nesting in qasm3Lexer, got {err:?}"
+    );
 }

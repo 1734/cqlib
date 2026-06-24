@@ -26,7 +26,7 @@ use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
 use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::standard_gate::StandardGate;
 use crate::circuit::gate::{ClassicalDataOp, MCGate, UnitaryGate, gate_matrix};
-use crate::circuit::{ClassicalControlOp, Parameter, circuit_to_matrix};
+use crate::circuit::{ClassicalControlOp, ClassicalValue, Parameter, circuit_to_matrix};
 use alloc::borrow::Cow;
 use ndarray::Array2;
 use num_complex::Complex64;
@@ -72,6 +72,28 @@ pub enum Instruction {
 }
 
 impl Instruction {
+    /// Returns true when this instruction directly or recursively contains a measurement.
+    pub fn has_measurement(&self) -> bool {
+        match self {
+            Self::Directive(Directive::Measure)
+            | Self::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+            | Self::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => true,
+            Self::ClassicalControl(control) => control.has_measurement(),
+            _ => false,
+        }
+    }
+
+    /// Returns true when this instruction directly or recursively reads `value`.
+    pub fn reads_value(&self, value: ClassicalValue) -> bool {
+        match self {
+            Self::ClassicalData(ClassicalDataOp::Store {
+                value: expression, ..
+            }) => expression.values().contains(&value),
+            Self::ClassicalControl(control) => control.reads_value(value),
+            _ => false,
+        }
+    }
+
     /// Breaks a standard gate into its canonical base gate plus explicit
     /// control count.
     ///
