@@ -1603,3 +1603,56 @@ fn compile_rejects_circuit_wider_than_device() {
 
     assert!(format!("{err}").contains("4 logical qubits"));
 }
+
+#[test]
+fn test_qasm() {
+    use crate::ir::qasm2::loads;
+
+    let c = loads(
+        r#"
+OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+creg c[2];
+rz(pi/2) q[0];
+sx q[0];
+rz(pi/2) q[0];
+rz(pi/2) q[1];
+sx q[1];
+rz(-pi/2) q[1];
+cx q[0],q[1];
+rz(pi/2) q[0];
+sx q[0];
+rz(pi/2) q[0];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+"#,
+    )
+    .unwrap();
+    let basis = vec![
+        StandardGate::CZ,
+        StandardGate::X,
+        StandardGate::RZ,
+        StandardGate::X2P,
+    ];
+    let result = compile(
+        &c,
+        CompileConfig {
+            mode: CompileMode::Enhanced,
+            target_basis: Some(native_basis(&basis)),
+            device: None,
+            initial_layout: None,
+            resource_policy: ResourcePolicy::default(),
+            seed: None,
+        },
+    )
+    .unwrap();
+
+    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(
+        standard_ops(&result.circuit)
+            .iter()
+            .all(|gate| basis.contains(gate))
+    );
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::RY));
+}
