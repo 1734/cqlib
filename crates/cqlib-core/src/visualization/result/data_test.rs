@@ -12,7 +12,9 @@
 
 //! Tests for result visualization data preparation.
 
-use super::data::{execution_result_to_plot_series, keep_topk_with_rest, sorted_labels};
+use super::data::{
+    execution_result_to_plot_series, keep_topk_with_rest, normalize_distribution, sorted_labels,
+};
 use super::options::PlotSeries;
 use super::*;
 use crate::circuit::Qubit;
@@ -57,6 +59,41 @@ fn topk_aggregates_rest() {
     assert_eq!(kept.get("rest").copied(), Some(1.0));
     assert!(kept.contains_key("01"));
     assert!(kept.contains_key("10"));
+}
+
+#[test]
+fn topk_zero_and_large_k_keep_original_series() {
+    let input = series(&[("00", 1.0), ("01", 5.0), ("10", 2.0)]);
+    assert_eq!(keep_topk_with_rest(&input, 0), input);
+    assert_eq!(keep_topk_with_rest(&input, 3), input);
+    assert_eq!(keep_topk_with_rest(&input, 4), input);
+}
+
+#[test]
+fn hamming_sort_requires_target_string() {
+    let opts = ResultPlotOptions {
+        sort: "hamming".to_string(),
+        ..ResultPlotOptions::default()
+    };
+    let err = sorted_labels(&[series(&[("00", 1.0)])], &opts).unwrap_err();
+    assert!(err.to_string().contains("requires target_string"));
+}
+
+#[test]
+fn hamming_sort_rejects_labels_with_different_length() {
+    let opts = ResultPlotOptions {
+        sort: "hamming".to_string(),
+        target_string: Some("0".to_string()),
+        ..ResultPlotOptions::default()
+    };
+    let err = sorted_labels(&[series(&[("00", 1.0)])], &opts).unwrap_err();
+    assert!(err.to_string().contains("equal-length"));
+}
+
+#[test]
+fn distribution_rejects_zero_sum_series() {
+    let err = normalize_distribution(series(&[("0", 0.0), ("1", 0.0)])).unwrap_err();
+    assert!(err.to_string().contains("sum is zero"));
 }
 
 fn execution_result_with_counts(items: &[(&str, usize)], num_qubits: usize) -> ExecutionResult {

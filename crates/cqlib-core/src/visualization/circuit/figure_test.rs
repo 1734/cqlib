@@ -15,8 +15,9 @@ use crate::circuit::circuit_param::ParameterValue;
 use crate::circuit::{
     Circuit, ClassicalExpr, ClassicalType, Parameter, Qubit, StandardGate, UnitaryGate,
 };
-use crate::visualization::circuit::{ParameterDisplayMode, ParameterFormatOptions};
+use crate::visualization::circuit::{GateStyle, ParameterDisplayMode, ParameterFormatOptions};
 use crate::visualization::test_utils::assert_svg_visual_match;
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 fn q(index: usize) -> Qubit {
@@ -44,6 +45,61 @@ fn assert_visual_match(circuit: &Circuit, options: FigureDrawerOptions, filename
     assert_svg_visual_match(&["circuit", "figure"], filename, |output_path| {
         render_figure_to_file(circuit, &output_path.to_string_lossy(), &options)
     });
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SvgRect {
+    x: f64,
+    width: f64,
+}
+
+fn attr_f64(tag: &str, attr: &str) -> f64 {
+    let needle = format!("{attr}=\"");
+    let start = tag.find(&needle).expect("attribute should exist") + needle.len();
+    let end = tag[start..]
+        .find('"')
+        .map(|offset| start + offset)
+        .expect("attribute should be closed");
+    tag[start..end]
+        .parse()
+        .expect("attribute should be numeric")
+}
+
+fn tag_before(svg: &str, tag_name: &str, text_needle: &str) -> String {
+    let text_idx = svg.find(text_needle).expect("text needle should exist");
+    let tag_idx = svg[..text_idx]
+        .rfind(tag_name)
+        .expect("tag should exist before text");
+    let tag_end = svg[tag_idx..]
+        .find('>')
+        .map(|offset| tag_idx + offset + 1)
+        .expect("tag should be closed");
+    svg[tag_idx..tag_end].to_string()
+}
+
+fn rect_before_text(svg: &str, text_needle: &str) -> SvgRect {
+    let tag = tag_before(svg, "<rect ", text_needle);
+    SvgRect {
+        x: attr_f64(&tag, "x"),
+        width: attr_f64(&tag, "width"),
+    }
+}
+
+fn circle_cx_before_text(svg: &str, text_needle: &str) -> f64 {
+    let tag = tag_before(svg, "<circle ", text_needle);
+    attr_f64(&tag, "cx")
+}
+
+fn first_font_size_for_text(svg: &str, text_needle: &str) -> f64 {
+    let text_idx = svg.find(text_needle).expect("text needle should exist");
+    let tag_idx = svg[..text_idx]
+        .rfind("<text ")
+        .expect("text tag should exist");
+    let tag_end = svg[tag_idx..]
+        .find('>')
+        .map(|offset| tag_idx + offset + 1)
+        .expect("text tag should be closed");
+    attr_f64(&svg[tag_idx..tag_end], "font-size")
 }
 
 fn make_bell() -> Circuit {
@@ -523,6 +579,125 @@ fn test_parameter_symbolic_with_value_for_symbolic_expr() {
         },
         "parameter_symbolic_with_value.png",
     );
+}
+
+#[test]
+fn test_svg_long_single_qubit_parameter_expands_gate_box() {
+    let mut circuit = Circuit::new(1);
+    let long_param = Parameter::symbol("thetaveryverylongparametername");
+    circuit.rx(q(0), long_param).unwrap();
+
+    let svg = circuit_to_figure(&circuit, &FigureDrawerOptions::default()).unwrap();
+
+    let rect = rect_before_text(&svg, "thetaveryverylongparametername");
+    let param_fs = first_font_size_for_text(&svg, "thetaveryverylongparametername");
+    assert!(rect.width > 105.6);
+    assert!(param_fs >= 28.0);
+    assert!(!svg.contains("..."));
+}
+
+#[test]
+fn test_svg_gate_style_font_size_drives_measurement_and_rendering() {
+    let mut circuit = Circuit::new(1);
+    let long_param = Parameter::symbol("styledlongparametername");
+    circuit.rz(q(0), long_param).unwrap();
+
+    let default_svg = circuit_to_figure(&circuit, &FigureDrawerOptions::default()).unwrap();
+    let default_rect = rect_before_text(&default_svg, "styledlongparametername");
+
+    let mut gate_styles = HashMap::new();
+    gate_styles.insert(
+        "RZ".to_string(),
+        GateStyle {
+            font_size: Some(16.0),
+            ..GateStyle::default()
+        },
+    );
+    let styled_svg = circuit_to_figure(
+        &circuit,
+        &FigureDrawerOptions {
+            gate_styles,
+            ..FigureDrawerOptions::default()
+        },
+    )
+    .unwrap();
+
+    let styled_rect = rect_before_text(&styled_svg, "styledlongparametername");
+    let name_fs = first_font_size_for_text(&styled_svg, ">RZ</text>");
+    let param_fs = first_font_size_for_text(&styled_svg, "styledlongparametername");
+    assert_eq!(name_fs, 16.0);
+    assert!((param_fs - 16.0 * 0.78).abs() < 1e-6);
+    assert!(styled_rect.width < default_rect.width * 0.6);
+}
+
+#[test]
+fn test_svg_long_expression_expands_without_truncation() {
+    let mut circuit = Circuit::new(1);
+    let theta = Parameter::symbol("theta");
+    let phi = Parameter::symbol("phi");
+    let lambda = Parameter::symbol("lambda");
+    let expr = Parameter::from(2.0) * theta + phi / Parameter::from(3.0) - lambda;
+    circuit.ry(q(0), expr).unwrap();
+
+    let svg = circuit_to_figure(&circuit, &FigureDrawerOptions::default()).unwrap();
+
+    assert!(svg.contains("theta"));
+    assert!(svg.contains("phi"));
+    assert!(svg.contains("lambda"));
+    assert!(!svg.contains("..."));
+    assert!(rect_before_text(&svg, "theta").width > 105.6);
+}
+
+#[test]
+fn test_svg_controlled_long_parameter_expands_target_box() {
+    let mut circuit = Circuit::new(2);
+    let long_param = Parameter::symbol("controlledlongtheta");
+    circuit.crx(q(0), q(1), long_param).unwrap();
+
+    let svg = circuit_to_figure(&circuit, &FigureDrawerOptions::default()).unwrap();
+
+    let rect = rect_before_text(&svg, "controlledlongtheta");
+    let circle_cx = circle_cx_before_text(&svg, "controlledlongtheta");
+    assert!(rect.width > 105.6);
+    assert!(((rect.x + rect.width / 2.0) - circle_cx).abs() < 0.01);
+}
+
+#[test]
+fn test_svg_long_module_label_uses_measured_width() {
+    let mut sub = Circuit::new(2);
+    sub.h(q(0)).unwrap();
+    sub.cx(q(0), q(1)).unwrap();
+    let gate = sub.to_gate("VERY_LONG_MODULE_LABEL").unwrap();
+
+    let mut circuit = Circuit::new(2);
+    circuit
+        .append(gate, vec![q(0), q(1)], Vec::<ParameterValue>::new(), None)
+        .unwrap();
+
+    let svg = circuit_to_figure(&circuit, &FigureDrawerOptions::default()).unwrap();
+
+    assert!(rect_before_text(&svg, "VERY_LONG_MODULE_LABEL").width > 105.6);
+}
+
+#[test]
+fn test_svg_fold_long_parameter_does_not_overlap_next_gate() {
+    let mut circuit = Circuit::new(1);
+    let long_param = Parameter::symbol("foldlongparametername");
+    circuit.rx(q(0), long_param).unwrap();
+    circuit.h(q(0)).unwrap();
+
+    let svg = circuit_to_figure(
+        &circuit,
+        &FigureDrawerOptions {
+            fold: 4,
+            ..FigureDrawerOptions::default()
+        },
+    )
+    .unwrap();
+
+    let long_rect = rect_before_text(&svg, "foldlongparametername");
+    let h_rect = rect_before_text(&svg, ">H</text>");
+    assert!(long_rect.x + long_rect.width < h_rect.x);
 }
 
 #[test]

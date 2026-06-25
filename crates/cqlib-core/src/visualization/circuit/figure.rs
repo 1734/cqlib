@@ -87,21 +87,12 @@ const LABEL_INNER_PADDING_PX: f64 = 10.0;
 const LABEL_MIN_INNER_PX: f64 = 4.0;
 /// Relative parameter font size against the gate label font.
 const PARAM_FONT_SCALE: f64 = 0.78;
-/// Approximate width factor for gate-name fitting.
-const NAME_WIDTH_FACTOR: f64 = 0.60;
-/// Approximate width factor for parameter-line fitting.
-const PARAM_WIDTH_FACTOR: f64 = 0.56;
 /// Relative vertical gap between gate name and parameter line.
 const LABEL_LINE_GAP_SCALE: f64 = 0.22;
-/// Maximum fitting iterations for label down-scaling.
-const LABEL_FIT_MAX_ITERS: usize = 24;
-/// Upper/lower clamp for each fitting step scale factor.
-const LABEL_FIT_MAX_STEP: f64 = 0.95;
-const LABEL_FIT_MIN_STEP: f64 = 0.10;
-/// Module/generic span-gate label width estimator tuning.
-const MODULE_LABEL_WIDTH_DIVISOR: f64 = 4.0;
-const MODULE_LABEL_PADDING_THRESHOLD: f64 = 6.0;
-const MODULE_LABEL_PADDING_CHARS: f64 = 1.0;
+/// SVG tspan font-size used for rendered formula subscripts.
+const SUBSCRIPT_FONT_SCALE: f64 = 0.70;
+/// Minimum fallback scale for labels that still overflow after width reservation.
+const LABEL_FIT_MIN_SCALE: f64 = 0.72;
 /// Extra headroom when packing columns into folded rows.
 const FOLD_TARGET_SLACK: f64 = 1.12;
 /// SVG canvas background color.
@@ -297,6 +288,13 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
     let num_columns = visual_data.num_columns.max(1);
     let palette = figure_palette(options.style);
     let style_book = StyleBook::new("default", &options.gate_styles);
+    let sx = LOGICAL_UNIT_TO_PX * options.width_per_column;
+    let sy = LOGICAL_UNIT_TO_PX * options.height_per_qubit;
+    let global_text_fs = style_book
+        .get("default")
+        .font_size
+        .unwrap_or(palette.gate_fontsize as f64)
+        .clamp(8.0, 48.0);
 
     let mut cols_ops: Vec<Vec<&_>> = vec![Vec::new(); num_columns];
     for op in &visual_data.operations {
@@ -304,22 +302,20 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
             cols_ops[op.column].push(op);
         }
     }
-    // Keep a uniform base slot width. Selected operations reserve extra width:
-    // - module/unitary span gates with long labels,
-    // - control-flow markers whose labels should not shrink.
+    // Keep the column-width contract centralized so parameterized gates, module
+    // gates, and control-flow markers use the same text measurement policy.
     let mut col_widths = vec![options.gate_width; num_columns];
     for col in 0..num_columns {
         for op in &cols_ops[col] {
-            if is_module_span_gate(op) {
-                col_widths[col] = col_widths[col].max(module_span_column_width(
-                    op,
-                    options.show_params,
-                    options.gate_width,
-                ));
-            } else if is_control_flow_box(op) {
-                col_widths[col] =
-                    col_widths[col].max(control_flow_column_width(op, options.gate_width));
-            }
+            let gate_style = style_book.get(op_style_key(op));
+            let gate_text_fs = gate_font_size(gate_style, global_text_fs);
+            col_widths[col] = col_widths[col].max(gate_label_required_width(
+                op,
+                options.show_params,
+                gate_text_fs,
+                sx,
+                options.gate_width,
+            ));
         }
     }
 
@@ -364,8 +360,6 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
     let max_x = x_max + CANVAS_RIGHT_PADDING;
     let min_y = -CANVAS_Y_PADDING;
     let max_y = total_height + CANVAS_Y_PADDING;
-    let sx = LOGICAL_UNIT_TO_PX * options.width_per_column;
-    let sy = LOGICAL_UNIT_TO_PX * options.height_per_qubit;
     let canvas_w = ((max_x - min_x) * sx).max(1.0);
     let canvas_h = ((max_y - min_y) * sy).max(1.0);
     let px = |x: f64| (x - min_x) * sx;
@@ -387,12 +381,6 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
         .text_color
         .as_deref()
         .unwrap_or(palette.text_color);
-    let global_text_fs = style_book
-        .get("default")
-        .font_size
-        .unwrap_or(palette.gate_fontsize as f64)
-        .clamp(8.0, 48.0);
-
     for (row_idx, row_cols) in row_columns.iter().enumerate() {
         // Keep all folded rows at a consistent visual width.
         let row_x_max = x_max;
@@ -453,15 +441,16 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
             let x_center = x;
 
             for op in &cols_ops[*col] {
-                // Keep regular gate boxes fixed-size. Module and control-flow boxes can expand
-                // according to column width to preserve readable labels.
-                let op_w = if is_module_span_gate(op) || is_control_flow_box(op) {
+                // Only label-heavy boxes consume the measured column width; simple gates keep the
+                // fixed footprint used by existing visual baselines.
+                let op_w = if uses_measured_label_width(op, options.show_params) {
                     col_w
                 } else {
                     options.gate_width
                 };
                 let label = compose_label(&op.label, &op.params, options.show_params);
                 let gate_style = style_book.get(op_style_key(op));
+                let gate_text_fs = gate_font_size(gate_style, global_text_fs);
                 let min_lane = op.covered_lanes.iter().copied().min();
                 let max_lane = op.covered_lanes.iter().copied().max();
                 let connector_color = gate_style
@@ -501,7 +490,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 .as_deref()
                                 .unwrap_or(palette.text_color);
                             // Keep FSIM text inside the circular marker.
-                            let fsim_font = (r * 0.62).clamp(7.0, (global_text_fs * 0.9).max(7.0));
+                            let fsim_font = (r * 0.62).clamp(7.0, (gate_text_fs * 0.9).max(7.0));
                             for lane in &op.lanes {
                                 let y = lane_to_y(*lane, y_base);
                                 elements.push(svg_circle(
@@ -547,7 +536,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 &label,
                                 &palette,
                                 gate_style,
-                                global_text_fs,
+                                gate_text_fs,
                                 gate_box_w,
                                 sx,
                                 sy,
@@ -557,7 +546,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                             if show_markers {
                                 // Keep lane markers inside the box with a small left inset.
                                 let marker_x = x_center - gate_box_w / 2.0 + marker_gutter * 0.2;
-                                let marker_font_size = global_text_fs;
+                                let marker_font_size = gate_text_fs;
                                 for (idx, lane) in op.lanes.iter().enumerate() {
                                     let y = lane_to_y(*lane, y_base);
                                     elements.push(svg_text(
@@ -582,7 +571,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 &label,
                                 &palette,
                                 gate_style,
-                                global_text_fs,
+                                gate_text_fs,
                                 op_w,
                                 options.gate_height,
                                 sx,
@@ -630,7 +619,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 &label,
                                 &palette,
                                 gate_style,
-                                global_text_fs,
+                                gate_text_fs,
                                 op_w,
                                 options.gate_height,
                                 sx,
@@ -746,7 +735,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 lane_to_y(0, y_base),
                                 &palette,
                                 gate_style,
-                                global_text_fs,
+                                gate_text_fs,
                                 op_w,
                                 options.gate_height,
                                 sx,
@@ -761,7 +750,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                     lane_to_y(*lane, y_base),
                                     &palette,
                                     gate_style,
-                                    global_text_fs,
+                                    gate_text_fs,
                                     op_w,
                                     options.gate_height,
                                     sx,
@@ -780,7 +769,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 &label,
                                 &palette,
                                 gate_style,
-                                global_text_fs,
+                                gate_text_fs,
                                 op_w,
                                 options.gate_height,
                                 sx,
@@ -796,7 +785,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                     &label,
                                     &palette,
                                     gate_style,
-                                    global_text_fs,
+                                    gate_text_fs,
                                     op_w,
                                     options.gate_height,
                                     sx,
@@ -826,7 +815,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                             &label,
                             &palette,
                             gate_style,
-                            global_text_fs,
+                            gate_text_fs,
                             op_w,
                             sx,
                             sy,
@@ -844,7 +833,7 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                                 px(x_center + op_w / 2.0 + 0.08),
                                 py(y_min + box_h - 0.12),
                                 "else",
-                                global_text_fs,
+                                gate_text_fs,
                                 gate_style
                                     .text_color
                                     .as_deref()
@@ -970,14 +959,32 @@ fn svg_circle(
 }
 
 fn svg_text(x: f64, y: f64, text: &str, font_size: f64, color: &str, anchor: &str) -> String {
+    svg_text_with_content(x, y, font_size, color, anchor, &escape_xml(text))
+}
+
+/// Render parameter text with simple SVG subscripts while preserving XML escaping.
+fn svg_formula_text(
+    x: f64,
+    y: f64,
+    text: &str,
+    font_size: f64,
+    color: &str,
+    anchor: &str,
+) -> String {
+    svg_text_with_content(x, y, font_size, color, anchor, &format_svg_subscripts(text))
+}
+
+fn svg_text_with_content(
+    x: f64,
+    y: f64,
+    font_size: f64,
+    color: &str,
+    anchor: &str,
+    content: &str,
+) -> String {
     format!(
         "<text x=\"{:.3}\" y=\"{:.3}\" fill=\"{}\" font-size=\"{:.3}\" font-family=\"DejaVu Sans, Arial, sans-serif\" text-anchor=\"{}\" dominant-baseline=\"middle\">{}</text>",
-        x,
-        y,
-        color,
-        font_size,
-        anchor,
-        escape_xml(text)
+        x, y, color, font_size, anchor, content
     )
 }
 
@@ -995,43 +1002,40 @@ fn draw_gate_label_svg(
     let mut parts = label.splitn(2, '\n');
     let name = parts.next().unwrap_or_default();
     let param = parts.next().filter(|s| !s.is_empty());
-    let avail_w = (box_w_px - LABEL_INNER_PADDING_PX).max(LABEL_MIN_INNER_PX);
+    let avail_w = (box_w_px - 2.0 * LABEL_INNER_PADDING_PX).max(LABEL_MIN_INNER_PX);
     let avail_h = (box_h_px - LABEL_INNER_PADDING_PX).max(LABEL_MIN_INNER_PX);
-    // Keep a unified global base size (from style default), and only shrink if this gate overflows.
-    let mut nfs = base_name_fs.max(1.0);
+    let nfs = base_name_fs.max(1.0);
     let mut pfs = (nfs * PARAM_FONT_SCALE).max(1.0);
-    if allow_shrink {
-        for _ in 0..LABEL_FIT_MAX_ITERS {
-            // Use conservative width factors so measured text is less likely to overflow the box.
-            let name_w = name.chars().count() as f64 * nfs * NAME_WIDTH_FACTOR;
-            let (need_w, need_h) = if let Some(p) = param {
-                let param_w = p.chars().count() as f64 * pfs * PARAM_WIDTH_FACTOR;
-                let gap = nfs * LABEL_LINE_GAP_SCALE;
-                (name_w.max(param_w), nfs + gap + pfs)
-            } else {
-                (name_w, nfs)
-            };
-            if need_w <= avail_w && need_h <= avail_h {
-                break;
-            }
-            let s = (avail_w / need_w)
-                .min(avail_h / need_h)
-                .clamp(LABEL_FIT_MIN_STEP, LABEL_FIT_MAX_STEP);
-            nfs = (nfs * s).max(1.0);
-            pfs = (nfs * PARAM_FONT_SCALE).max(1.0);
+
+    // Width reservation should avoid most shrinkage. This branch only handles
+    // fixed-size boxes where a two-line label would otherwise exceed the box height.
+    if allow_shrink && param.is_some() {
+        let gap = nfs * LABEL_LINE_GAP_SCALE;
+        let need_h = nfs + gap + pfs;
+        if need_h > avail_h {
+            let height_room = (avail_h - nfs - gap).max(1.0);
+            pfs *= height_room / pfs.max(1.0);
         }
     }
+
+    let name_fs = fitted_font_size(svg_text_width_px(name, nfs), nfs, avail_w, allow_shrink);
+    let param_fs = param
+        .map(|p| fitted_font_size(svg_formula_width_px(p, pfs), pfs, avail_w, allow_shrink))
+        .unwrap_or(pfs);
+
     let mut out = Vec::new();
     if let Some(p) = param {
-        let gap = nfs * LABEL_LINE_GAP_SCALE;
-        let total_h = nfs + gap + pfs;
+        let gap = name_fs * LABEL_LINE_GAP_SCALE;
+        let total_h = name_fs + gap + param_fs;
         let top = y_px - total_h / 2.0;
-        let name_y = top + nfs / 2.0;
-        let param_y = name_y + (nfs / 2.0 + gap + pfs / 2.0);
-        out.push(svg_text(x_px, name_y, name, nfs, text_color, "middle"));
-        out.push(svg_text(x_px, param_y, p, pfs, text_color, "middle"));
+        let name_y = top + name_fs / 2.0;
+        let param_y = name_y + (name_fs / 2.0 + gap + param_fs / 2.0);
+        out.push(svg_text(x_px, name_y, name, name_fs, text_color, "middle"));
+        out.push(svg_formula_text(
+            x_px, param_y, p, param_fs, text_color, "middle",
+        ));
     } else {
-        out.push(svg_text(x_px, y_px, name, nfs, text_color, "middle"));
+        out.push(svg_text(x_px, y_px, name, name_fs, text_color, "middle"));
     }
     out
 }
@@ -1134,7 +1138,7 @@ fn draw_flow_box_svg(
         py,
         Some("6,4"),
         Some(palette.gate_edge_color),
-        false,
+        true,
     )
 }
 
@@ -1282,6 +1286,122 @@ fn escape_xml(value: &str) -> String {
         .replace('\"', "&quot;")
 }
 
+/// Convert `name_0`-style suffixes into SVG subscript tspans.
+///
+/// The formatter only treats ASCII alphanumeric runs after `_` as subscripts,
+/// which matches generated parameter names such as `x_11` without parsing math.
+fn format_svg_subscripts(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'_' && bytes.get(i + 1).is_some_and(is_subscript_suffix_byte) {
+            let start = i + 1;
+            let mut end = start;
+            while bytes.get(end).is_some_and(is_subscript_suffix_byte) {
+                end += 1;
+            }
+            out.push_str("<tspan baseline-shift=\"sub\" font-size=\"70%\">");
+            out.push_str(&escape_xml(&value[start..end]));
+            out.push_str("</tspan>");
+            i = end;
+            continue;
+        }
+
+        let ch = value[i..].chars().next().unwrap_or_default();
+        let mut buf = [0; 4];
+        out.push_str(&escape_xml(ch.encode_utf8(&mut buf)));
+        i += ch.len_utf8();
+    }
+
+    out
+}
+
+/// Fit one text line into the available box width without collapsing readability.
+fn fitted_font_size(text_width_px: f64, font_size: f64, avail_w: f64, allow_shrink: bool) -> f64 {
+    if !allow_shrink || text_width_px <= avail_w || text_width_px <= 0.0 {
+        return font_size;
+    }
+    let scale = (avail_w / text_width_px).clamp(LABEL_FIT_MIN_SCALE, 1.0);
+    font_size * scale
+}
+
+/// Estimate rendered parameter width using the same subscript policy as SVG output.
+fn svg_formula_width_px(value: &str, font_size: f64) -> f64 {
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+    let mut width = 0.0_f64;
+
+    while i < bytes.len() {
+        if bytes[i] == b'_' && bytes.get(i + 1).is_some_and(is_subscript_suffix_byte) {
+            i += 1;
+            while bytes.get(i).is_some_and(is_subscript_suffix_byte) {
+                let ch = value[i..].chars().next().unwrap_or_default();
+                width += svg_char_width_em(ch) * font_size * SUBSCRIPT_FONT_SCALE;
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        let ch = value[i..].chars().next().unwrap_or_default();
+        width += svg_char_width_em(ch) * font_size;
+        i += ch.len_utf8();
+    }
+
+    width
+}
+
+/// Estimate plain SVG text width for layout reservation.
+fn svg_text_width_px(value: &str, font_size: f64) -> f64 {
+    value
+        .chars()
+        .map(|ch| svg_char_width_em(ch) * font_size)
+        .sum()
+}
+
+/// Conservative DejaVu Sans width approximation used before browser rendering.
+fn svg_char_width_em(ch: char) -> f64 {
+    match ch {
+        ' ' => 0.33,
+        'i' | 'j' | 'l' | 'I' | '|' | '!' | '.' | ',' | ':' | ';' | '\'' => 0.28,
+        '(' | ')' | '[' | ']' | '{' | '}' => 0.35,
+        '*' | '+' | '-' | '/' | '=' => 0.55,
+        '0'..='9' => 0.58,
+        'A'..='Z' => match ch {
+            'M' | 'W' => 0.90,
+            _ => 0.68,
+        },
+        'a'..='z' => match ch {
+            'm' | 'w' => 0.82,
+            'f' | 'r' | 't' => 0.42,
+            _ => 0.58,
+        },
+        '_' => 0.52,
+        '<' | '>' => 0.62,
+        'π' | 'θ' | 'φ' | 'λ' | 'γ' | 'β' => 0.62,
+        _ if ch.is_ascii() => 0.62,
+        _ => 0.82,
+    }
+}
+
+/// Return the widest rendered line for a composed gate label.
+fn label_text_width_px(label: &str, base_font_size: f64) -> f64 {
+    let mut parts = label.splitn(2, '\n');
+    let name = parts.next().unwrap_or_default();
+    let param = parts.next().filter(|s| !s.is_empty());
+    let name_w = svg_text_width_px(name, base_font_size);
+    let param_w = param
+        .map(|p| svg_formula_width_px(p, base_font_size * PARAM_FONT_SCALE))
+        .unwrap_or(0.0);
+    name_w.max(param_w)
+}
+
+/// Return whether a byte can be part of the simple subscript suffix syntax.
+fn is_subscript_suffix_byte(byte: &u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+
 /// Compose a multi-line gate label with optional formatted parameters.
 fn compose_label(label: &str, params: &[String], show_params: bool) -> String {
     if show_params && !params.is_empty() {
@@ -1303,36 +1423,51 @@ fn is_control_flow_box(op: &VisualOperation) -> bool {
     matches!(op.style, VisualOpStyle::ControlFlow { .. })
 }
 
-fn module_span_column_width(op: &VisualOperation, show_params: bool, gate_width: f64) -> f64 {
-    let label = compose_label(&op.label, &op.params, show_params);
-    let text_len = label
-        .lines()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0) as f64;
-    if text_len <= 0.0 {
-        return gate_width;
-    }
-    let padded_len = if text_len > MODULE_LABEL_PADDING_THRESHOLD {
-        text_len + MODULE_LABEL_PADDING_CHARS
-    } else {
-        text_len
-    };
-    // Reserve extra horizontal space for module/unitary labels to prevent overflow.
-    gate_width.max((padded_len / MODULE_LABEL_WIDTH_DIVISOR) * gate_width)
+fn is_parameterized_box_gate(op: &VisualOperation, show_params: bool) -> bool {
+    show_params
+        && !op.params.is_empty()
+        && op.label != "FSIM"
+        && matches!(
+            op.style,
+            VisualOpStyle::Gate | VisualOpStyle::Controlled { .. }
+        )
 }
 
-fn control_flow_column_width(op: &VisualOperation, gate_width: f64) -> f64 {
-    let label_len = op.label.chars().count() as f64;
-    if label_len <= 0.0 {
+fn uses_measured_label_width(op: &VisualOperation, show_params: bool) -> bool {
+    is_parameterized_box_gate(op, show_params) || is_module_span_gate(op) || is_control_flow_box(op)
+}
+
+fn gate_font_size(style: &GateStyle, fallback_font_size: f64) -> f64 {
+    style
+        .font_size
+        .unwrap_or(fallback_font_size)
+        .clamp(1.0, 96.0)
+}
+
+/// Compute the logical gate width needed to keep measured labels readable.
+fn gate_label_required_width(
+    op: &VisualOperation,
+    show_params: bool,
+    base_font_size: f64,
+    sx: f64,
+    gate_width: f64,
+) -> f64 {
+    if !uses_measured_label_width(op, show_params) {
         return gate_width;
     }
-    // Keep control-flow labels at base font-size and expand box width instead of shrinking text.
-    const CONTROL_FLOW_LABEL_DIVISOR: f64 = 2.9;
-    const CONTROL_FLOW_LABEL_PADDING_CHARS: f64 = 0.0;
-    gate_width.max(
-        ((label_len + CONTROL_FLOW_LABEL_PADDING_CHARS) / CONTROL_FLOW_LABEL_DIVISOR) * gate_width,
-    )
+
+    let text_width_px = if is_control_flow_box(op) {
+        svg_text_width_px(&op.label, base_font_size)
+    } else {
+        let label = compose_label(&op.label, &op.params, show_params);
+        label_text_width_px(&label, base_font_size)
+    };
+    if text_width_px <= 0.0 || sx <= 0.0 {
+        return gate_width;
+    }
+
+    let required_px = text_width_px + 2.0 * LABEL_INNER_PADDING_PX;
+    gate_width.max(required_px / sx)
 }
 
 /// Split columns into folded rows using an order-preserving greedy strategy.

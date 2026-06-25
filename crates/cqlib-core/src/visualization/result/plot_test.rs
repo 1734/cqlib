@@ -87,3 +87,46 @@ fn histogram_matches_reference_image() {
     let svg = plot_histogram(&result, &ResultPlotOptions::default()).unwrap();
     assert_result_visual_match(&svg, "histogram_counts.png");
 }
+
+#[test]
+fn histogram_hamming_sorted_matches_reference_image() {
+    let result = execution_result(&[("100", 4), ("101", 3), ("010", 2), ("001", 1)], 3);
+    let options = ResultPlotOptions {
+        color: vec!["#123456".to_string()],
+        number_to_keep: Some(3),
+        sort: "hamming".to_string(),
+        target_string: Some("100".to_string()),
+        legend: Some(vec!["sim".to_string()]),
+        bar_labels: false,
+        title: Some("Hamming order".to_string()),
+        ..ResultPlotOptions::default()
+    };
+    let svg = plot_histogram(&result, &options).unwrap();
+    assert!(svg.contains("Hamming order"));
+    assert!(svg.contains("#123456"));
+    assert!(svg.contains(">sim</text>"));
+    assert!(svg.contains(">rest</text>"));
+    assert!(!svg.contains(">4</text>"));
+    assert_result_visual_match(&svg, "histogram_hamming_sorted.png");
+}
+
+#[test]
+fn distribution_custom_options_have_expected_svg_structure() {
+    let result = execution_result(&[("0", 25), ("1", 75)], 1);
+    let options = ResultPlotOptions {
+        figsize: Some((3.2, 2.4)),
+        color: vec!["#0f766e".to_string()],
+        legend: Some(vec!["probability".to_string()]),
+        bar_labels: false,
+        title: Some("Distribution options".to_string()),
+        ..ResultPlotOptions::default()
+    };
+    let svg = plot_distribution(&result, &options).unwrap();
+    assert!(svg.contains("width=\"320\""));
+    assert!(svg.contains("height=\"240\""));
+    assert!(svg.contains("Distribution options"));
+    assert!(svg.contains("#0f766e"));
+    assert!(svg.contains(">probability</text>"));
+    assert!(!svg.contains(">0.750</text>"));
+    assert_result_visual_match(&svg, "distribution_custom_options.png");
+}

@@ -145,31 +145,64 @@ impl ParameterFormatter {
         match self.options.mode {
             ParameterDisplayMode::Numeric => value
                 .map(|v| self.format_numeric(v))
-                .or_else(|| expr.map(ToString::to_string))
+                .or_else(|| expr.map(|e| self.format_symbolic_expr(e)))
                 .unwrap_or_else(|| "0".to_string()),
             ParameterDisplayMode::Symbolic => expr
-                .map(ToString::to_string)
+                .map(|e| self.format_symbolic_expr(e))
                 .or_else(|| value.map(|v| self.format_numeric(v)))
                 .unwrap_or_else(|| "0".to_string()),
             ParameterDisplayMode::SymbolicWithValue => match (expr, value) {
                 (Some(e), Some(v)) => {
+                    let expr_str = self.format_symbolic_expr(e);
                     let value_str = self.format_numeric(v);
-                    if e == value_str {
-                        e.to_string()
+                    if expr_str == value_str {
+                        expr_str
                     } else {
-                        format!("{e} ≈ {value_str}")
+                        format!("{expr_str} ≈ {value_str}")
                     }
                 }
-                (Some(e), None) => e.to_string(),
+                (Some(e), None) => self.format_symbolic_expr(e),
                 (None, Some(v)) => self.format_numeric(v),
                 (None, None) => "0".to_string(),
             },
             ParameterDisplayMode::PiFractionPreferred => value
                 .and_then(|v| self.format_pi_fraction(v))
                 .or_else(|| value.map(|v| self.format_numeric(v)))
-                .or_else(|| expr.map(ToString::to_string))
+                .or_else(|| expr.map(|e| self.format_symbolic_expr(e)))
                 .unwrap_or_else(|| "0".to_string()),
         }
+    }
+
+    /// Normalize numeric literals embedded in symbolic expressions without touching identifiers.
+    fn format_symbolic_expr(&self, expr: &str) -> String {
+        let bytes = expr.as_bytes();
+        let mut out = String::with_capacity(expr.len());
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            // Treat a numeric token as standalone only when both neighbors are
+            // outside identifier syntax, so names such as `x_11` stay intact.
+            if is_number_start(bytes, i)
+                && !is_ascii_identifier_byte(previous_byte(bytes, i).unwrap_or_default())
+            {
+                let end = scan_number_literal(bytes, i);
+                let next = bytes.get(end).copied().unwrap_or_default();
+                if !is_ascii_identifier_byte(next) {
+                    let token = &expr[i..end];
+                    if let Ok(value) = token.parse::<f64>() {
+                        out.push_str(&self.format_numeric(value));
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+
+            let ch = expr[i..].chars().next().unwrap_or_default();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+
+        out
     }
 
     fn format_pi_fraction(&self, value: f64) -> Option<String> {
@@ -273,6 +306,57 @@ fn format_scientific(value: f64, precision: usize) -> String {
     }
     let exp_value = exponent.parse::<i32>().unwrap_or(0);
     format!("{mantissa}e{exp_value}")
+}
+
+/// Return the previous byte when scanning ASCII-oriented symbolic expressions.
+fn previous_byte(bytes: &[u8], index: usize) -> Option<u8> {
+    index.checked_sub(1).and_then(|idx| bytes.get(idx)).copied()
+}
+
+/// Return whether a byte belongs to the identifier syntax used by parameters.
+fn is_ascii_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Return whether the current byte starts a decimal number literal.
+fn is_number_start(bytes: &[u8], index: usize) -> bool {
+    bytes[index].is_ascii_digit()
+        || (bytes[index] == b'.' && bytes.get(index + 1).is_some_and(u8::is_ascii_digit))
+}
+
+/// Scan a decimal or scientific-notation literal and return its exclusive end.
+fn scan_number_literal(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let exp_start = end;
+        let mut exp_end = end + 1;
+        if matches!(bytes.get(exp_end), Some(b'+' | b'-')) {
+            exp_end += 1;
+        }
+        let digit_start = exp_end;
+        while bytes.get(exp_end).is_some_and(u8::is_ascii_digit) {
+            exp_end += 1;
+        }
+        if exp_end > digit_start {
+            end = exp_end;
+        } else {
+            end = exp_start;
+        }
+    }
+
+    end
 }
 
 fn gcd_i64(mut a: i64, mut b: i64) -> i64 {

@@ -22,6 +22,8 @@ import zlib
 
 import pytest
 
+import cqlib
+import cqlib._native as cqlib_native
 from cqlib import Circuit
 from cqlib.device import ExecutionResult
 from cqlib.qis import DensityMatrix, Statevector
@@ -56,6 +58,20 @@ def _bell_circuit():
     return circuit
 
 
+def _folded_circuit():
+    """Create a circuit that exercises circuit figure options."""
+    circuit = Circuit(3)
+    circuit.h(0)
+    circuit.rx(1, 0.25)
+    circuit.cx(0, 2)
+    circuit.barrier([0, 1, 2])
+    circuit.swap(1, 2)
+    circuit.measure(0)
+    circuit.measure(1)
+    circuit.measure(2)
+    return circuit
+
+
 def _execution_result(counts: dict[str, int], num_qubits: int):
     """Create a completed execution result with non-empty counts."""
     return ExecutionResult.from_counts(
@@ -84,6 +100,39 @@ def _plus_density_matrix():
     state = DensityMatrix(1)
     state.apply_h(0)
     return state
+
+
+def _reverse_bits_density_matrix():
+    """Create a two-qubit diagonal density matrix with asymmetric basis weights."""
+    return DensityMatrix.from_density_matrix(
+        2,
+        [
+            0.05 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.15 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.75 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.0 + 0j,
+            0.05 + 0j,
+        ],
+    )
+
+
+def _assert_in_order(text: str, needles: list[str]) -> None:
+    offset = 0
+    for needle in needles:
+        found = text.find(needle, offset)
+        assert found >= 0, needle
+        offset = found + len(needle)
 
 
 def _visual_threshold():
@@ -312,6 +361,15 @@ def test_visualization_public_exports():
     assert expected.issubset(set(vis.__all__))
 
 
+def test_visualization_uses_checkout_editable_binding():
+    """The public package and native extension should come from this checkout."""
+    repo_root = Path(__file__).resolve().parents[3]
+    binding_pkg = repo_root / "crates" / "binding-python" / "cqlib"
+
+    assert Path(cqlib.__file__).resolve().is_relative_to(binding_pkg)
+    assert Path(cqlib_native.__file__).resolve().is_relative_to(binding_pkg)
+
+
 def test_circuit_visualization_matches_reference_image():
     """Circuit visualization should expose text, SVG, and stable PNG output."""
     circuit = _bell_circuit()
@@ -325,6 +383,26 @@ def test_circuit_visualization_matches_reference_image():
     )
     assert svg._repr_svg_() == str(svg)
     assert "<svg" in svg
+
+
+def test_circuit_visualization_option_passthrough_matches_reference_image():
+    """Circuit figure options should affect the rendered public API output."""
+    circuit = _folded_circuit()
+    svg = _assert_visual_match(
+        "circuit_fold_reverse_initial.png",
+        lambda output_path: vis.draw_figure(
+            circuit,
+            fold=2,
+            initial_state=True,
+            reverse_bits=True,
+            show_params=False,
+            output_path=output_path,
+        ),
+    )
+    assert "q2 |0" in svg
+    assert "q0 |0" in svg
+    _assert_in_order(svg, [">q2 |0&gt;</text>", ">q1 |0&gt;</text>", ">q0 |0&gt;</text>"])
+    assert "0.25" not in svg
 
 
 def test_result_visualization_matches_reference_images():
@@ -351,6 +429,48 @@ def test_result_visualization_matches_reference_images():
     )
     assert "<svg" in distribution
     assert "Probability" in distribution
+
+
+def test_result_visualization_option_passthrough_matches_reference_images():
+    """Result plot options should be reflected in SVG structure and reference PNGs."""
+    histogram_result = _execution_result({"100": 4, "101": 3, "010": 2, "001": 1}, 3)
+    histogram = _assert_visual_match(
+        "histogram_hamming_sorted.png",
+        lambda output_path: vis.plot_histogram(
+            histogram_result,
+            sort="hamming",
+            target_string="100",
+            number_to_keep=3,
+            color=["#123456"],
+            legend=["sim"],
+            bar_labels=False,
+            title="Hamming order",
+            output_path=output_path,
+        ),
+    )
+    assert "Hamming order" in histogram
+    assert "#123456" in histogram
+    assert ">sim</text>" in histogram
+    assert ">rest</text>" in histogram
+    assert ">4</text>" not in histogram
+
+    distribution_result = _execution_result({"0": 25, "1": 75}, 1)
+    distribution = _assert_visual_match(
+        "distribution_custom_options.png",
+        lambda output_path: vis.plot_distribution(
+            distribution_result,
+            figsize=(3.2, 2.4),
+            color=["#0f766e"],
+            legend=["probability"],
+            bar_labels=False,
+            title="Distribution options",
+            output_path=output_path,
+        ),
+    )
+    assert 'width="320"' in distribution
+    assert 'height="240"' in distribution
+    assert "#0f766e" in distribution
+    assert ">probability</text>" in distribution
 
 
 def test_state_visualization_matches_reference_images():
@@ -393,6 +513,42 @@ def test_state_visualization_matches_reference_images():
         ),
     )
     assert "<svg" in paulivec_svg
+
+
+def test_state_visualization_option_passthrough_matches_reference_images():
+    """State plot options should pass through Python wrappers into rendered SVG."""
+    density = _reverse_bits_density_matrix()
+    state_city = _assert_visual_match(
+        "state_city_reverse_bits.png",
+        lambda output_path: vis.plot_state_city(
+            density,
+            reverse_bits=True,
+            alpha=0.7,
+            figsize=(5.0, 4.0),
+            title="Reverse state city",
+            output_path=output_path,
+        ),
+    )
+    assert "Reverse state city" in state_city
+    assert 'width="500"' in state_city
+    assert 'height="400"' in state_city
+    assert 'fill-opacity="0.700"' in state_city
+    _assert_in_order(state_city, [">00</text>", ">10</text>", ">01</text>", ">11</text>"])
+
+    paulivec = _assert_visual_match(
+        "paulivec_custom_options.png",
+        lambda output_path: vis.plot_state_paulivec(
+            _plus_statevector(),
+            color=["#00aa00", "#aa0000"],
+            title="Pauli colors",
+            figsize=(5.0, 3.0),
+            output_path=output_path,
+        ),
+    )
+    assert "Pauli colors" in paulivec
+    assert 'width="500"' in paulivec
+    assert 'height="300"' in paulivec
+    assert "#00aa00" in paulivec
 
 
 def test_state_visualization_accepts_density_matrix():

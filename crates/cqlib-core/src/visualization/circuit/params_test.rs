@@ -230,6 +230,46 @@ fn test_formatter_with_symbolic_expression() {
 }
 
 #[test]
+fn test_formatter_normalizes_numeric_literals_in_symbolic_expression() {
+    let formatter = ParameterFormatter::new(ParameterFormatOptions {
+        mode: ParameterDisplayMode::Symbolic,
+        ..ParameterFormatOptions::default()
+    });
+
+    let mut circuit = Circuit::new(1);
+    let evo_t = Parameter::symbol("evo_t");
+    circuit
+        .rz(Qubit::new(0), Parameter::from(0.07333333333333333) * evo_t)
+        .unwrap();
+
+    let result = formatter
+        .format_circuit_param(&circuit, &CircuitParam::Index(0))
+        .unwrap();
+    assert_eq!(result, "0.07*evo_t");
+}
+
+#[test]
+fn test_formatter_keeps_digits_inside_symbol_names() {
+    let formatter = ParameterFormatter::new(ParameterFormatOptions {
+        mode: ParameterDisplayMode::Symbolic,
+        ..ParameterFormatOptions::default()
+    });
+
+    let mut circuit = Circuit::new(1);
+    let x_11 = Parameter::symbol("x_11");
+    circuit
+        .rz(Qubit::new(0), x_11 + Parameter::from(0.07333333333333333))
+        .unwrap();
+
+    let result = formatter
+        .format_circuit_param(&circuit, &CircuitParam::Index(0))
+        .unwrap();
+    assert!(result.contains("x_11"));
+    assert!(result.contains("0.07"));
+    assert!(!result.contains("0.07333333333333333"));
+}
+
+#[test]
 fn test_formatter_with_zero_value() {
     let formatter = ParameterFormatter::new(ParameterFormatOptions::default());
     let circuit = Circuit::new(0);

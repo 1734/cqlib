@@ -129,6 +129,13 @@ pub fn plot_state_city<S: StateVisualizationSource + ?Sized>(
     let (num_qubits, rho) = state_to_density_matrix(state)?;
     let dim = 1usize << num_qubits;
     let labels = basis_labels(num_qubits, options.reverse_bits);
+    // Labels are display-order dependent; matrix lookup must map each displayed
+    // row and column back to the stored density-matrix index independently.
+    let matrix_value = |row: usize, col: usize| {
+        let data_row = display_to_density_index(row, num_qubits, options.reverse_bits);
+        let data_col = display_to_density_index(col, num_qubits, options.reverse_bits);
+        rho[data_row * dim + data_col]
+    };
     let max_abs = rho
         .iter()
         .map(|value| value.norm())
@@ -143,33 +150,45 @@ pub fn plot_state_city<S: StateVisualizationSource + ?Sized>(
         out.push_str(&svg_text(width / 2.0, 28.0, title, 18, "middle", "#202124"));
     }
     let top = if options.title.is_some() { 52.0 } else { 28.0 };
-    let panel_w = (width - 90.0) / 2.0;
+    let has_imaginary = rho.iter().any(|value| value.im.abs() > 1e-12);
+    let panel_gap = 32.0;
+    let side_margin = 36.0;
+    let panel_h = height - top - 34.0;
+    let panel_w = if has_imaginary {
+        (width - 2.0 * side_margin - panel_gap) / 2.0
+    } else {
+        width - 2.0 * side_margin
+    };
     draw_matrix_panel(
         &mut out,
         "Re[rho]",
-        48.0,
+        side_margin,
         top,
         panel_w,
-        height - top - 40.0,
+        panel_h,
         dim,
         &labels,
-        |idx| rho[idx].re,
+        |row, col| matrix_value(row, col).re,
         max_abs,
         options.alpha,
     );
-    draw_matrix_panel(
-        &mut out,
-        "Im[rho]",
-        48.0 + panel_w + 36.0,
-        top,
-        panel_w,
-        height - top - 40.0,
-        dim,
-        &labels,
-        |idx| rho[idx].im,
-        max_abs,
-        options.alpha,
-    );
+    if has_imaginary {
+        draw_matrix_panel(
+            &mut out,
+            "Im[rho]",
+            side_margin + panel_w + panel_gap,
+            top,
+            panel_w,
+            panel_h,
+            dim,
+            &labels,
+            |row, col| matrix_value(row, col).im,
+            max_abs,
+            options.alpha,
+        );
+    } else {
+        out.push_str("<!-- Im[rho] omitted: zero imaginary component -->");
+    }
     out.push_str("</svg>");
     Ok(out)
 }
@@ -511,7 +530,7 @@ fn draw_matrix_panel<F>(
     max_abs: f64,
     alpha: f64,
 ) where
-    F: Fn(usize) -> f64,
+    F: Fn(usize, usize) -> f64,
 {
     out.push_str(&svg_text(
         x + w / 2.0,
@@ -521,16 +540,22 @@ fn draw_matrix_panel<F>(
         "middle",
         "#202124",
     ));
-    let grid = (w.min(h - 42.0) - 70.0).max(40.0);
-    let gx = x + (w - grid) / 2.0 + 24.0;
-    let gy = y + 42.0;
+    let title_h = 32.0;
+    let left_label_w = if dim <= 16 { 34.0 } else { 10.0 };
+    let bottom_label_h = if dim <= 16 { 46.0 } else { 12.0 };
+    let right_pad = 10.0;
+    let available_w = (w - left_label_w - right_pad).max(40.0);
+    let available_h = (h - title_h - bottom_label_h).max(40.0);
+    let grid = available_w.min(available_h).max(40.0);
+    let gx = x + left_label_w + ((available_w - grid) / 2.0).max(0.0);
+    let gy = y + title_h + ((available_h - grid) / 2.0).max(0.0);
     let cell = grid / dim as f64;
     out.push_str(&format!(
         "<rect x=\"{gx:.3}\" y=\"{gy:.3}\" width=\"{grid:.3}\" height=\"{grid:.3}\" fill=\"#f7f8fb\" stroke=\"#c7ceda\"/>"
     ));
     for row in 0..dim {
         for col in 0..dim {
-            let value = value_at(row * dim + col);
+            let value = value_at(row, col);
             let mag = (value.abs() / max_abs).min(1.0);
             let fill = if value >= 0.0 { "#4569d4" } else { "#d64b5f" };
             let inset = cell * (1.0 - mag.sqrt()) * 0.42;
@@ -548,19 +573,39 @@ fn draw_matrix_panel<F>(
             let tx = gx + (idx as f64 + 0.5) * cell;
             let ty = gy + grid + 14.0;
             out.push_str(&format!(
-                "<text x=\"{tx:.3}\" y=\"{ty:.3}\" font-family=\"Arial, sans-serif\" font-size=\"9\" fill=\"#303642\" text-anchor=\"end\" transform=\"rotate(-55 {tx:.3} {ty:.3})\">{}</text>",
+                "<text x=\"{tx:.3}\" y=\"{ty:.3}\" font-family=\"Arial, sans-serif\" font-size=\"12\" fill=\"#303642\" text-anchor=\"end\" transform=\"rotate(-55 {tx:.3} {ty:.3})\">{}</text>",
                 escape_text(label)
             ));
             out.push_str(&svg_text(
                 gx - 6.0,
                 gy + (idx as f64 + 0.5) * cell + 3.0,
                 label,
-                9,
+                12,
                 "end",
                 "#303642",
             ));
         }
     }
+}
+
+/// Map a displayed basis row or column back to the density-matrix storage index.
+fn display_to_density_index(index: usize, num_qubits: usize, reverse_bits: bool) -> usize {
+    if reverse_bits {
+        bit_reverse_index(index, num_qubits)
+    } else {
+        index
+    }
+}
+
+/// Reverse bit order within the fixed-width basis index.
+fn bit_reverse_index(index: usize, num_bits: usize) -> usize {
+    let mut out = 0usize;
+    for bit in 0..num_bits {
+        if ((index >> bit) & 1) == 1 {
+            out |= 1usize << (num_bits - 1 - bit);
+        }
+    }
+    out
 }
 
 /// Start a white-background SVG document.
