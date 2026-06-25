@@ -16,7 +16,7 @@ pub mod device;
 pub mod error_mitigation;
 pub mod ir;
 pub mod qis;
-// pub mod visualization;
+pub mod visualization;
 
 use pyo3::prelude::*;
 
@@ -30,6 +30,7 @@ fn binding_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     error_mitigation::register_error_mitigation_module(m)?;
     ir::register_ir_module(m)?;
     qis::register_qis_module(m)?;
+    visualization::register_visualization_module(m)?;
 
     Ok(())
 }
