@@ -33,3 +33,8 @@ rule decompose_swap_to_ising {
     match { SWAP 0 1 }
     rewrite { RXX(π/2) 0 1, RYY(π/2) 0 1, RZZ(π/2) 0 1, GPhase(π/4) }
 }
+
+rule decompose_swap_to_rx_ry_rzz {
+    match { SWAP 0 1 }
+    rewrite { RY(-π/2) 0, RY(-π/2) 1, RZZ(π/2) 0 1, RY(π/2) 1, RY(π/2) 0, RX(π/2) 0, RX(π/2) 1, RZZ(π/2) 0 1, RX(-π/2) 1, RX(-π/2) 0, RZZ(π/2) 0 1, GPhase(π/4) }
+}
