@@ -30,7 +30,7 @@
 //! patch set that never rewrites the same operation span twice in one round.
 
 use crate::circuit::{
-    Circuit, CircuitParam, Instruction, Operation, Parameter, ParameterValue, Qubit,
+    Circuit, CircuitParam, Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::commutation::{CommutationChecker, CommutationConfig};
 use crate::compile::error::CompilerError;
@@ -436,6 +436,10 @@ fn rule_passes_target_filter(
         return true;
     };
 
+    if rule_rewrites_physical_source_through_non_physical_target(rule, target_context) {
+        return false;
+    }
+
     rule.match_keys
         .iter()
         .all(|key| block.instruction_set.contains(key))
@@ -443,6 +447,25 @@ fn rule_passes_target_filter(
             .rewrite_keys
             .iter()
             .all(|key| target_context.allows_rewrite_key(key))
+}
+
+fn rule_rewrites_physical_source_through_non_physical_target(
+    rule: &CompiledRule,
+    target_context: &TargetContext,
+) -> bool {
+    !rule.source_keys.is_empty()
+        && rule
+            .source_keys
+            .iter()
+            .all(|key| is_implicit_target_key(key) || target_context.physically_supports(key))
+        && rule
+            .rewrite_keys
+            .iter()
+            .any(|key| !is_implicit_target_key(key) && !target_context.physically_supports(key))
+}
+
+fn is_implicit_target_key(key: &RewriteInstructionKey) -> bool {
+    matches!(key, RewriteInstructionKey::Standard(StandardGate::GPhase))
 }
 
 /// Tries to match one compiled rule at one anchor position.

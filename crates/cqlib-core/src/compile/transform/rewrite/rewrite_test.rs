@@ -362,6 +362,24 @@ fn lowers_to_explicit_target_basis() {
 }
 
 #[test]
+fn target_basis_lowering_preserves_physical_source_gate() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.x2p(q0).unwrap();
+
+    let config = RewriteConfig::lowering()
+        .with_target_instructions(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::X2P),
+        ])
+        .unwrap();
+    let result = KnowledgeRewriter::new(config).run(&circuit).unwrap();
+
+    assert_eq!(standard_ops(&result.circuit), vec![StandardGate::X2P]);
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::RY));
+}
+
+#[test]
 fn one_round_limit_stops_before_second_step_lowering() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);

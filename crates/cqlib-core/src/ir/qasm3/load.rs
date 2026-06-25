@@ -961,7 +961,17 @@ impl<'a> LoweringContext<'a> {
         }
 
         self.quantum = saved_quantum;
-        let gate = CircuitGate::new(self.symbol_name(id), FrozenCircuit::new(gate_circuit))?;
+        let signature_params = def
+            .params()
+            .unwrap_or(&[])
+            .iter()
+            .map(|param| self.symbol_id(param).map(|id| self.symbol_name(&id)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let gate = CircuitGate::with_signature(
+            self.symbol_name(id),
+            FrozenCircuit::new(gate_circuit),
+            signature_params,
+        )?;
         Ok(GateDef::Circuit(gate))
     }
 

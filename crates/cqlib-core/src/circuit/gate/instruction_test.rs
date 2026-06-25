@@ -12,7 +12,31 @@
 
 use super::*;
 
-use crate::circuit::Circuit;
+use crate::circuit::{
+    Circuit, CircuitId, ClassicalExpr, ClassicalType, ClassicalValue, ClassicalVar,
+};
+
+#[test]
+fn reports_measurements_and_classical_value_reads() {
+    let circuit_id = CircuitId::new();
+    let result = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);
+    let target = ClassicalVar::new(circuit_id, 0, ClassicalType::Bit);
+
+    let measurement = Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result });
+    assert!(measurement.has_measurement());
+    assert!(!measurement.reads_value(result));
+
+    let store = Instruction::ClassicalData(ClassicalDataOp::Store {
+        target,
+        value: ClassicalExpr::value(result),
+    });
+    assert!(!store.has_measurement());
+    assert!(store.reads_value(result));
+
+    let gate = Instruction::Standard(StandardGate::X);
+    assert!(!gate.has_measurement());
+    assert!(!gate.reads_value(result));
+}
 
 #[test]
 fn canonicalize_form_collapses_supported_mc_gate_forms() {
