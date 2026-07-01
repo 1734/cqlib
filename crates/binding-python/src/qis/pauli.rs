@@ -35,7 +35,7 @@ use std::hash::{Hash, Hasher};
 ///     I (1): $i^1 = i$
 ///     Minus (-1): $i^2 = -1$
 ///     MinusI (-i): $i^3 = -i$
-#[pyclass(name = "Phase", module = "cqlib.qis")]
+#[pyclass(name = "Phase", module = "cqlib.qis", skip_from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyPhase {
     pub(crate) inner: Phase,
@@ -157,7 +157,7 @@ impl PyPhase {
 ///     Y: Pauli-Y operator
 ///     Z: Pauli-Z (phase-flip) operator
 ///     I: Identity operator
-#[pyclass(name = "Pauli", module = "cqlib.qis")]
+#[pyclass(name = "Pauli", module = "cqlib.qis", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyPauli {
     pub(crate) inner: Pauli,
@@ -262,7 +262,7 @@ impl PyPauli {
 ///
 /// A Pauli string is a tensor product of single-qubit Pauli operators across
 /// multiple qubits: $P = \\bigotimes_{i=0}^{N-1} P_i$ where $P_i \\in \\{I, X, Y, Z\\}$.
-#[pyclass(name = "PauliString", module = "cqlib.qis")]
+#[pyclass(name = "PauliString", module = "cqlib.qis", from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PyPauliString {
     pub(crate) inner: PauliString,

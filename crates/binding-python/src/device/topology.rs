@@ -85,7 +85,7 @@ use pyo3::{Bound, PyAny, PyResult, pyclass, pymethods};
 /// topology.supports_directed_coupling(0, 1)  # True (0 -> 1)
 /// topology.supports_directed_coupling(1, 0)  # False (no 1 -> 0)
 /// ```
-#[pyclass(name = "Topology", module = "cqlib.device")]
+#[pyclass(name = "Topology", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyTopology {
     /// The underlying core topology.

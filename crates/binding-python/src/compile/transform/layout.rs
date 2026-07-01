@@ -119,7 +119,11 @@ fn py_sabre_layout(
 }
 
 /// Weighted objective used to rank candidate initial layouts.
-#[pyclass(name = "LayoutObjective", module = "cqlib.compile.transform.layout")]
+#[pyclass(
+    name = "LayoutObjective",
+    module = "cqlib.compile.transform.layout",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyLayoutObjective {
     pub(crate) inner: LayoutObjective,
@@ -230,7 +234,11 @@ impl PyLayoutObjective {
 }
 
 /// Breakdown of a layout objective score.
-#[pyclass(name = "LayoutScore", module = "cqlib.compile.transform.layout")]
+#[pyclass(
+    name = "LayoutScore",
+    module = "cqlib.compile.transform.layout",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyLayoutScore {
     inner: LayoutScore,
@@ -300,7 +308,11 @@ impl PyLayoutScore {
 }
 
 /// Diagnostics emitted by an initial-layout algorithm.
-#[pyclass(name = "LayoutDiagnostics", module = "cqlib.compile.transform.layout")]
+#[pyclass(
+    name = "LayoutDiagnostics",
+    module = "cqlib.compile.transform.layout",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyLayoutDiagnostics {
     inner: LayoutDiagnostics,
@@ -358,7 +370,11 @@ impl PyLayoutDiagnostics {
 }
 
 /// Selected initial layout, score, and diagnostics.
-#[pyclass(name = "LayoutResult", module = "cqlib.compile.transform.layout")]
+#[pyclass(
+    name = "LayoutResult",
+    module = "cqlib.compile.transform.layout",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyLayoutResult {
     inner: LayoutResult,
@@ -408,7 +424,11 @@ impl PyLayoutResult {
 }
 
 /// Selects which logical interactions are hard topology constraints for VF2.
-#[pyclass(name = "Vf2EdgeRequirement", module = "cqlib.compile.transform.layout")]
+#[pyclass(
+    name = "Vf2EdgeRequirement",
+    module = "cqlib.compile.transform.layout",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyVf2EdgeRequirement {
     pub(crate) inner: Vf2EdgeRequirement,
@@ -472,7 +492,11 @@ impl PyVf2EdgeRequirement {
 }
 
 /// Configuration for VF2 perfect-layout search.
-#[pyclass(name = "Vf2LayoutConfig", module = "cqlib.compile.transform.layout")]
+#[pyclass(
+    name = "Vf2LayoutConfig",
+    module = "cqlib.compile.transform.layout",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyVf2LayoutConfig {
     pub(crate) inner: Vf2LayoutConfig,

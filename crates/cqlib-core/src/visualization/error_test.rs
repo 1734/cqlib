@@ -113,7 +113,7 @@ fn test_all_error_variants() {
         VisualizationError::UnknownQubit(0),
         VisualizationError::ParameterIndexOutOfBounds { index: 1, len: 1 },
         VisualizationError::SvgRenderFailed("render error".to_string()),
-        VisualizationError::Io(io::Error::new(io::ErrorKind::Other, "other")),
+        VisualizationError::Io(io::Error::other("other")),
     ];
 
     for err in errors {

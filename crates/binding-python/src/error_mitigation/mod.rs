@@ -67,7 +67,11 @@ fn take_estimator_error(error: EstimatorErrorCell) -> PyResult<()> {
     }
 }
 
-#[pyclass(name = "ExtrapolateMethod", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ExtrapolateMethod",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyExtrapolateMethod {
     inner: ExtrapolateMethod,
@@ -127,7 +131,7 @@ impl PyExtrapolateMethod {
     }
 }
 
-#[pyclass(name = "ZneConfig", module = "cqlib.error_mitigation")]
+#[pyclass(name = "ZneConfig", module = "cqlib.error_mitigation", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyZneConfig {
     inner: ZneConfig,
@@ -164,7 +168,11 @@ impl PyZneConfig {
     }
 }
 
-#[pyclass(name = "VirtualDistillationConfig", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "VirtualDistillationConfig",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyVirtualDistillationConfig {
     inner: VirtualDistillationConfig,
@@ -201,7 +209,11 @@ impl PyVirtualDistillationConfig {
     }
 }
 
-#[pyclass(name = "MitigationMethod", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "MitigationMethod",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyMitigationMethod {
     inner: MitigationMethod,
@@ -259,7 +271,7 @@ impl PyMitigationMethod {
     }
 }
 
-#[pyclass(name = "RunArgs", module = "cqlib.error_mitigation")]
+#[pyclass(name = "RunArgs", module = "cqlib.error_mitigation", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyRunArgs {
     inner: RunArgs,
@@ -323,7 +335,11 @@ impl PyRunArgs {
     }
 }
 
-#[pyclass(name = "ProcessArgs", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ProcessArgs",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyProcessArgs {
     inner: ProcessArgs,
@@ -380,7 +396,11 @@ impl PyProcessArgs {
     }
 }
 
-#[pyclass(name = "MitigatedResult", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "MitigatedResult",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyMitigatedResult {
     inner: MitigatedResult,
@@ -424,7 +444,11 @@ impl PyMitigatedResult {
     }
 }
 
-#[pyclass(name = "ZNEMitigation", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ZNEMitigation",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyZNEMitigation {
     inner: ZNEMitigation,
@@ -538,7 +562,11 @@ impl PyZNEMitigation {
     }
 }
 
-#[pyclass(name = "VirtualDistillation", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "VirtualDistillation",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyVirtualDistillation {
     inner: VirtualDistillation,
@@ -649,7 +677,11 @@ impl PyVirtualDistillation {
     }
 }
 
-#[pyclass(name = "ErrorMitigation", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ErrorMitigation",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyErrorMitigation {
     inner: ErrorMitigation,

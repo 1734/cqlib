@@ -20,7 +20,8 @@ use std::hash::{Hash, Hasher};
 /// Output interaction basis used for numeric two-qubit unitary synthesis.
 #[pyclass(
     name = "TwoQubitUnitaryDecomposeBasis",
-    module = "cqlib.compile.transform.decompose"
+    module = "cqlib.compile.transform.decompose",
+    from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PyTwoQubitUnitaryDecomposeBasis {
@@ -74,7 +75,8 @@ impl PyTwoQubitUnitaryDecomposeBasis {
 /// Configuration for matrix-backed unitary decomposition.
 #[pyclass(
     name = "UnitaryDecomposeConfig",
-    module = "cqlib.compile.transform.decompose"
+    module = "cqlib.compile.transform.decompose",
+    from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PyUnitaryDecomposeConfig {
@@ -140,7 +142,8 @@ impl PyUnitaryDecomposeConfig {
 /// Configuration for resource-aware multi-controlled-gate decomposition.
 #[pyclass(
     name = "McGateDecomposeConfig",
-    module = "cqlib.compile.transform.decompose"
+    module = "cqlib.compile.transform.decompose",
+    from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PyMcGateDecomposeConfig {

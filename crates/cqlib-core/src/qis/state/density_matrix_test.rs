@@ -749,13 +749,13 @@ fn test_measure_out_of_bounds() {
 #[test]
 fn test_measure_deterministic_zero_and_one() {
     let mut zero = DensityMatrix::new(1);
-    assert_eq!(zero.measure(0).unwrap(), false);
+    assert!(!zero.measure(0).unwrap());
     assert_relative_eq!(zero.data[0].re, 1.0);
     assert_relative_eq!(zero.data[3].re, 0.0);
 
     let mut one = DensityMatrix::new(1);
     one.apply_x(0).unwrap();
-    assert_eq!(one.measure(0).unwrap(), true);
+    assert!(one.measure(0).unwrap());
     assert_relative_eq!(one.data[0].re, 0.0);
     assert_relative_eq!(one.data[3].re, 1.0);
 }
@@ -912,8 +912,8 @@ fn test_psd_gershgorin_false_negative_equal_superposition() {
     let size = dim * dim;
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     let val = Complex64::new(0.25, 0.0);
-    for i in 0..size {
-        data[i] = val;
+    for item in data.iter_mut().take(size) {
+        *item = val;
     }
     let dm = DensityMatrix {
         data,
@@ -943,9 +943,9 @@ fn test_psd_valid_pure_non_diagonally_dominant() {
     let sqrt_06 = 0.6_f64.sqrt();
     let sqrt_04 = 0.4_f64.sqrt();
     let mut data = vec![Complex64::new(0.0, 0.0); size];
-    data[0 * dim + 0] = Complex64::new(0.6, 0.0);
-    data[0 * dim + 3] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
-    data[3 * dim + 0] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
+    data[0] = Complex64::new(0.6, 0.0);
+    data[3] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
+    data[3 * dim] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
     data[3 * dim + 3] = Complex64::new(0.4, 0.0);
     let dm = DensityMatrix {
         data,
@@ -1015,7 +1015,7 @@ fn test_psd_negative_eigenvalue_rejected() {
     let size = dim * dim;
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     data[0] = Complex64::new(-0.1, 0.0);
-    data[1 * dim + 1] = Complex64::new(1.1, 0.0);
+    data[dim + 1] = Complex64::new(1.1, 0.0);
     let dm = DensityMatrix {
         data,
         num_qubits: n,
@@ -1038,7 +1038,7 @@ fn test_psd_tiny_negative_eigenvalue_accepted_with_tolerance() {
     let eps = 1e-12_f64;
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     data[0] = Complex64::new(1.0 + eps, 0.0);
-    data[1 * dim + 1] = Complex64::new(-eps, 0.0);
+    data[dim + 1] = Complex64::new(-eps, 0.0);
     let dm = DensityMatrix {
         data,
         num_qubits: n,

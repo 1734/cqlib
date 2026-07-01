@@ -142,9 +142,9 @@ fn save_diff_png(
     for idx in 0..(width as usize * height as usize) {
         let i3 = idx * 3;
         let i4 = idx * 4;
-        let dr = (i16::from(a[i3]) - i16::from(b[i3])).unsigned_abs() as u16;
-        let dg = (i16::from(a[i3 + 1]) - i16::from(b[i3 + 1])).unsigned_abs() as u16;
-        let db = (i16::from(a[i3 + 2]) - i16::from(b[i3 + 2])).unsigned_abs() as u16;
+        let dr = (i16::from(a[i3]) - i16::from(b[i3])).unsigned_abs();
+        let dg = (i16::from(a[i3 + 1]) - i16::from(b[i3 + 1])).unsigned_abs();
+        let db = (i16::from(a[i3 + 2]) - i16::from(b[i3 + 2])).unsigned_abs();
         dst[i4] = (dr.saturating_mul(AMP).min(255)) as u8;
         dst[i4 + 1] = (dg.saturating_mul(AMP).min(255)) as u8;
         dst[i4 + 2] = (db.saturating_mul(AMP).min(255)) as u8;

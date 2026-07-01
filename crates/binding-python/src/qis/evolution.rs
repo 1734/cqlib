@@ -32,7 +32,7 @@ use std::hash::{Hash, Hasher};
 ///     >>> mode1 = TrotterMode.first_order()
 ///     >>> mode2 = TrotterMode.second_order()
 ///     >>> mode3 = TrotterMode.randomized(42)  # with seed 42
-#[pyclass(name = "TrotterMode", module = "cqlib.qis")]
+#[pyclass(name = "TrotterMode", module = "cqlib.qis", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyTrotterMode {
     pub(crate) inner: TrotterMode,

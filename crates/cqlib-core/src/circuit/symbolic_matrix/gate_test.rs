@@ -167,7 +167,7 @@ fn test_parametric_standard_gates_with_symbolic_params_match_numeric() {
         StandardGate::XY2P,
         StandardGate::XY2M,
     ] {
-        let symbolic = standard_gate_symbolic_matrix(gate, &[theta.clone()]).unwrap();
+        let symbolic = standard_gate_symbolic_matrix(gate, std::slice::from_ref(&theta)).unwrap();
         let mut bindings = HashMap::new();
         bindings.insert("theta", 0.63);
         let evaluated = evaluate_symbolic_matrix(&symbolic, &Some(bindings.clone())).unwrap();
@@ -1211,7 +1211,13 @@ fn test_apply_standard_gate_to_matrix_directly() {
     // Symbolic path: RX(theta) on qubit 1.
     let theta = Parameter::symbol("theta");
     let mut matrix = symbolic_eye(4);
-    apply_standard_gate_to_matrix(&mut matrix, StandardGate::RX, &[1], &[theta.clone()]).unwrap();
+    apply_standard_gate_to_matrix(
+        &mut matrix,
+        StandardGate::RX,
+        &[1],
+        std::slice::from_ref(&theta),
+    )
+    .unwrap();
     let mut bindings = HashMap::new();
     bindings.insert("theta", PI / 4.0);
     let evaluated = evaluate_symbolic_matrix(&matrix, &Some(bindings.clone())).unwrap();

@@ -49,7 +49,7 @@ use pyo3::types::{PyComplex, PyList};
 /// probs = sv.probabilities()
 /// print(probs)  # [0.5, 0.0, 0.0, 0.5]
 /// ```
-#[pyclass(name = "Statevector", module = "cqlib.qis.state")]
+#[pyclass(name = "Statevector", module = "cqlib.qis.state", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyStatevector {
     pub(crate) inner: Statevector,

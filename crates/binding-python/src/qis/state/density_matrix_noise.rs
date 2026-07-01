@@ -47,7 +47,11 @@ use pyo3::prelude::*;
 /// # Get probabilities (P(|1>) ~ 0.99 due to 1% bit-flip noise)
 /// probs = sim.probabilities()
 /// ```
-#[pyclass(name = "DensityMatrixNoise", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "DensityMatrixNoise",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyDensityMatrixNoise {
     pub(crate) inner: DensityMatrixNoise,

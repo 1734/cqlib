@@ -60,7 +60,7 @@ impl PyParamLike {
 }
 
 /// Mutable quantum circuit with gate, parameter, and dynamic-control support.
-#[pyclass(name = "Circuit", module = "cqlib.circuit")]
+#[pyclass(name = "Circuit", module = "cqlib.circuit", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyCircuit {
     pub(crate) inner: Circuit,

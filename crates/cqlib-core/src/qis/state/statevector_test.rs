@@ -1976,13 +1976,13 @@ fn test_measure_out_of_bounds() {
 #[test]
 fn test_measure_deterministic_zero_and_one() {
     let mut zero = Statevector::new(1);
-    assert_eq!(zero.measure(0).unwrap(), false);
+    assert!(!zero.measure(0).unwrap());
     assert_complex_eq(zero.data[0], c(1.0, 0.0), "|0> remains |0>");
     assert_complex_eq(zero.data[1], c(0.0, 0.0), "|1> amplitude remains zero");
 
     let mut one = Statevector::new(1);
     one.apply_x(0).unwrap();
-    assert_eq!(one.measure(0).unwrap(), true);
+    assert!(one.measure(0).unwrap());
     assert_complex_eq(one.data[0], c(0.0, 0.0), "|0> amplitude remains zero");
     assert_complex_eq(one.data[1], c(1.0, 0.0), "|1> remains |1>");
 }

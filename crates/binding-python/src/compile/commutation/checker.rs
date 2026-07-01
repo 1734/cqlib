@@ -18,7 +18,11 @@ use cqlib_core::compile::commutation::{
 use pyo3::prelude::*;
 
 /// Python wrapper for a proven commutation relationship.
-#[pyclass(name = "Commutation", module = "cqlib.compile.commutation")]
+#[pyclass(
+    name = "Commutation",
+    module = "cqlib.compile.commutation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCommutation {
     inner: Commutation,
@@ -79,7 +83,11 @@ impl PyCommutation {
 }
 
 /// Python wrapper for commutation checker configuration.
-#[pyclass(name = "CommutationConfig", module = "cqlib.compile.commutation")]
+#[pyclass(
+    name = "CommutationConfig",
+    module = "cqlib.compile.commutation",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCommutationConfig {
     inner: CommutationConfig,
@@ -148,7 +156,11 @@ impl PyCommutationConfig {
 }
 
 /// Reusable Python wrapper around the core commutation checker.
-#[pyclass(name = "CommutationChecker", module = "cqlib.compile.commutation")]
+#[pyclass(
+    name = "CommutationChecker",
+    module = "cqlib.compile.commutation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCommutationChecker {
     inner: CommutationChecker,

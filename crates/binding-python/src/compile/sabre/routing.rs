@@ -23,7 +23,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Objective used to select the best result among independent SABRE trials.
-#[pyclass(name = "SabreTrialObjective", module = "cqlib.compile.sabre")]
+#[pyclass(
+    name = "SabreTrialObjective",
+    module = "cqlib.compile.sabre",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PySabreTrialObjective {
     inner: SabreTrialObjective,
@@ -105,7 +109,11 @@ impl PySabreTrialObjective {
 }
 
 /// Swap-selection weights and fallback limits used by SABRE.
-#[pyclass(name = "SabreHeuristicConfig", module = "cqlib.compile.sabre")]
+#[pyclass(
+    name = "SabreHeuristicConfig",
+    module = "cqlib.compile.sabre",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PySabreHeuristicConfig {
     inner: SabreHeuristicConfig,
@@ -198,7 +206,7 @@ impl PySabreHeuristicConfig {
 }
 
 /// Configuration shared by SABRE layout refinement and routing.
-#[pyclass(name = "SabreConfig", module = "cqlib.compile.sabre")]
+#[pyclass(name = "SabreConfig", module = "cqlib.compile.sabre", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PySabreConfig {
     pub(crate) inner: SabreConfig,
@@ -309,7 +317,11 @@ impl PySabreConfig {
 }
 
 /// Diagnostics emitted by a completed SABRE routing run.
-#[pyclass(name = "SabreRoutingDiagnostics", module = "cqlib.compile.sabre")]
+#[pyclass(
+    name = "SabreRoutingDiagnostics",
+    module = "cqlib.compile.sabre",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PySabreRoutingDiagnostics {
     inner: SabreRoutingDiagnostics,
@@ -379,7 +391,11 @@ impl PySabreRoutingDiagnostics {
 }
 
 /// Routed circuit, selected layouts, and routing diagnostics.
-#[pyclass(name = "SabreRoutingResult", module = "cqlib.compile.sabre")]
+#[pyclass(
+    name = "SabreRoutingResult",
+    module = "cqlib.compile.sabre",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PySabreRoutingResult {
     inner: SabreRoutingResult,

@@ -233,8 +233,8 @@ fn for_loop_iterations(op: &ForOp) -> Option<usize> {
         }
         let span = stop.checked_sub(start)?;
         // ceil(span / step) = (span + step - 1) / step, guarded against overflow.
-        let numer = span.checked_add(step.checked_sub(1)?)?;
-        let iterations = numer.checked_div(step)?;
+        let numerator = span.checked_add(step.checked_sub(1)?)?;
+        let iterations = numerator.checked_div(step)?;
         Some(iterations as usize)
     } else {
         // Descending range: step < 0. Iterate while start > stop.
@@ -243,8 +243,8 @@ fn for_loop_iterations(op: &ForOp) -> Option<usize> {
         }
         let span = start.checked_sub(stop)?;
         let abs_step = (0u128).checked_sub(step)?; // |step|, step < 0 so this is positive
-        let numer = span.checked_add(abs_step.checked_sub(1)?)?;
-        let iterations = numer.checked_div(abs_step)?;
+        let numerator = span.checked_add(abs_step.checked_sub(1)?)?;
+        let iterations = numerator.checked_div(abs_step)?;
         Some(iterations as usize)
     }
 }
@@ -323,6 +323,7 @@ mod tests {
         Qubit,
     };
     use smallvec::smallvec;
+    use std::slice::from_ref;
 
     fn q(n: u32) -> Qubit {
         Qubit::new(n)
@@ -710,7 +711,7 @@ mod tests {
             params: smallvec![],
             label: None,
         };
-        assert!(!contains_control_flow(&[plain.clone()]));
+        assert!(!contains_control_flow(from_ref(&plain)));
 
         let if_op = IfOp::new(
             ClassicalExpr::bool_literal(true),

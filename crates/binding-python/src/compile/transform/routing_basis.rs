@@ -23,7 +23,11 @@ use pyo3::prelude::*;
 ///
 /// `preferred_basis` is a hint for the 2-qubit family used when lowering CCX:
 /// CZ is preferred only when the basis contains CZ and does not contain CX.
-#[pyclass(name = "LowerToRoutingBasis", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "LowerToRoutingBasis",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyLowerToRoutingBasis {
     inner: LowerToRoutingBasis,

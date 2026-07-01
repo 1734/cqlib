@@ -42,7 +42,11 @@ use crate::qis::hamiltonian::PyHamiltonian;
 ///     >>> s1 = EvolutionStrategy.exact()
 ///     >>> s2 = EvolutionStrategy.auto(steps=10)
 ///     >>> s3 = EvolutionStrategy.trotter(TrotterMode.second_order(), steps=5)
-#[pyclass(name = "EvolutionStrategy", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "EvolutionStrategy",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyEvolutionStrategy {
     pub(crate) inner: EvolutionStrategy,
@@ -236,7 +240,12 @@ impl PyEvolutionStrategy {
 ///     ...     print("Mathematically exact decomposition")
 ///     ... else:
 ///     ...     print(f"Trotter with {info.steps} steps, mode={info.trotter_mode}")
-#[pyclass(name = "EvolutionInfo", module = "cqlib.circuit.ansatz", get_all)]
+#[pyclass(
+    name = "EvolutionInfo",
+    module = "cqlib.circuit.ansatz",
+    get_all,
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyEvolutionInfo {
     /// ``True`` iff the decomposition is mathematically exact.
@@ -349,7 +358,11 @@ impl PyEvolutionInfo {
 /// >>> circuit2 = ansatz2.build_circuit("ignored")
 /// >>> # circuit2 has one symbolic parameter "tau"
 /// ```
-#[pyclass(name = "PauliEvolutionAnsatz", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "PauliEvolutionAnsatz",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyPauliEvolutionAnsatz {
     pub(crate) inner: PauliEvolutionAnsatz,

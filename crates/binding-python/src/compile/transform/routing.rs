@@ -85,7 +85,11 @@ fn py_route_sabre(
 }
 
 /// A physical circuit produced by routing, plus routing metadata.
-#[pyclass(name = "RoutedCircuit", module = "cqlib.compile.transform.routing")]
+#[pyclass(
+    name = "RoutedCircuit",
+    module = "cqlib.compile.transform.routing",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyRoutedCircuit {
     inner: RoutedCircuit,
@@ -151,7 +155,11 @@ impl PyRoutedCircuit {
 }
 
 /// Full SABRE layout-selection and routing result.
-#[pyclass(name = "SabreRouteResult", module = "cqlib.compile.transform.routing")]
+#[pyclass(
+    name = "SabreRouteResult",
+    module = "cqlib.compile.transform.routing",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PySabreRouteResult {
     inner: SabreRouteResult,

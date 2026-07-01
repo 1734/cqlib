@@ -325,10 +325,9 @@ fn decompose_cy_to_rzz_formula_matches_gate_definition() {
 #[test]
 fn new_rzz_native_lowering_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
-    for name in ["decompose_cy_to_rzz"] {
-        let rule = library.get_by_name(name).expect(name);
-        assert_rule_verification_passes(rule);
-    }
+    let name = "decompose_cy_to_rzz";
+    let rule = library.get_by_name(name).expect(name);
+    assert_rule_verification_passes(rule);
 }
 
 #[test]
@@ -355,7 +354,8 @@ fn ion_trap_direct_ising_rules_pass_layered_verify() {
 #[test]
 fn ion_trap_direct_ccx_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
-    for name in ["decompose_ccx_to_rx_ry_rzz"] {
+    {
+        let name = "decompose_ccx_to_rx_ry_rzz";
         let rule = library.get_by_name(name).expect(name);
         assert_rule_verification_passes(rule);
     }
@@ -541,7 +541,8 @@ fn ion_trap_rzz_intermediate_rules_are_present() {
 #[test]
 fn documented_missing_rules_for_rzz_native_targets() {
     let library = RuleLibrary::builtin_rules().unwrap();
-    for missing in ["decompose_ms_to_rzz"] {
+    {
+        let missing = "decompose_ms_to_rzz";
         assert!(
             library.get_by_name(missing).is_none(),
             "rule `{missing}` is not implemented yet (documented gap)"

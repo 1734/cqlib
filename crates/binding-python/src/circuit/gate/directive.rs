@@ -19,7 +19,7 @@ use cqlib_core::circuit::gate::directive::Directive;
 use pyo3::prelude::*;
 
 /// Non-unitary barrier, measurement, or reset instruction.
-#[pyclass(name = "Directive", module = "cqlib.circuit.gates")]
+#[pyclass(name = "Directive", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PyDirective {
     pub(crate) inner: Directive,

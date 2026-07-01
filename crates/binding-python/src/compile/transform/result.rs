@@ -16,7 +16,11 @@ use cqlib_core::compile::transform::decompose::DecompositionRuleStats;
 use pyo3::prelude::*;
 
 /// Common result returned by circuit-to-circuit transforms.
-#[pyclass(name = "TransformResult", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "TransformResult",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyTransformResult {
     pub(crate) inner: TransformResult,
@@ -63,7 +67,8 @@ impl PyTransformResult {
 /// Pass-local runtime decomposition-rule cache counters.
 #[pyclass(
     name = "DecompositionRuleStats",
-    module = "cqlib.compile.transform.decompose"
+    module = "cqlib.compile.transform.decompose",
+    skip_from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PyDecompositionRuleStats {

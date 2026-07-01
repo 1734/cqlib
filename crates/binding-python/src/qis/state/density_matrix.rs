@@ -50,7 +50,11 @@ use pyo3::types::{PyComplex, PyList};
 /// probs = dm.probabilities()
 /// print(probs)  # [0.5, 0.5]
 /// ```
-#[pyclass(name = "DensityMatrix", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "DensityMatrix",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyDensityMatrix {
     pub(crate) inner: DensityMatrix,
