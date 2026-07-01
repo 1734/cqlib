@@ -336,47 +336,6 @@ impl PyStandardGate {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::PyStandardGate;
-    use cqlib_core::circuit::{Parameter, StandardGate};
-
-    #[test]
-    fn control_preserves_bound_parameters() {
-        let theta = Parameter::symbol("theta");
-        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
-        let controlled = gate.control(2);
-
-        assert_eq!(controlled.inner.num_ctrl_qubits(), 2);
-        assert_eq!(controlled.params, vec![theta]);
-    }
-
-    #[test]
-    fn inverse_uses_exact_bound_parameter_count() {
-        let theta = Parameter::symbol("theta");
-        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
-        let inverse = gate.inverse().unwrap();
-
-        assert_eq!(inverse.inner, StandardGate::RX);
-        assert_eq!(inverse.params, vec![-theta]);
-    }
-
-    #[test]
-    fn all_mirrors_core_standard_gate_order() {
-        let gates = PyStandardGate::all();
-
-        assert_eq!(gates.len(), StandardGate::all().len());
-        assert!(
-            gates
-                .iter()
-                .zip(StandardGate::all())
-                .all(
-                    |(py_gate, core_gate)| py_gate.inner == *core_gate && py_gate.params.is_empty()
-                )
-        );
-    }
-}
-
 /// Registers static gate attributes on the `StandardGate` class.
 ///
 /// Adds all standard gates (H, X, RX, CX, etc.) as class attributes
@@ -458,5 +417,46 @@ impl PyStandardGate {
             params,
             hash: RwLock::new(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PyStandardGate;
+    use cqlib_core::circuit::{Parameter, StandardGate};
+
+    #[test]
+    fn control_preserves_bound_parameters() {
+        let theta = Parameter::symbol("theta");
+        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
+        let controlled = gate.control(2);
+
+        assert_eq!(controlled.inner.num_ctrl_qubits(), 2);
+        assert_eq!(controlled.params, vec![theta]);
+    }
+
+    #[test]
+    fn inverse_uses_exact_bound_parameter_count() {
+        let theta = Parameter::symbol("theta");
+        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
+        let inverse = gate.inverse().unwrap();
+
+        assert_eq!(inverse.inner, StandardGate::RX);
+        assert_eq!(inverse.params, vec![-theta]);
+    }
+
+    #[test]
+    fn all_mirrors_core_standard_gate_order() {
+        let gates = PyStandardGate::all();
+
+        assert_eq!(gates.len(), StandardGate::all().len());
+        assert!(
+            gates
+                .iter()
+                .zip(StandardGate::all())
+                .all(
+                    |(py_gate, core_gate)| py_gate.inner == *core_gate && py_gate.params.is_empty()
+                )
+        );
     }
 }

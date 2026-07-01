@@ -49,6 +49,7 @@ fn visualization_error_to_py_err(context: &str, err: VisualizationError) -> PyEr
 }
 
 /// Build result plot options from Python keyword arguments.
+#[allow(clippy::too_many_arguments)]
 fn result_plot_options(
     figsize: Option<(f64, f64)>,
     color: Option<Vec<String>>,
@@ -235,6 +236,7 @@ pub fn py_draw_figure(
         output_path = None
     )
 )]
+#[allow(clippy::too_many_arguments)]
 pub fn py_plot_histogram(
     result: &PyExecutionResult,
     figsize: Option<(f64, f64)>,
@@ -280,6 +282,7 @@ pub fn py_plot_histogram(
         output_path = None
     )
 )]
+#[allow(clippy::too_many_arguments)]
 pub fn py_plot_distribution(
     result: &PyExecutionResult,
     figsize: Option<(f64, f64)>,

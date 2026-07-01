@@ -141,7 +141,7 @@ fn matrix_exp_iht(h_mat: &Array2<Complex64>, t: f64) -> Array2<Complex64> {
 
     for k in 1..=60usize {
         term = term.dot(&a) / Complex64::from(k as f64);
-        result = result + &term;
+        result += &term;
 
         // Early termination if converged
         if term.iter().all(|v| v.norm() < 1e-16) {

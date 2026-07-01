@@ -684,8 +684,8 @@ fn test_pauli_feature_map_full_entanglement_3qubits() {
     assert_eq!(ops.len(), 12);
 
     // Check H gates
-    for i in 0..3 {
-        assert!(is_h_gate_on_qubit(&ops[i], i));
+    for (i, op) in ops.iter().enumerate().take(3) {
+        assert!(is_h_gate_on_qubit(op, i));
     }
 }
 

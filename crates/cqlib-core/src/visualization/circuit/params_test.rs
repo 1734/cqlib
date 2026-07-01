@@ -377,7 +377,7 @@ fn test_formatter_pi_max_denominator_limit() {
 #[test]
 fn test_parameter_display_mode_clone_copy() {
     let mode = ParameterDisplayMode::Numeric;
-    let mode_clone = mode.clone();
+    let mode_clone = mode;
     assert_eq!(mode, mode_clone);
 
     let mode_copy = mode;
@@ -387,7 +387,7 @@ fn test_parameter_display_mode_clone_copy() {
 #[test]
 fn test_parameter_format_options_clone_copy() {
     let opts = ParameterFormatOptions::default();
-    let opts_clone = opts.clone();
+    let opts_clone = opts;
     assert_eq!(opts.mode, opts_clone.mode);
 
     let opts_copy = opts;

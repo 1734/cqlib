@@ -609,7 +609,7 @@ pub fn contains_high_level_gate(circuit: &Circuit) -> bool {
     })
 }
 
-/// Returns whether a named compiler workflow step reported a change.
+// Returns whether a named compiler workflow step reported a change.
 // pub fn step_changed(result: &CompileResult, name: &str) -> bool {
 //     result
 //         .steps

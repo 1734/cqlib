@@ -308,7 +308,8 @@ fn bar_chart_layout(plot: &PreparedResultPlot, options: &ResultPlotOptions) -> B
     // The left gutter must hold, from the y-axis outward: the tick gap, the tick
     // labels, a title pad, the rotated y-axis title's width, and a left edge pad.
     // This mirrors how matplotlib's `tight_layout` reserves room for the title.
-    let margin_left = (TICK_GAP + max_tick_w + TITLE_PAD + 2.0 * TITLE_HALF + LEFT_PAD).clamp(48.0, 110.0);
+    let margin_left =
+        (TICK_GAP + max_tick_w + TITLE_PAD + 2.0 * TITLE_HALF + LEFT_PAD).clamp(48.0, 110.0);
 
     let right_legend_margin = options.legend.as_ref().map_or(0.0, |legend| {
         legend

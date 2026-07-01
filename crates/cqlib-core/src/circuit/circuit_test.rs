@@ -677,8 +677,8 @@ fn test_assign_parameters() {
     if let CircuitParam::Index(idx) = assigned_circuit.data[1].params[0] {
         let param = &assigned_circuit.parameters[idx as usize];
         let symbols = param.get_symbols();
-        assert!(symbols.contains(&"b".to_string()));
-        assert!(!symbols.contains(&"a".to_string()));
+        assert!(symbols.contains("b"));
+        assert!(!symbols.contains("a"));
     } else {
         panic!(
             "Expected Index for rz, got {:?}",
