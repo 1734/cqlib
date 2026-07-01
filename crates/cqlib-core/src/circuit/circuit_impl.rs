@@ -817,11 +817,9 @@ impl Circuit {
             label: label.map(Into::into),
         });
 
-        if validate_classical {
-            if let Err(error) = self.validate_builder_state() {
-                self.rollback_to(checkpoint.expect("classical append must define a checkpoint"));
-                return Err(error);
-            }
+        if validate_classical && let Err(error) = self.validate_builder_state() {
+            self.rollback_to(checkpoint.expect("classical append must define a checkpoint"));
+            return Err(error);
         }
 
         Ok(())

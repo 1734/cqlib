@@ -308,11 +308,11 @@ impl Search {
 
     /// Records and reports whether another extension would exceed call limit.
     fn reached_call_limit(&mut self) -> bool {
-        if let Some(limit) = self.config.call_limit {
-            if self.stats.calls >= limit {
-                self.stats.stopped_by_call_limit = true;
-                return true;
-            }
+        if let Some(limit) = self.config.call_limit
+            && self.stats.calls >= limit
+        {
+            self.stats.stopped_by_call_limit = true;
+            return true;
         }
         false
     }

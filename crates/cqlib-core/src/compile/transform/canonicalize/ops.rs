@@ -117,23 +117,23 @@ pub(super) fn push_operation(
     }
 
     operation.label = None;
-    if let Some(last) = out.last_mut() {
-        if matches!(last.instruction, Instruction::Directive(Directive::Barrier)) {
-            // Adjacent barriers are a single synchronization boundary whenever
-            // one scope covers the other. Partial overlap is deliberately not
-            // merged because neither barrier fully subsumes the other.
-            match barrier_relation(&last.qubits, &operation.qubits) {
-                BarrierRelation::Equal | BarrierRelation::LeftSuperset => {
-                    last.label = None;
-                    return;
-                }
-                BarrierRelation::RightSuperset => {
-                    *last = operation;
-                    last.label = None;
-                    return;
-                }
-                BarrierRelation::DisjointOrOverlap => {}
+    if let Some(last) = out.last_mut()
+        && matches!(last.instruction, Instruction::Directive(Directive::Barrier))
+    {
+        // Adjacent barriers are a single synchronization boundary whenever
+        // one scope covers the other. Partial overlap is deliberately not
+        // merged because neither barrier fully subsumes the other.
+        match barrier_relation(&last.qubits, &operation.qubits) {
+            BarrierRelation::Equal | BarrierRelation::LeftSuperset => {
+                last.label = None;
+                return;
             }
+            BarrierRelation::RightSuperset => {
+                *last = operation;
+                last.label = None;
+                return;
+            }
+            BarrierRelation::DisjointOrOverlap => {}
         }
     }
     out.push(operation);

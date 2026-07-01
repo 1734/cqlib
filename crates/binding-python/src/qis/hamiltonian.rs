@@ -85,12 +85,12 @@ fn extract_complex(value: &Bound<'_, PyAny>) -> PyResult<Complex64> {
     }
 
     // Try to extract as tuple (real, imag)
-    if let Ok(tuple) = value.cast::<PyTuple>() {
-        if tuple.len() == 2 {
-            let real: f64 = tuple.get_item(0)?.extract()?;
-            let imag: f64 = tuple.get_item(1)?.extract()?;
-            return Ok(Complex64::new(real, imag));
-        }
+    if let Ok(tuple) = value.cast::<PyTuple>()
+        && tuple.len() == 2
+    {
+        let real: f64 = tuple.get_item(0)?.extract()?;
+        let imag: f64 = tuple.get_item(1)?.extract()?;
+        return Ok(Complex64::new(real, imag));
     }
 
     Err(PyValueError::new_err(

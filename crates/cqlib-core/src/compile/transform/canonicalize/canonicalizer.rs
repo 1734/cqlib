@@ -287,10 +287,10 @@ impl<'a> CanonicalizeRound<'a> {
         // The operation-level qubit list is derived from the canonicalized body,
         // not preserved from input. This prevents deleted body no-ops from
         // keeping dead qubits visible to later analysis passes.
-        if matches!(scope, ScopeKind::TopLevel | ScopeKind::ControlFlowBody) {
-            if let Instruction::ClassicalControl(control) = &operation.instruction {
-                operation.qubits = control.used_qubits().into_iter().collect();
-            }
+        if matches!(scope, ScopeKind::TopLevel | ScopeKind::ControlFlowBody)
+            && let Instruction::ClassicalControl(control) = &operation.instruction
+        {
+            operation.qubits = control.used_qubits().into_iter().collect();
         }
 
         Ok(RewriteResult::keep(operation))

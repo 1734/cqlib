@@ -745,18 +745,18 @@ fn draw_span_box(lines: &mut [Vec<String>], lanes: &[usize], label: &str, mark_t
 
 fn select_label_row(top_line: usize, bottom_line: usize) -> usize {
     let mid = (top_line + bottom_line) / 2;
-    if mid > top_line && mid < bottom_line && mid % 2 == 0 {
+    if mid > top_line && mid < bottom_line && mid & 1 == 0 {
         return mid;
     }
     if mid > top_line + 1 {
         let upper = mid - 1;
-        if upper % 2 == 0 {
+        if upper & 1 == 0 {
             return upper;
         }
     }
     if mid + 1 < bottom_line {
         let lower = mid + 1;
-        if lower % 2 == 0 {
+        if lower & 1 == 0 {
             return lower;
         }
     }

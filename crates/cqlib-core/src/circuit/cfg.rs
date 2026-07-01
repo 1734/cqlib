@@ -1047,13 +1047,13 @@ impl CircuitCFG {
     }
 
     fn validate_param(&self, parameter: &CircuitParam, context: &str) -> Result<(), CircuitError> {
-        if let CircuitParam::Index(index) = parameter {
-            if self.parameters.get_index(*index as usize).is_none() {
-                return Err(CircuitError::InvalidControlFlow(format!(
-                    "{} references missing parameter index {}",
-                    context, index
-                )));
-            }
+        if let CircuitParam::Index(index) = parameter
+            && self.parameters.get_index(*index as usize).is_none()
+        {
+            return Err(CircuitError::InvalidControlFlow(format!(
+                "{} references missing parameter index {}",
+                context, index
+            )));
         }
         Ok(())
     }

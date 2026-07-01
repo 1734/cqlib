@@ -1906,7 +1906,7 @@ impl StabilizerState {
                     let zi = mat[pivot_row * row_stride + n_words + w];
                     sum += Self::g_phase_word(xh, zh, xi, zi);
                 }
-                mat_phase[r] = (((sum % 4) + 4) % 4) as i32;
+                mat_phase[r] = ((sum % 4) + 4) % 4;
                 for w in 0..row_stride {
                     mat[r * row_stride + w] ^= mat[pivot_row * row_stride + w];
                 }
@@ -1924,7 +1924,7 @@ impl StabilizerState {
                     let zi = mat[pivot_row * row_stride + n_words + w];
                     sum += Self::g_phase_word(xh, zh, xi, zi);
                 }
-                q_phase = (((sum % 4) + 4) % 4) as i32;
+                q_phase = ((sum % 4) + 4) % 4;
                 for w in 0..n_words {
                     qx[w] ^= mat[pivot_row * row_stride + w];
                     qz[w] ^= mat[pivot_row * row_stride + n_words + w];

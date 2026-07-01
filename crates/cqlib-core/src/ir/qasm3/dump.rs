@@ -481,11 +481,11 @@ fn dump_operations(
         let op = &operations[index];
         if let Instruction::ClassicalData(ClassicalDataOp::Store { target, value }) =
             &op.instruction
+            && accepting_initializers
+            && is_zero_initializer(*target, value)
         {
-            if accepting_initializers && is_zero_initializer(*target, value) {
-                index += 1;
-                continue;
-            }
+            index += 1;
+            continue;
         }
         accepting_initializers = false;
 
@@ -693,10 +693,9 @@ fn measurement_destination(
     if matches!(
         instruction,
         Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-    ) {
-        if let Some(bit) = value.measurement_store_bit(*target, result) {
-            return Ok((MeasurementDestination::VarBit(*target, bit), true));
-        }
+    ) && let Some(bit) = value.measurement_store_bit(*target, result)
+    {
+        return Ok((MeasurementDestination::VarBit(*target, bit), true));
     }
 
     Err(Qasm3DumpError::UnsupportedClassicalData(

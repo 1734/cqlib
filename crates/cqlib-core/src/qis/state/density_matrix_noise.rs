@@ -408,13 +408,13 @@ impl DensityMatrixNoise {
             } else if qubits.len() == 2 {
                 let q0 = Qubit::new(qubits[0] as u32);
                 let q1 = Qubit::new(qubits[1] as u32);
-                if let Ok(key) = OperationKey::new_double(gate, q0, q1) {
-                    if let Some(errors) = noise_model.get_two_qubit_errors(&key) {
-                        for error in errors {
-                            let kraus_ops = error.to_kraus();
-                            let flat_ops = self.convert_kraus_ops(&kraus_ops);
-                            self.state.apply_kraus(&flat_ops, qubits)?;
-                        }
+                if let Ok(key) = OperationKey::new_double(gate, q0, q1)
+                    && let Some(errors) = noise_model.get_two_qubit_errors(&key)
+                {
+                    for error in errors {
+                        let kraus_ops = error.to_kraus();
+                        let flat_ops = self.convert_kraus_ops(&kraus_ops);
+                        self.state.apply_kraus(&flat_ops, qubits)?;
                     }
                 }
             } else if qubits.len() == 3 {

@@ -572,17 +572,17 @@ impl AstToCircuit {
         let result = (|| {
             // Ensure dependencies are compiled
             for stmt in &body {
-                if let Statement::CustomGate(dep_name, _, _) = stmt {
-                    if self.custom_gates.contains_key(dep_name) {
-                        // Check if this dependency creates a cycle
-                        if self.compiling_gates.contains(dep_name) {
-                            return Err(QasmParseError::CircularGateDependency {
-                                gate: name.to_string(),
-                                dependency: dep_name.to_string(),
-                            });
-                        }
-                        self.compile_gate_if_needed(dep_name)?;
+                if let Statement::CustomGate(dep_name, _, _) = stmt
+                    && self.custom_gates.contains_key(dep_name)
+                {
+                    // Check if this dependency creates a cycle
+                    if self.compiling_gates.contains(dep_name) {
+                        return Err(QasmParseError::CircularGateDependency {
+                            gate: name.to_string(),
+                            dependency: dep_name.to_string(),
+                        });
                     }
+                    self.compile_gate_if_needed(dep_name)?;
                 }
             }
 
@@ -1055,12 +1055,12 @@ impl AstToCircuit {
                     OpCode::Mul => l * r,
                     OpCode::Div => {
                         // Check for division by zero in constant case
-                        if let Ok(val) = r.evaluate(&None) {
-                            if val == 0.0 {
-                                return Err(QasmParseError::EvaluationError(
-                                    "Division by zero".to_string(),
-                                ));
-                            }
+                        if let Ok(val) = r.evaluate(&None)
+                            && val == 0.0
+                        {
+                            return Err(QasmParseError::EvaluationError(
+                                "Division by zero".to_string(),
+                            ));
                         }
                         l / r
                     }

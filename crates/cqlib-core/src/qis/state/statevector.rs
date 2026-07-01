@@ -1093,8 +1093,9 @@ impl Statevector {
                 // Apply matrix multiplication
                 for row in 0..gate_dim {
                     let mut sum = Complex64::default();
-                    for col in 0..gate_dim {
-                        sum += matrix_rows[row][col] * input_buf[col];
+                    for (matrix_value, input_value) in matrix_rows[row].iter().zip(input_buf.iter())
+                    {
+                        sum += matrix_value * input_value;
                     }
                     output_buf[row] = sum;
                 }

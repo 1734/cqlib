@@ -465,20 +465,19 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                             if let (Some(min_l), Some(max_l)) = (
                                 op.lanes.iter().copied().min(),
                                 op.lanes.iter().copied().max(),
-                            ) {
-                                if max_l > min_l {
-                                    let y0 = lane_to_y(min_l, y_base);
-                                    let y1 = lane_to_y(max_l, y_base);
-                                    elements.push(svg_line(
-                                        px(x_center),
-                                        py(y0.min(y1)),
-                                        px(x_center),
-                                        py(y0.max(y1)),
-                                        connector_color,
-                                        connector_lw,
-                                        None,
-                                    ));
-                                }
+                            ) && max_l > min_l
+                            {
+                                let y0 = lane_to_y(min_l, y_base);
+                                let y1 = lane_to_y(max_l, y_base);
+                                elements.push(svg_line(
+                                    px(x_center),
+                                    py(y0.min(y1)),
+                                    px(x_center),
+                                    py(y0.max(y1)),
+                                    connector_color,
+                                    connector_lw,
+                                    None,
+                                ));
                             }
                             let r = (options.gate_width * 0.35 * sx.min(sy)).clamp(14.0, 28.0);
                             let circle_face = normalized_fill_color(gate_style, &palette)
@@ -585,20 +584,19 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                         if let (Some(min_l), Some(max_l)) = (
                             op.lanes.iter().copied().min(),
                             op.lanes.iter().copied().max(),
-                        ) {
-                            if max_l > min_l {
-                                let y0 = lane_to_y(min_l, y_base);
-                                let y1 = lane_to_y(max_l, y_base);
-                                elements.push(svg_line(
-                                    px(x_center),
-                                    py(y0.min(y1)),
-                                    px(x_center),
-                                    py(y0.max(y1)),
-                                    connector_color,
-                                    connector_lw,
-                                    None,
-                                ));
-                            }
+                        ) && max_l > min_l
+                        {
+                            let y0 = lane_to_y(min_l, y_base);
+                            let y1 = lane_to_y(max_l, y_base);
+                            elements.push(svg_line(
+                                px(x_center),
+                                py(y0.min(y1)),
+                                px(x_center),
+                                py(y0.max(y1)),
+                                connector_color,
+                                connector_lw,
+                                None,
+                            ));
                         }
                         for lane in op.lanes.iter().take(*num_controls) {
                             let y = lane_to_y(*lane, y_base);
@@ -633,20 +631,19 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                         if let (Some(min_l), Some(max_l)) = (
                             op.lanes.iter().copied().min(),
                             op.lanes.iter().copied().max(),
-                        ) {
-                            if max_l > min_l {
-                                let y0 = lane_to_y(min_l, y_base);
-                                let y1 = lane_to_y(max_l, y_base);
-                                elements.push(svg_line(
-                                    px(x_center),
-                                    py(y0.min(y1)),
-                                    px(x_center),
-                                    py(y0.max(y1)),
-                                    connector_color,
-                                    connector_lw,
-                                    None,
-                                ));
-                            }
+                        ) && max_l > min_l
+                        {
+                            let y0 = lane_to_y(min_l, y_base);
+                            let y1 = lane_to_y(max_l, y_base);
+                            elements.push(svg_line(
+                                px(x_center),
+                                py(y0.min(y1)),
+                                px(x_center),
+                                py(y0.max(y1)),
+                                connector_color,
+                                connector_lw,
+                                None,
+                            ));
                         }
                         for lane in &op.lanes {
                             let y = lane_to_y(*lane, y_base);
@@ -665,20 +662,19 @@ fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOpt
                         if let (Some(min_l), Some(max_l)) = (
                             op.lanes.iter().copied().min(),
                             op.lanes.iter().copied().max(),
-                        ) {
-                            if max_l > min_l {
-                                let y0 = lane_to_y(min_l, y_base);
-                                let y1 = lane_to_y(max_l, y_base);
-                                elements.push(svg_line(
-                                    px(x_center),
-                                    py(y0.min(y1)),
-                                    px(x_center),
-                                    py(y0.max(y1)),
-                                    connector_color,
-                                    swap_lw,
-                                    None,
-                                ));
-                            }
+                        ) && max_l > min_l
+                        {
+                            let y0 = lane_to_y(min_l, y_base);
+                            let y1 = lane_to_y(max_l, y_base);
+                            elements.push(svg_line(
+                                px(x_center),
+                                py(y0.min(y1)),
+                                px(x_center),
+                                py(y0.max(y1)),
+                                connector_color,
+                                swap_lw,
+                                None,
+                            ));
                         }
                         for lane in &op.lanes {
                             let y = lane_to_y(*lane, y_base);

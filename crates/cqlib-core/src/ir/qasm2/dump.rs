@@ -298,10 +298,10 @@ pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
     ];
 
     for gate in extended_gates {
-        if used_standard_gates.contains(&gate) {
-            if let Some(def) = get_extended_gate_definition(gate) {
-                writeln!(&mut output, "{}", def)?;
-            }
+        if used_standard_gates.contains(&gate)
+            && let Some(def) = get_extended_gate_definition(gate)
+        {
+            writeln!(&mut output, "{}", def)?;
         }
     }
     writeln!(&mut output)?;
@@ -677,11 +677,11 @@ fn process_circuit_operations(
         let op = &operations[index];
         if let Instruction::ClassicalData(ClassicalDataOp::Store { target, value }) =
             &op.instruction
+            && accepting_initializers
+            && is_zero_initializer(*target, value)
         {
-            if accepting_initializers && is_zero_initializer(*target, value) {
-                index += 1;
-                continue;
-            }
+            index += 1;
+            continue;
         }
         accepting_initializers = false;
         match &op.instruction {
@@ -901,10 +901,9 @@ fn measurement_destination(
     if matches!(
         instruction,
         Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-    ) {
-        if let Some(bit) = value.measurement_store_bit(*target, result) {
-            return Ok((MeasurementDestination::VarBit(*target, bit), true));
-        }
+    ) && let Some(bit) = value.measurement_store_bit(*target, result)
+    {
+        return Ok((MeasurementDestination::VarBit(*target, bit), true));
     }
 
     Err(QasmDumpError::UnsupportedClassicalData(
