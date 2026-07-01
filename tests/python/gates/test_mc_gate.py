@@ -185,31 +185,28 @@ class TestMcGateInverse:
     def test_mc_x_inverse(self):
         """Multi-controlled X is self-inverse"""
         ccx = MCGate(2, X)
-        inv_result = ccx.inverse([])
-        assert inv_result is not None
-        inv_gate, inv_params = inv_result
+        inv_gate = ccx.inverse()
         # Inverse should be another MCGate with same controls
         assert inv_gate.num_ctrl_qubits == 2
         # X is self-inverse, so inverse is itself
         assert inv_gate.base_gate == X
+        assert inv_gate.params == []
 
     def test_mc_rx_inverse_negates_angle(self):
         """Controlled-RX inverse negates the angle"""
-        crx = MCGate(1, RX)
-        inv_result = crx.inverse([Parameter("theta")])
-        assert inv_result is not None
-        inv_gate, inv_params = inv_result
+        crx = MCGate(1, RX(Parameter("theta")))
+        inv_gate = crx.inverse()
         assert inv_gate.num_ctrl_qubits == 1
         # Verify parameter is negated
-        assert len(inv_params) == 1
+        assert len(inv_gate.params) == 1
+        assert str(inv_gate.params[0]) == "-theta"
 
     def test_mc_h_inverse(self):
         """Controlled-H inverse is itself (H is self-inverse)"""
         ch = MCGate(1, H)
-        inv_result = ch.inverse([])
-        assert inv_result is not None
-        inv_gate, _ = inv_result
+        inv_gate = ch.inverse()
         assert inv_gate.base_gate == H
+        assert inv_gate.params == []
 
 
 class TestMcGateMatrixShape:

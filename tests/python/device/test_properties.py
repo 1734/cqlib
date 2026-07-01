@@ -37,7 +37,7 @@ class TestPropertyBuilders:
         qp.t1 = 120.0
         qp.t2 = 95.0
         qp.frequency = 5.1
-        qp.native_instruction = ip
+        qp.add_native_instruction(ip)
         assert qp.readout_error == pytest.approx(0.02)
         assert qp.t1 == pytest.approx(120.0)
         assert qp.t2 == pytest.approx(95.0)
@@ -49,7 +49,7 @@ class TestPropertyBuilders:
         eip = InstructionProp(cx_inst, 0.08)
         eip.length = 300.0
         ep = EdgeProp()
-        ep.native_instruction = eip
+        ep.add_native_instruction(eip)
         assert len(ep.native_instructions) == 1
         assert ep.native_instructions[0].instruction.name == "CX"
 
@@ -78,7 +78,7 @@ class TestDeviceProperties:
 
         ep01 = EdgeProp()
         cx_inst = Instruction.from_standard_gate(StandardGate.CX)
-        ep01.native_instruction = InstructionProp(cx_inst, 0.06)
+        ep01.add_native_instruction(InstructionProp(cx_inst, 0.06))
         device.add_edge_properties(0, 1, ep01)
 
         assert device.name == "mock_backend"

@@ -45,8 +45,8 @@ def test_workflow_types_are_public_compile_types() -> None:
     assert CompilerWorkflow.__module__ == "cqlib.compile"
     assert "CompileConfig" in compile_module.__all__
     assert "CompilerWorkflow" in compile_module.__all__
-    assert repr(CompileMode.normal()) == "CompileMode.normal()"
-    assert repr(CompileMode.enhanced()) == "CompileMode.enhanced()"
+    assert repr(CompileMode.normal()) == "CompileMode.Normal"
+    assert repr(CompileMode.enhanced()) == "CompileMode.Enhanced"
 
 
 def test_compiler_errors_are_public_compile_exceptions() -> None:
@@ -77,7 +77,7 @@ def test_compile_config_exposes_immutable_defaults_and_copy_protocol() -> None:
     assert config.seed is None
     assert copy.copy(config) is not config
     assert copy.deepcopy(config) is not config
-    assert repr(config).startswith("CompileConfig(mode=CompileMode.normal(),")
+    assert repr(config).startswith("CompileConfig(mode=CompileMode.Normal,")
 
     with pytest.raises(AttributeError):
         config.seed = 3
@@ -143,10 +143,16 @@ def test_compile_and_explicit_workflow_have_equivalent_results() -> None:
     direct = compile(circuit, target_basis=basis)
     explicit = CompilerWorkflow(CompileConfig(target_basis=basis)).run(circuit)
 
-    direct_names = [str(operation.instruction) for operation in direct.circuit.operations]
-    explicit_names = [str(operation.instruction) for operation in explicit.circuit.operations]
+    direct_names = [
+        str(operation.instruction) for operation in direct.circuit.operations
+    ]
+    explicit_names = [
+        str(operation.instruction) for operation in explicit.circuit.operations
+    ]
     assert direct_names == explicit_names == ["H", "CZ", "H"]
-    assert [step.name for step in direct.steps] == [step.name for step in explicit.steps]
+    assert [step.name for step in direct.steps] == [
+        step.name for step in explicit.steps
+    ]
     assert direct == explicit
     assert direct.__eq__(object()) is NotImplemented
 
@@ -185,7 +191,9 @@ def test_workflow_validates_cross_field_configuration_when_run() -> None:
         initial_layout=Layout.from_pairs([(0, 0)], physical_count=1),
     )
 
-    with pytest.raises(CompilerConfigError, match="initial layout requires a target device"):
+    with pytest.raises(
+        CompilerConfigError, match="initial layout requires a target device"
+    ):
         CompilerWorkflow(config).run(Circuit(1))
 
 
@@ -197,5 +205,7 @@ def test_compile_config_rejects_unknown_target_gate_name() -> None:
 def test_workflow_rejects_non_standard_target_instruction_when_run() -> None:
     config = CompileConfig(target_basis=(Instruction.delay(),))
 
-    with pytest.raises(CompilerConfigError, match="unsupported workflow target instruction"):
+    with pytest.raises(
+        CompilerConfigError, match="unsupported workflow target instruction"
+    ):
         CompilerWorkflow(config).run(Circuit(1))

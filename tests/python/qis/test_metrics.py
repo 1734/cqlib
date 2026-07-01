@@ -156,7 +156,7 @@ def test_partial_transpose():
     assert math.isclose(data[3, 3].real, 0.5, abs_tol=1e-10)
 
     # Invalid subsystem
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         metrics.partial_transpose(dm, [2])
 
 
@@ -489,18 +489,18 @@ class TestMetricsErrorHandling:
         """Test partial transpose with out-of-bounds qubit indices."""
         dm = DensityMatrix(2)
 
-        # Out of bounds should raise ValueError
-        with pytest.raises(ValueError):
+        # Out of bounds should raise IndexError
+        with pytest.raises(IndexError):
             metrics.partial_transpose(dm, [2])
-        with pytest.raises(ValueError):
+        with pytest.raises(IndexError):
             metrics.partial_transpose(dm, [0, 3])
 
     def test_logarithmic_negativity_invalid_qubits(self):
         """Test logarithmic negativity with out-of-bounds qubit indices."""
         dm = DensityMatrix(3)
 
-        # Out of bounds should raise ValueError
-        with pytest.raises(ValueError):
+        # Out of bounds should raise IndexError
+        with pytest.raises(IndexError):
             metrics.logarithmic_negativity(dm, [0, 5])
 
     def test_trace_distance_mixed_dimension_mismatch(self):

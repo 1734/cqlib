@@ -25,7 +25,6 @@ Test Coverage:
 - Unsupported gates error handling
 """
 
-import pytest
 import tempfile
 import os
 import math
@@ -370,24 +369,20 @@ class TestQcisDumpsFileIO:
             os.unlink(temp_path)
 
 
-class TestQcisDumpsUnsupportedGates:
-    """Test error handling for unsupported gates."""
+class TestQcisDumpsAdditionalStandardGates:
+    """Test dumping additional standard gates supported by QCIS."""
 
-    def test_dumps_cx_raises_error(self):
-        """Verify CX gate raises unsupported gate error."""
+    def test_dumps_cx_gate(self):
+        """Verify CX gate is emitted as a QCIS operation."""
         c = Circuit(2)
         c.cx(0, 1)
-        with pytest.raises(Exception) as exc_info:
-            dumps(c)
-        assert "CX" in str(exc_info.value) or "compile" in str(exc_info.value)
+        assert dumps(c) == "CX Q0 Q1\n"
 
     def test_dumps_cnot_alias(self):
-        """Verify CNOT (alias for CX) raises error."""
+        """Verify CNOT-style CX usage is emitted as CX."""
         c = Circuit(2)
-        # CX is CNOT in some contexts
         c.cx(0, 1)
-        with pytest.raises(Exception):
-            dumps(c)
+        assert dumps(c) == "CX Q0 Q1\n"
 
 
 class TestQcisRoundTrip:
@@ -444,10 +439,10 @@ class TestQcisRoundTrip:
         qcis = dumps(c1)
         c2 = loads(qcis)
 
-        assert c2[0].instruction.name == "H"
-        assert c2[1].instruction.name == "X"
-        assert c2[2].instruction.name == "Y"
-        assert c2[3].instruction.name == "Z"
+        assert c2[0].name == "H"
+        assert c2[1].name == "X"
+        assert c2[2].name == "Y"
+        assert c2[3].name == "Z"
 
     def test_roundtrip_with_measurements(self):
         """Test round-trip with measurements."""
@@ -461,6 +456,6 @@ class TestQcisRoundTrip:
         c2 = loads(qcis)
 
         assert c2.num_qubits == 2
-        # Measurements are expanded
-        assert c2[-1].instruction.name == "Measure"
-        assert c2[-2].instruction.name == "Measure"
+        # Measurements are represented as classical-data operations and dump
+        # back to QCIS M lines.
+        assert dumps(c2).endswith("M Q0\nM Q1\n")

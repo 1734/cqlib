@@ -29,8 +29,8 @@ class TestDeviceTopology:
         assert topo.contains_qubit(1) is True
         assert topo.contains_qubit(99) is False
         # Topology uses directed couplings; neighbors/degree are based on outgoing edges.
-        assert set(topo.neighbors(1)) == {Qubit(2)}
-        assert topo.degree(1) == 1
+        assert set(topo.successors(1)) == {Qubit(2)}
+        assert topo.out_degree(1) == 1
         assert topo.get_coupling_name(1, 2) == "G2"
 
     def test_topology_add_remove_qubits_and_couplings(self):
@@ -39,9 +39,9 @@ class TestDeviceTopology:
         topo.add_qubits([3])
         topo.add_couplings([(2, 3, "G2")])
         assert topo.contains_qubit(3) is True
-        assert topo.is_connected(2, 3) or topo.is_connected(3, 2)
+        assert topo.supports_coupling_either_direction(2, 3)
 
         topo.remove_couplings([(2, 3)])
-        assert not (topo.is_connected(2, 3) or topo.is_connected(3, 2))
+        assert not topo.supports_coupling_either_direction(2, 3)
         topo.remove_qubits([3])
         assert topo.contains_qubit(3) is False

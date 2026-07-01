@@ -83,7 +83,7 @@ pub mod topology;
 /// use pyo3::prelude::*;
 /// use _native::device::register_device_module;
 ///
-/// Python::with_gil(|py| {
+/// Python::try_attach(|py| {
 ///     let module = PyModule::new(py, "cqlib").unwrap();
 ///     register_device_module(&module).unwrap();
 /// });

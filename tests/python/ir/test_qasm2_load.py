@@ -17,7 +17,7 @@ Test Coverage:
 - QASM2 string parsing (loads)
 - QASM2 file loading (load)
 - Standard gates (single-qubit, multi-qubit, parametric)
-- Barrier, Reset, and Measurement directives
+- Barrier and Reset directives; measurement classical-data operations
 - Parameter expressions (pi, arithmetic)
 - Custom gate definitions
 - Error handling
@@ -26,7 +26,7 @@ Test Coverage:
 import tempfile
 import os
 from cqlib.circuit import Circuit
-from cqlib.ir.qasm2 import loads, load
+from cqlib.ir.qasm2 import loads, load, dumps
 
 
 class TestQasm2Loads:
@@ -59,10 +59,10 @@ z q[0];
         assert len(c) == 4
 
         # Verify each gate type
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.name == "X"
-        assert c[2].instruction.name == "Y"
-        assert c[3].instruction.name == "Z"
+        assert c[0].name == "H"
+        assert c[1].name == "X"
+        assert c[2].name == "Y"
+        assert c[3].name == "Z"
 
         # Verify qubit indices
         assert c[0].qubits[0].index == 0
@@ -82,10 +82,10 @@ tdg q[0];
         c = loads(qasm)
         assert len(c) == 4
 
-        assert c[0].instruction.name == "S"
-        assert c[1].instruction.name == "SDG"
-        assert c[2].instruction.name == "T"
-        assert c[3].instruction.name == "TDG"
+        assert c[0].name == "S"
+        assert c[1].name == "SDG"
+        assert c[2].name == "T"
+        assert c[3].name == "TDG"
 
     def test_loads_cnot(self):
         """Parse CNOT gate and verify control/target."""
@@ -99,7 +99,7 @@ cx q[0],q[1];
         assert len(c) == 1
 
         op = c[0]
-        assert op.instruction.name == "CX"
+        assert op.name == "CX"
         assert op.num_qubits == 2
         assert op.qubits[0].index == 0  # control
         assert op.qubits[1].index == 1  # target
@@ -117,9 +117,9 @@ swap q[0],q[1];
         c = loads(qasm)
         assert len(c) == 3
 
-        assert c[0].instruction.name == "CY"
-        assert c[1].instruction.name == "CZ"
-        assert c[2].instruction.name == "SWAP"
+        assert c[0].name == "CY"
+        assert c[1].name == "CZ"
+        assert c[2].name == "SWAP"
 
     def test_loads_toffoli(self):
         """Parse CCX (Toffoli) gate and verify qubits."""
@@ -134,7 +134,7 @@ ccx q[0],q[1],q[2];
         assert len(c) == 1
 
         op = c[0]
-        assert op.instruction.name == "CCX"
+        assert op.name == "CCX"
         assert op.num_qubits == 3
         assert op.qubits[0].index == 0
         assert op.qubits[1].index == 1
@@ -153,9 +153,9 @@ rz(0.7) q[0];
         c = loads(qasm)
         assert len(c) == 3
 
-        assert c[0].instruction.name == "RX"
-        assert c[1].instruction.name == "RY"
-        assert c[2].instruction.name == "RZ"
+        assert c[0].name == "RX"
+        assert c[1].name == "RY"
+        assert c[2].name == "RZ"
 
         # Verify parameters (fixed values)
         assert c[0].num_params == 1
@@ -175,13 +175,13 @@ u3(0.5,0.3,0.2) q[0];
         c = loads(qasm)
         assert len(c) == 3
 
-        assert c[0].instruction.name == "Phase"  # U1 maps to Phase
+        assert c[0].name == "Phase"  # U1 maps to Phase
         assert c[0].num_params == 1
 
-        assert c[1].instruction.name == "U"  # U2 maps to U
+        assert c[1].name == "U"  # U2 maps to U
         assert c[1].num_params == 3
 
-        assert c[2].instruction.name == "U"  # U3 maps to U
+        assert c[2].name == "U"  # U3 maps to U
         assert c[2].num_params == 3
 
     def test_loads_pi_expressions(self):
@@ -203,7 +203,7 @@ rz(3*pi/4) q[0];
         assert c[2].num_params == 1
 
     def test_loads_measurement(self):
-        """Parse measurement operation and verify directive type."""
+        """Parse measurement operation and verify classical data operations."""
         qasm = """
 OPENQASM 2.0;
 include "qelib1.inc";
@@ -213,12 +213,14 @@ h q[0];
 measure q[0] -> c[0];
 """
         c = loads(qasm)
-        assert len(c) == 2
+        assert len(c) == 4
 
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.is_directive
-        assert c[1].instruction.name == "Measure"
-        assert c[1].qubits[0].index == 0
+        assert c[0].name == "store"
+        assert c[1].name == "H"
+        assert c[2].name == "measure_bit"
+        assert c[2].qubits[0].index == 0
+        assert c[3].name == "store"
+        assert "measure q[0] -> c0[0];" in dumps(c)
 
     def test_loads_measurement_register(self):
         """Parse measurement on entire register."""
@@ -231,12 +233,16 @@ h q[0];
 measure q -> c;
 """
         c = loads(qasm)
-        # h + 2 measurements
-        assert len(c) == 3
+        assert len(c) == 4
 
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.name == "Measure"
-        assert c[2].instruction.name == "Measure"
+        assert c[0].name == "store"
+        assert c[1].name == "H"
+        assert c[2].name == "measure_bits"
+        assert [q.index for q in c[2].qubits] == [0, 1]
+        assert c[3].name == "store"
+        qasm_roundtrip = dumps(c)
+        assert "measure q[0] -> c0[0];" in qasm_roundtrip
+        assert "measure q[1] -> c0[1];" in qasm_roundtrip
 
     def test_loads_barrier_single(self):
         """Parse barrier on single qubit."""
@@ -251,10 +257,10 @@ x q[1];
         c = loads(qasm)
         assert len(c) == 3
 
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.is_directive
-        assert c[1].instruction.name == "Barrier"
-        assert c[2].instruction.name == "X"
+        assert c[0].name == "H"
+        assert c[1].is_directive
+        assert c[1].name == "Barrier"
+        assert c[2].name == "X"
 
     def test_loads_barrier_multiple(self):
         """Parse barrier on multiple qubits."""
@@ -270,7 +276,7 @@ x q[1];
         assert len(c) == 3
 
         barrier_op = c[1]
-        assert barrier_op.instruction.name == "Barrier"
+        assert barrier_op.name == "Barrier"
         assert barrier_op.num_qubits == 3
 
     def test_loads_barrier_register(self):
@@ -287,7 +293,7 @@ x q[1];
         assert len(c) == 3
 
         barrier_op = c[1]
-        assert barrier_op.instruction.name == "Barrier"
+        assert barrier_op.name == "Barrier"
         assert barrier_op.num_qubits == 3
 
     def test_loads_reset_single(self):
@@ -302,9 +308,9 @@ reset q[0];
         c = loads(qasm)
         assert len(c) == 2
 
-        assert c[0].instruction.name == "X"
-        assert c[1].instruction.is_directive
-        assert c[1].instruction.name == "Reset"
+        assert c[0].name == "X"
+        assert c[1].is_directive
+        assert c[1].name == "Reset"
         assert c[1].qubits[0].index == 0
 
     def test_loads_reset_register(self):
@@ -320,8 +326,8 @@ reset q;
         # x + 2 resets
         assert len(c) == 3
 
-        assert c[1].instruction.name == "Reset"
-        assert c[2].instruction.name == "Reset"
+        assert c[1].name == "Reset"
+        assert c[2].name == "Reset"
 
     def test_loads_bell_state(self):
         """Parse Bell state circuit and verify structure."""
@@ -336,8 +342,8 @@ cx q[0],q[1];
         assert c.num_qubits == 2
         assert len(c) == 2
 
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.name == "CX"
+        assert c[0].name == "H"
+        assert c[1].name == "CX"
 
     def test_loads_ghz_state(self):
         """Parse GHZ state circuit and verify structure."""
@@ -353,9 +359,9 @@ cx q[0],q[2];
         assert c.num_qubits == 3
         assert len(c) == 3
 
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.name == "CX"
-        assert c[2].instruction.name == "CX"
+        assert c[0].name == "H"
+        assert c[1].name == "CX"
+        assert c[2].name == "CX"
 
     def test_loads_multiple_qregs(self):
         """Parse circuit with multiple quantum registers."""
@@ -386,7 +392,7 @@ id q[0];
 """
         c = loads(qasm)
         assert len(c) == 1
-        assert c[0].instruction.name == "I"
+        assert c[0].name == "I"
 
     def test_loads_sx_sxdg(self):
         """Parse SX and SXDG gates."""
@@ -400,8 +406,8 @@ sxdg q[0];
         c = loads(qasm)
         assert len(c) == 2
 
-        assert c[0].instruction.name == "X2P"
-        assert c[1].instruction.name == "X2M"
+        assert c[0].name == "X2P"
+        assert c[1].name == "X2M"
 
     def test_loads_p_gate(self):
         """Parse P gate (alias for Phase/RZ)."""
@@ -413,7 +419,7 @@ p(0.5) q[0];
 """
         c = loads(qasm)
         assert len(c) == 1
-        assert c[0].instruction.name == "Phase"
+        assert c[0].name == "Phase"
 
 
 class TestQasm2LoadsFileIO:
@@ -436,8 +442,8 @@ cx q[0],q[1];
             c = load(temp_path)
             assert c.num_qubits == 2
             assert len(c) == 2
-            assert c[0].instruction.name == "H"
-            assert c[1].instruction.name == "CX"
+            assert c[0].name == "H"
+            assert c[1].name == "CX"
         finally:
             os.unlink(temp_path)
 
@@ -458,9 +464,9 @@ cx q[0],q[1];
             c2 = load(temp_path)
             assert c2.num_qubits == 3
             assert len(c2) == 3
-            assert c2[0].instruction.name == "H"
-            assert c2[1].instruction.name == "CX"
-            assert c2[2].instruction.name == "CX"
+            assert c2[0].name == "H"
+            assert c2[1].name == "CX"
+            assert c2[2].name == "CX"
         finally:
             os.unlink(temp_path)
 
@@ -480,7 +486,7 @@ h q[0];
 """
         c = loads(qasm)
         assert len(c) == 1
-        assert c[0].instruction.name == "H"
+        assert c[0].name == "H"
 
     def test_whitespace_handling(self):
         """Verify extra whitespace is handled correctly."""
@@ -495,7 +501,7 @@ qreg q[1];
 """
         c = loads(qasm)
         assert len(c) == 1
-        assert c[0].instruction.name == "H"
+        assert c[0].name == "H"
 
     def test_gate_case_variations(self):
         """Verify gate names are case-insensitive.
@@ -514,10 +520,10 @@ z q[0];
 """
         c = loads(qasm)
         assert len(c) == 4
-        assert c[0].instruction.name == "H"
-        assert c[1].instruction.name == "X"
-        assert c[2].instruction.name == "Y"
-        assert c[3].instruction.name == "Z"
+        assert c[0].name == "H"
+        assert c[1].name == "X"
+        assert c[2].name == "Y"
+        assert c[3].name == "Z"
 
     def test_empty_circuit_with_qreg(self):
         """Parse circuit with only register declarations."""
@@ -548,9 +554,9 @@ class TestQasm2RoundTrip:
 
         assert c2.num_qubits == 3
         assert len(c2) == 3
-        assert c2[0].instruction.name == "H"
-        assert c2[1].instruction.name == "CX"
-        assert c2[2].instruction.name == "CX"
+        assert c2[0].name == "H"
+        assert c2[1].name == "CX"
+        assert c2[2].name == "CX"
 
     def test_qft_roundtrip(self):
         """Test QFT-like circuit round-trip."""
@@ -584,9 +590,9 @@ class TestQasm2RoundTrip:
 
         assert c2.num_qubits == 2
         assert len(c2) == 3
-        assert c2[0].instruction.name == "RX"
-        assert c2[1].instruction.name == "RY"
-        assert c2[2].instruction.name == "CZ"
+        assert c2[0].name == "RX"
+        assert c2[1].name == "RY"
+        assert c2[2].name == "CZ"
 
     def test_complex_circuit_roundtrip(self):
         """Test complex circuit round-trip."""
@@ -599,13 +605,8 @@ class TestQasm2RoundTrip:
             c1.cx(i, i + 1)
         c1.rx(0, 0.5)
         c1.barrier([0, 1, 2, 3])
-        # Note: measure without conditional is commented out in dumps
-        # so we don't include it in round-trip comparison
-
         qasm = dumps(c1)
         c2 = loads(qasm)
 
         assert c2.num_qubits == 4
-        # Count only non-measure operations (measure is commented out in dumps)
-        expected_len = sum(1 for op in c1 if op.instruction.name != "Measure")
-        assert len(c2) == expected_len
+        assert len(c2) == len(c1)

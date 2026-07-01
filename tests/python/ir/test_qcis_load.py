@@ -28,7 +28,7 @@ Test Coverage:
 import pytest
 import tempfile
 import os
-from cqlib.ir.qcis import loads, load
+from cqlib.ir.qcis import dumps, loads, load
 
 
 class TestQcisLoadsBasic:
@@ -60,7 +60,7 @@ class TestQcisLoadsNativeGates:
         c = loads(qcis)
         assert c.num_qubits == 1
         assert len(c) == 1
-        assert c[0].instruction.name == "X2P"
+        assert c[0].name == "X2P"
         assert c[0].qubits[0].index == 0
 
     def test_loads_x2m_gate(self):
@@ -68,21 +68,21 @@ class TestQcisLoadsNativeGates:
         qcis = "X2M Q0"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "X2M"
+        assert c[0].name == "X2M"
 
     def test_loads_y2p_gate(self):
         """Parse Y2P gate and verify."""
         qcis = "Y2P Q0"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "Y2P"
+        assert c[0].name == "Y2P"
 
     def test_loads_y2m_gate(self):
         """Parse Y2M gate and verify."""
         qcis = "Y2M Q0"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "Y2M"
+        assert c[0].name == "Y2M"
 
     def test_loads_xy2p_gate(self):
         """Parse XY2P gate with parameter and verify."""
@@ -90,7 +90,7 @@ class TestQcisLoadsNativeGates:
         c = loads(qcis)
         assert c.num_qubits == 1
         assert len(c) == 1
-        assert c[0].instruction.name == "XY2P"
+        assert c[0].name == "XY2P"
         assert c[0].num_params == 1
 
     def test_loads_xy2m_gate(self):
@@ -98,7 +98,7 @@ class TestQcisLoadsNativeGates:
         qcis = "XY2M Q0 pi/2"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "XY2M"
+        assert c[0].name == "XY2M"
 
     def test_loads_cz_gate(self):
         """Parse CZ gate and verify control/target."""
@@ -111,10 +111,10 @@ CZ Q0 Q1
         assert len(c) == 2
 
         # First is H gate
-        assert c[0].instruction.name == "H"
+        assert c[0].name == "H"
 
         # Second is CZ gate
-        assert c[1].instruction.name == "CZ"
+        assert c[1].name == "CZ"
         assert c[1].num_qubits == 2
         assert c[1].qubits[0].index == 0
         assert c[1].qubits[1].index == 1
@@ -124,7 +124,7 @@ CZ Q0 Q1
         qcis = "RZ Q0 pi/4"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "RZ"
+        assert c[0].name == "RZ"
         assert c[0].num_params == 1
 
     def test_loads_delay_gate(self):
@@ -133,7 +133,7 @@ CZ Q0 Q1
         c = loads(qcis)
         assert len(c) == 1
         # QCIS "I" gate is parsed as Delay in the internal representation
-        assert c[0].instruction.name == "Delay"
+        assert dumps(c) == "I Q0 1\n"
         assert c[0].num_params == 1
 
 
@@ -151,16 +151,16 @@ Z Q2
         assert c.num_qubits == 3
         assert len(c) == 3
 
-        assert c[0].instruction.name == "X"
-        assert c[1].instruction.name == "Y"
-        assert c[2].instruction.name == "Z"
+        assert c[0].name == "X"
+        assert c[1].name == "Y"
+        assert c[2].name == "Z"
 
     def test_loads_hadamard(self):
         """Parse Hadamard gate and verify."""
         qcis = "H Q0"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "H"
+        assert c[0].name == "H"
 
     def test_loads_phase_gates(self):
         """Parse phase gates (S, SD, T, TD) and verify."""
@@ -174,10 +174,10 @@ TD Q3
         assert c.num_qubits == 4
         assert len(c) == 4
 
-        assert c[0].instruction.name == "S"
-        assert c[1].instruction.name == "SDG"
-        assert c[2].instruction.name == "T"
-        assert c[3].instruction.name == "TDG"
+        assert c[0].name == "S"
+        assert c[1].name == "SDG"
+        assert c[2].name == "T"
+        assert c[3].name == "TDG"
 
 
 class TestQcisLoadsParametricGates:
@@ -188,7 +188,7 @@ class TestQcisLoadsParametricGates:
         qcis = "RX Q0 0.5"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "RX"
+        assert c[0].name == "RX"
         assert c[0].num_params == 1
 
     def test_loads_ry_gate(self):
@@ -196,14 +196,14 @@ class TestQcisLoadsParametricGates:
         qcis = "RY Q0 pi/2"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "RY"
+        assert c[0].name == "RY"
 
     def test_loads_rxy_gate(self):
         """Parse RXY gate with two parameters and verify."""
         qcis = "RXY Q0 1.0 0.5"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "RXY"
+        assert c[0].name == "RXY"
         assert c[0].num_params == 2
 
     def test_loads_parametric_pi_expressions(self):
@@ -217,9 +217,9 @@ RZ Q2 pi/4+0.5
         assert c.num_qubits == 3
         assert len(c) == 3
 
-        assert c[0].instruction.name == "RX"
-        assert c[1].instruction.name == "RY"
-        assert c[2].instruction.name == "RZ"
+        assert c[0].name == "RX"
+        assert c[1].name == "RY"
+        assert c[2].name == "RZ"
 
     def test_loads_parametric_arithmetic(self):
         """Parse gates with arithmetic expressions."""
@@ -241,15 +241,15 @@ class TestQcisLoadsDirectives:
         qcis = "B Q0"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.is_directive
-        assert c[0].instruction.name == "Barrier"
+        assert c[0].is_directive
+        assert c[0].name == "Barrier"
 
     def test_loads_barrier_multiple_qubits(self):
         """Parse barrier on multiple qubits and verify."""
         qcis = "B Q0 Q1 Q2 Q3"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.name == "Barrier"
+        assert c[0].name == "Barrier"
         assert c[0].num_qubits == 4
 
     def test_loads_measurement_single_qubit(self):
@@ -257,8 +257,7 @@ class TestQcisLoadsDirectives:
         qcis = "M Q0"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].instruction.is_directive
-        assert c[0].instruction.name == "Measure"
+        assert dumps(c) == "M Q0\n"
         assert c[0].qubits[0].index == 0
 
     def test_loads_measurement_multiple_qubits(self):
@@ -268,8 +267,8 @@ class TestQcisLoadsDirectives:
         # Each qubit measurement becomes a separate operation
         assert c.num_qubits == 3
         assert len(c) == 3
+        assert dumps(c) == "M Q0\nM Q1\nM Q2\n"
         for i in range(3):
-            assert c[i].instruction.name == "Measure"
             assert c[i].qubits[0].index == i
 
 
@@ -289,11 +288,10 @@ M Q1
         assert c.num_qubits == 2
         assert len(c) == 5
 
-        assert c[0].instruction.name == "X2P"
-        assert c[1].instruction.name == "X2M"
-        assert c[2].instruction.name == "CZ"
-        assert c[3].instruction.name == "Measure"
-        assert c[4].instruction.name == "Measure"
+        assert c[0].name == "X2P"
+        assert c[1].name == "X2M"
+        assert c[2].name == "CZ"
+        assert dumps(c).endswith("M Q0\nM Q1\n")
 
     def test_loads_ghz_state(self):
         """Parse GHZ state circuit and verify."""
@@ -360,10 +358,10 @@ H Q0
         c = loads(qcis)
         assert len(c) == 4
 
-        assert c[0].instruction.name == "X"
-        assert c[1].instruction.name == "Y"
-        assert c[2].instruction.name == "Z"
-        assert c[3].instruction.name == "H"
+        assert c[0].name == "X"
+        assert c[1].name == "Y"
+        assert c[2].name == "Z"
+        assert c[3].name == "H"
 
 
 class TestQcisLoadsFileIO:
@@ -385,8 +383,8 @@ M Q1
             c = load(temp_path)
             assert c.num_qubits == 2
             assert len(c) == 4
-            assert c[0].instruction.name == "H"
-            assert c[1].instruction.name == "CZ"
+            assert c[0].name == "H"
+            assert c[1].name == "CZ"
         finally:
             os.unlink(temp_path)
 
