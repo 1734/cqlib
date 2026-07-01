@@ -355,13 +355,13 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
         let resource_limits = self.resource_limits();
-        if let Some(max_total_qubits) = resource_limits.max_total_qubits {
-            if circuit.qubits().len() > max_total_qubits {
-                return Err(CompilerError::InvalidInput(format!(
-                    "source circuit uses {} logical qubits but target capacity is {max_total_qubits}",
-                    circuit.qubits().len()
-                )));
-            }
+        if let Some(max_total_qubits) = resource_limits.max_total_qubits
+            && circuit.qubits().len() > max_total_qubits
+        {
+            return Err(CompilerError::InvalidInput(format!(
+                "source circuit uses {} logical qubits but target capacity is {max_total_qubits}",
+                circuit.qubits().len()
+            )));
         }
         state.steps.push(WorkflowStepReport {
             stage: "pre_init",

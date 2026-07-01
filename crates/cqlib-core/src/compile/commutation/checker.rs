@@ -211,12 +211,12 @@ impl CommutationChecker {
             return Some(result);
         }
 
-        if let Some(rules) = self.rules.as_ref() {
-            if let Some(result) = rules.check(
+        if let Some(rules) = self.rules.as_ref()
+            && let Some(result) = rules.check(
                 lhs_inst, lhs_qubits, lhs_params, rhs_inst, rhs_qubits, rhs_params,
-            ) {
-                return Some(result);
-            }
+            )
+        {
+            return Some(result);
         }
 
         if self.config.enable_matrix_fallback {

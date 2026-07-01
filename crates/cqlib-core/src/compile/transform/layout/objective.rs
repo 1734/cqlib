@@ -175,12 +175,11 @@ impl LayoutObjective {
                 {
                     direction += interaction.directed_weight_right_to_left;
                 }
-                if self.two_qubit_error_weight != 0.0 {
-                    if let Some(error) =
+                if self.two_qubit_error_weight != 0.0
+                    && let Some(error) =
                         physical.two_qubit_error_undirected(left_physical, right_physical)
-                    {
-                        two_qubit_error += interaction.weight * error;
-                    }
+                {
+                    two_qubit_error += interaction.weight * error;
                 }
             }
         }

@@ -47,13 +47,13 @@ pub enum VerifyMode<'a> {
 }
 
 pub fn verify_circuit(circuit: &Circuit, mode: VerifyMode<'_>) -> Result<(), CompilerError> {
-    if let CircuitParam::Index(index) = circuit.global_phase_param() {
-        if circuit.parameters().get_index(*index as usize).is_none() {
-            return Err(CompilerError::InvalidInput(format!(
-                "global phase references missing parameter index {}",
-                index
-            )));
-        }
+    if let CircuitParam::Index(index) = circuit.global_phase_param()
+        && circuit.parameters().get_index(*index as usize).is_none()
+    {
+        return Err(CompilerError::InvalidInput(format!(
+            "global phase references missing parameter index {}",
+            index
+        )));
     }
     verify_parameter_finite(&circuit.global_phase(), "global phase")?;
     verify_operations(circuit, circuit.operations(), "root", mode)?;

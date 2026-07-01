@@ -471,13 +471,13 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_program(&mut self, program: &asg::Program) -> Result<Circuit, Qasm3ParseError> {
-        if let Some(version) = program.version() {
-            if version.major() != 3 {
-                return Err(Qasm3ParseError::UnsupportedFeature(format!(
-                    "OPENQASM major version {}",
-                    version.major()
-                )));
-            }
+        if let Some(version) = program.version()
+            && version.major() != 3
+        {
+            return Err(Qasm3ParseError::UnsupportedFeature(format!(
+                "OPENQASM major version {}",
+                version.major()
+            )));
         }
 
         let total_qubits = self.discover_quantum(program.stmts())?;
@@ -1309,10 +1309,10 @@ impl<'a> LoweringContext<'a> {
                 Ok(var.expr())
             }
             Expr::Cast(cast) => {
-                if let Type::UInt(Some(width), _) = cast.get_type() {
-                    if let Ok(value) = self.const_u128(cast.operand()) {
-                        return Ok(ClassicalExpr::uint_literal(*width, value)?);
-                    }
+                if let Type::UInt(Some(width), _) = cast.get_type()
+                    && let Ok(value) = self.const_u128(cast.operand())
+                {
+                    return Ok(ClassicalExpr::uint_literal(*width, value)?);
                 }
                 let operand = self.lower_classical_expr(cast.operand())?;
                 match (operand.ty(), cast.get_type()) {

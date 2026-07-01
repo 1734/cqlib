@@ -626,7 +626,7 @@ impl PauliString {
         let term2 = self.z.clone() & &other.x;
         let anti_commutations = (term1 ^ term2).count_ones();
 
-        anti_commutations % 2 == 0
+        anti_commutations & 1 == 0
     }
 
     /// Converts the X bit vector to a usize mask.
@@ -834,7 +834,7 @@ impl PauliString {
             // For each qubit i with Z operator (z[i]=1) and state s[i]=1, contribute factor -1
             let overlap = state_idx & z_mask;
             let parity = overlap.count_ones();
-            let eigenvalue = if parity % 2 == 0 { 1.0 } else { -1.0 };
+            let eigenvalue = if parity & 1 == 0 { 1.0 } else { -1.0 };
 
             exp_value += prob * eigenvalue;
         }

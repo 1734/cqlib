@@ -176,14 +176,14 @@ fn validate_inputs(
             "plot data must contain at least one dataset".to_string(),
         ));
     }
-    if let Some(legend) = &options.legend {
-        if legend.len() != data.len() {
-            return Err(VisualizationError::InvalidInput(format!(
-                "legend length ({}) does not match dataset count ({})",
-                legend.len(),
-                data.len()
-            )));
-        }
+    if let Some(legend) = &options.legend
+        && legend.len() != data.len()
+    {
+        return Err(VisualizationError::InvalidInput(format!(
+            "legend length ({}) does not match dataset count ({})",
+            legend.len(),
+            data.len()
+        )));
     }
     Ok(())
 }

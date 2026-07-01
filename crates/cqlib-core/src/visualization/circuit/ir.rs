@@ -487,11 +487,11 @@ fn collect_children_used_lanes(children: &VisualChildren) -> Option<Vec<usize>> 
 
 fn collect_circuit_used_lanes(visual: &VisualCircuit, lanes: &mut BTreeSet<usize>) {
     for op in &visual.operations {
-        if let Some(children) = op.children.as_ref() {
-            if let Some(child_lanes) = collect_children_used_lanes(children) {
-                lanes.extend(child_lanes);
-                continue;
-            }
+        if let Some(children) = op.children.as_ref()
+            && let Some(child_lanes) = collect_children_used_lanes(children)
+        {
+            lanes.extend(child_lanes);
+            continue;
         }
 
         if !op.lanes.is_empty() {
