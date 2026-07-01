@@ -36,7 +36,7 @@ fn hash_value(value: impl Hash) -> u64 {
 }
 
 /// Process-local identity shared by classical handles owned by one circuit.
-#[pyclass(name = "CircuitId", module = "cqlib.circuit")]
+#[pyclass(name = "CircuitId", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PyCircuitId {
     pub(crate) inner: CircuitId,
@@ -86,7 +86,7 @@ impl From<CircuitId> for PyCircuitId {
 }
 
 /// Static type of a runtime classical expression or storage location.
-#[pyclass(name = "ClassicalType", module = "cqlib.circuit")]
+#[pyclass(name = "ClassicalType", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PyClassicalType {
     pub(crate) inner: ClassicalType,
@@ -191,7 +191,7 @@ impl From<ClassicalType> for PyClassicalType {
 }
 
 /// Circuit-local handle to mutable runtime classical storage.
-#[pyclass(name = "ClassicalVar", module = "cqlib.circuit")]
+#[pyclass(name = "ClassicalVar", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PyClassicalVar {
     pub(crate) inner: ClassicalVar,
@@ -269,7 +269,7 @@ impl From<ClassicalVar> for PyClassicalVar {
 }
 
 /// Circuit-local handle to an immutable runtime classical value.
-#[pyclass(name = "ClassicalValue", module = "cqlib.circuit")]
+#[pyclass(name = "ClassicalValue", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PyClassicalValue {
     pub(crate) inner: ClassicalValue,
@@ -340,7 +340,7 @@ impl From<ClassicalValue> for PyClassicalValue {
 }
 
 /// Measurement receipt containing its immutable result and measured qubit order.
-#[pyclass(name = "Measurement", module = "cqlib.circuit")]
+#[pyclass(name = "Measurement", module = "cqlib.circuit", skip_from_py_object)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PyMeasurement {
     pub(crate) inner: Measurement,

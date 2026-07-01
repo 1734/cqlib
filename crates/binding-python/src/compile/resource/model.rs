@@ -22,7 +22,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// State-restoration contract for ancillary qubits.
-#[pyclass(name = "AncillaRequirement", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "AncillaRequirement",
+    module = "cqlib.compile.resource",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyAncillaRequirement {
     pub(crate) inner: AncillaRequirement,
@@ -90,7 +94,11 @@ impl PyAncillaRequirement {
 }
 
 /// Python value object describing an ancillary-resource request.
-#[pyclass(name = "ResourceRequest", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourceRequest",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyResourceRequest {
     pub(crate) inner: ResourceRequest,
@@ -181,7 +189,11 @@ impl PyResourceRequest {
 }
 
 /// Side-effect-free, manager-specific allocation preview.
-#[pyclass(name = "ResourcePlan", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourcePlan",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyResourcePlan {
     pub(crate) inner: ResourcePlan,
@@ -244,7 +256,11 @@ impl PyResourcePlan {
 }
 
 /// Credential for an active ancillary-resource lease.
-#[pyclass(name = "ResourceLease", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourceLease",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyResourceLease {
     pub(crate) inner: ResourceLease,

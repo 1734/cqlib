@@ -57,7 +57,7 @@ use pyo3::{Bound, PyAny, pyclass, pymethods};
 /// print(lq.id)     # 0
 /// print(lq.qubit)  # Qubit(0)
 /// ```
-#[pyclass(name = "LogicalQubit", module = "cqlib.device")]
+#[pyclass(name = "LogicalQubit", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyLogicalQubit {
     pub(crate) inner: LogicalQubit,
@@ -160,7 +160,7 @@ impl PyLogicalQubit {
 /// print(pq.id)     # 100
 /// print(pq.qubit)  # Qubit(100)
 /// ```
-#[pyclass(name = "PhysicalQubit", module = "cqlib.device")]
+#[pyclass(name = "PhysicalQubit", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyPhysicalQubit {
     pub(crate) inner: PhysicalQubit,

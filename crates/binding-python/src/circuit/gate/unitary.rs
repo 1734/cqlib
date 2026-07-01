@@ -27,7 +27,7 @@ use pyo3::{PyResult, Python, pyclass, pymethods};
 use std::sync::Arc;
 
 /// User-defined unitary gate with stable definition identity.
-#[pyclass(name = "UnitaryGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "UnitaryGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyUnitaryGate {
     inner: UnitaryGate,

@@ -24,7 +24,7 @@ fn parameter_values(values: &[ParameterValue]) -> Vec<PyParameter> {
 }
 
 /// One gate-like operation in a knowledge rule's match or rewrite block.
-#[pyclass(name = "RuleItem", module = "cqlib.compile.knowledge")]
+#[pyclass(name = "RuleItem", module = "cqlib.compile.knowledge", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyRuleItem {
     pub(crate) inner: RuleItem,
@@ -115,7 +115,7 @@ impl PyRuleItem {
 }
 
 /// A symbolic condition required for a knowledge rule to match.
-#[pyclass(name = "Condition", module = "cqlib.compile.knowledge")]
+#[pyclass(name = "Condition", module = "cqlib.compile.knowledge", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCondition {
     pub(crate) inner: Condition,
@@ -198,7 +198,11 @@ impl PyCondition {
 }
 
 /// Diagnostic value returned by knowledge-rule equivalence verification.
-#[pyclass(name = "VerifyResult", module = "cqlib.compile.knowledge")]
+#[pyclass(
+    name = "VerifyResult",
+    module = "cqlib.compile.knowledge",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyVerifyResult {
     status: &'static str,
@@ -272,7 +276,7 @@ impl PyVerifyResult {
 }
 
 /// A validated compiler knowledge rewrite rule.
-#[pyclass(name = "Rule", module = "cqlib.compile.knowledge")]
+#[pyclass(name = "Rule", module = "cqlib.compile.knowledge", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyRule {
     pub(crate) inner: Rule,

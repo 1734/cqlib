@@ -24,7 +24,7 @@ use cqlib_core::circuit::{Instruction, ValueInstruction};
 use pyo3::prelude::*;
 
 /// Python wrapper around the core storage-IR instruction enum.
-#[pyclass(name = "Instruction", module = "cqlib.circuit")]
+#[pyclass(name = "Instruction", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyInstruction {
     pub(crate) inner: Instruction,
@@ -190,7 +190,7 @@ impl PyInstruction {
 }
 
 /// Python wrapper around the self-contained construction-IR instruction enum.
-#[pyclass(name = "ValueInstruction", module = "cqlib.circuit")]
+#[pyclass(name = "ValueInstruction", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyValueInstruction {
     pub(crate) inner: ValueInstruction,

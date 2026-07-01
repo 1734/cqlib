@@ -65,7 +65,7 @@ pub(crate) fn extract_parameter_value(value: &Bound<'_, PyAny>) -> PyResult<Para
 /// for op in circuit.operations():
 ///     print(f"Gate: {op.name}, Qubits: {op.num_qubits}")
 /// ```
-#[pyclass(name = "Operation", module = "cqlib.circuit")]
+#[pyclass(name = "Operation", module = "cqlib.circuit", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyOperation {
     pub(crate) operation: Operation,
@@ -200,7 +200,7 @@ impl PyOperation {
     }
 }
 
-#[pyclass(name = "ValueOperation", module = "cqlib.circuit")]
+#[pyclass(name = "ValueOperation", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyValueOperation {
     pub(crate) inner: ValueOperation,

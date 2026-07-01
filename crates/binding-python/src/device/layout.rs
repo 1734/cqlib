@@ -94,7 +94,7 @@ use std::collections::HashMap;
 /// # Get all mappings
 /// print(layout.l2p_map)  # {LogicalQubit(0): PhysicalQubit(100), ...}
 /// ```
-#[pyclass(name = "Layout", module = "cqlib.device")]
+#[pyclass(name = "Layout", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyLayout {
     pub(crate) inner: Layout,

@@ -25,7 +25,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// High-level knowledge-rule application mode.
-#[pyclass(name = "RewriteMode", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "RewriteMode",
+    module = "cqlib.compile.transform",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyRewriteMode {
     inner: RewriteMode,
@@ -87,7 +91,11 @@ impl PyRewriteMode {
 }
 
 /// Configuration for knowledge-based local circuit rewrite.
-#[pyclass(name = "RewriteConfig", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "RewriteConfig",
+    module = "cqlib.compile.transform",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyRewriteConfig {
     pub(crate) inner: RewriteConfig,
@@ -257,7 +265,11 @@ impl PyRewriteConfig {
 }
 
 /// Aggregate statistics produced by one knowledge rewrite run.
-#[pyclass(name = "KnowledgeRewriteStats", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "KnowledgeRewriteStats",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyKnowledgeRewriteStats {
     inner: KnowledgeRewriteStats,
@@ -315,7 +327,11 @@ impl PyKnowledgeRewriteStats {
 }
 
 /// Rewritten circuit and fixed-point run metadata.
-#[pyclass(name = "KnowledgeRewriteResult", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "KnowledgeRewriteResult",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyKnowledgeRewriteResult {
     inner: KnowledgeRewriteResult,
@@ -362,7 +378,11 @@ impl PyKnowledgeRewriteResult {
 }
 
 /// Configurable knowledge-based local circuit rewriter.
-#[pyclass(name = "KnowledgeRewriter", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "KnowledgeRewriter",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyKnowledgeRewriter {
     inner: KnowledgeRewriter,

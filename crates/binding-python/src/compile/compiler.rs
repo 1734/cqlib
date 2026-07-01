@@ -124,7 +124,7 @@ fn build_compile_config<'py>(
 }
 
 /// Optimization effort selected for the compiler workflow.
-#[pyclass(name = "CompileMode", module = "cqlib.compile")]
+#[pyclass(name = "CompileMode", module = "cqlib.compile", from_py_object)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyCompileMode {
     pub(crate) inner: CompileMode,
@@ -204,7 +204,7 @@ impl PyCompileMode {
 }
 
 /// Immutable compiler workflow configuration snapshot.
-#[pyclass(name = "CompileConfig", module = "cqlib.compile")]
+#[pyclass(name = "CompileConfig", module = "cqlib.compile", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCompileConfig {
     pub(crate) inner: CompileConfig,
@@ -346,7 +346,11 @@ impl PyCompileConfig {
 }
 
 /// Per-step execution record produced by a compiler workflow run.
-#[pyclass(name = "WorkflowStepReport", module = "cqlib.compile")]
+#[pyclass(
+    name = "WorkflowStepReport",
+    module = "cqlib.compile",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyWorkflowStepReport {
     pub(crate) inner: WorkflowStepReport,
@@ -408,7 +412,7 @@ impl PyWorkflowStepReport {
 }
 
 /// Result returned by `cqlib.compile.compile`.
-#[pyclass(name = "CompileResult", module = "cqlib.compile")]
+#[pyclass(name = "CompileResult", module = "cqlib.compile", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCompileResult {
     pub(crate) inner: CompileResult,
@@ -470,7 +474,11 @@ impl PyCompileResult {
 }
 
 /// Reusable compiler optimization workflow.
-#[pyclass(name = "CompilerWorkflow", module = "cqlib.compile")]
+#[pyclass(
+    name = "CompilerWorkflow",
+    module = "cqlib.compile",
+    skip_from_py_object
+)]
 pub struct PyCompilerWorkflow {
     inner: CompilerWorkflow,
 }

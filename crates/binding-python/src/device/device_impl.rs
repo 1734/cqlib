@@ -70,7 +70,7 @@ use time::OffsetDateTime;
 /// # Optionally set gate duration in nanoseconds
 /// prop.length = 35.0  # 35 ns
 /// ```
-#[pyclass(name = "InstructionProp", module = "cqlib.device")]
+#[pyclass(name = "InstructionProp", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyInstructionProp {
     pub(crate) inner: InstructionProp,
@@ -175,7 +175,7 @@ impl PyInstructionProp {
 /// prop.prob_meas0_prep1 = 0.02  # P(meas 0 | prep 1)
 /// prop.prob_meas1_prep0 = 0.01  # P(meas 1 | prep 0)
 /// ```
-#[pyclass(name = "QubitProp", module = "cqlib.device")]
+#[pyclass(name = "QubitProp", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyQubitProp {
     pub(crate) inner: QubitProp,
@@ -294,7 +294,7 @@ impl PyQubitProp {
     }
 }
 
-#[pyclass(name = "EdgeProp", module = "cqlib.device")]
+#[pyclass(name = "EdgeProp", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyEdgeProp {
     pub(crate) inner: EdgeProp,
@@ -386,7 +386,7 @@ impl PyEdgeProp {
 /// prop.t1 = 120.0
 /// device.add_qubit_properties(0, prop)
 /// ```
-#[pyclass(name = "Device", module = "cqlib.device")]
+#[pyclass(name = "Device", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyDevice {
     pub(crate) inner: Device,

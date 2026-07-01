@@ -83,7 +83,7 @@ use std::hash::{Hash, Hasher};
 /// - Qubits with the same index are considered equal.
 /// - Qubits can be used as dictionary keys (hashable).
 /// - Comparison operators (`<`, `<=`, `>`, `>=`) compare by index.
-#[pyclass(name = "Qubit", module = "cqlib.circuit")]
+#[pyclass(name = "Qubit", module = "cqlib.circuit", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyQubit {
     /// The underlying core `Qubit` type.

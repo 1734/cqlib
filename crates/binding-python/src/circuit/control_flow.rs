@@ -29,7 +29,7 @@ use cqlib_core::circuit::{
 use pyo3::prelude::*;
 
 /// Ordered construction-time operations owned by one control-flow region.
-#[pyclass(name = "ValueControlBody", module = "cqlib.circuit")]
+#[pyclass(name = "ValueControlBody", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyValueControlBody {
     pub(crate) inner: ValueControlBody,
@@ -91,7 +91,7 @@ impl PyValueControlBody {
 }
 
 /// Exact integer match and body used by a construction-time switch.
-#[pyclass(name = "ValueSwitchCase", module = "cqlib.circuit")]
+#[pyclass(name = "ValueSwitchCase", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyValueSwitchCase {
     pub(crate) inner: ValueSwitchCase,
@@ -139,14 +139,14 @@ impl PyValueSwitchCase {
 ///
 /// This wraps `ValueClassicalControlOp`; it is not a quantum gate and has no
 /// unitary matrix representation.
-#[pyclass(name = "ClassicalControlOp", module = "cqlib.circuit")]
+#[pyclass(name = "ClassicalControlOp", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyClassicalControlOp {
     pub(crate) inner: ValueClassicalControlOp,
 }
 
 /// Temporary callback builder used by `Circuit.switch`.
-#[pyclass(name = "_SwitchBuilder", module = "cqlib.circuit")]
+#[pyclass(name = "_SwitchBuilder", module = "cqlib.circuit", skip_from_py_object)]
 pub struct PySwitchBuilder {
     pub(crate) circuit: Py<PyCircuit>,
     pub(crate) transaction: Option<ControlBodyTransaction>,

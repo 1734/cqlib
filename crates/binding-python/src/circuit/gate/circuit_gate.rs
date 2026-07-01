@@ -25,7 +25,7 @@ use cqlib_core::circuit::gate::{CircuitGate, FrozenCircuit};
 use pyo3::prelude::*;
 
 /// Immutable circuit definition suitable for use inside a gate.
-#[pyclass(name = "FrozenCircuit", module = "cqlib.circuit.gates")]
+#[pyclass(name = "FrozenCircuit", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyFrozenCircuit {
     pub(crate) inner: FrozenCircuit,
@@ -109,7 +109,7 @@ impl PyFrozenCircuit {
 }
 
 /// Composite gate defined by an immutable circuit.
-#[pyclass(name = "CircuitGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "CircuitGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCircuitGate {
     pub(crate) inner: CircuitGate,

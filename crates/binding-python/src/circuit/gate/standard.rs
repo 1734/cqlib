@@ -33,7 +33,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::RwLock;
 
 /// Native standard gate with optional bound symbolic parameters.
-#[pyclass(name = "StandardGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "StandardGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug)]
 pub struct PyStandardGate {
     pub inner: StandardGate,

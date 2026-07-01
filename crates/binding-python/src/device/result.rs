@@ -81,7 +81,7 @@ use std::hash::{Hash, Hasher};
 /// # Convert back to string
 /// bitstring = outcome.to_bitstring(3)  # "101"
 /// ```
-#[pyclass(name = "Outcome", module = "cqlib.device")]
+#[pyclass(name = "Outcome", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PyOutcome {
     pub(crate) inner: Outcome,
@@ -220,7 +220,7 @@ impl PyOutcome {
 /// if status.is_terminal():
 ///     print(f"Job finished with status: {status}")
 /// ```
-#[pyclass(name = "Status", module = "cqlib.device")]
+#[pyclass(name = "Status", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyStatus {
     pub(crate) inner: Status,
@@ -371,7 +371,7 @@ impl PyStatus {
 /// print(result.counts)  # {"00": 512, "11": 488}
 /// print(result.probabilities)  # {"00": 0.512, "11": 0.488}
 /// ```
-#[pyclass(name = "ExecutionResult", module = "cqlib.device")]
+#[pyclass(name = "ExecutionResult", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyExecutionResult {
     pub(crate) inner: ExecutionResult,

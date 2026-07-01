@@ -44,7 +44,7 @@ use std::fmt;
 ///     >>> h.add_term(PauliString.from_str("XX"), 0.3)
 ///     >>> # Simplify to merge duplicate terms
 ///     >>> h.simplify()
-#[pyclass(name = "Hamiltonian", module = "cqlib.qis")]
+#[pyclass(name = "Hamiltonian", module = "cqlib.qis", from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyHamiltonian {
     pub(crate) inner: Hamiltonian,

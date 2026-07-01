@@ -22,7 +22,11 @@ use cqlib_core::qis::state::stabilizer::{CircuitExecutionResult, StabilizerState
 use pyo3::prelude::*;
 
 /// Result of executing a Clifford circuit with a stabilizer simulator.
-#[pyclass(name = "StabilizerCircuitResult", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "StabilizerCircuitResult",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Debug)]
 pub struct PyStabilizerCircuitResult {
     inner: CircuitExecutionResult,
@@ -52,7 +56,11 @@ impl PyStabilizerCircuitResult {
 }
 
 /// Stabilizer state simulator for Clifford circuits.
-#[pyclass(name = "StabilizerState", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "StabilizerState",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyStabilizerState {
     pub(crate) inner: StabilizerState,

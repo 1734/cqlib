@@ -23,7 +23,8 @@ use pyo3::prelude::*;
 /// Axis of a multi-controlled special-unitary rotation.
 #[pyclass(
     name = "Su2RotationAxis",
-    module = "cqlib.compile.transform.decompose.mc_gate"
+    module = "cqlib.compile.transform.decompose.mc_gate",
+    from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PySu2RotationAxis {

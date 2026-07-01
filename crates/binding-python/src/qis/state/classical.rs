@@ -19,7 +19,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
 /// A typed runtime classical value produced during circuit execution.
-#[pyclass(name = "RuntimeValue", module = "cqlib.qis.state")]
+#[pyclass(name = "RuntimeValue", module = "cqlib.qis.state", skip_from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PyRuntimeValue {
     pub(crate) inner: RuntimeValue,
@@ -118,7 +118,11 @@ impl PyRuntimeValue {
 }
 
 /// Runtime classical state produced while executing a circuit.
-#[pyclass(name = "ClassicalState", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "ClassicalState",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyClassicalState {
     pub(crate) inner: ClassicalState,

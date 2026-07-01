@@ -28,7 +28,7 @@ use pyo3::{PyResult, pyclass, pymethods};
 use std::fmt;
 
 /// Multi-controlled standard gate with optional bound parameters.
-#[pyclass(name = "MCGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "MCGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyMcGate {
     pub(crate) inner: MCGate,

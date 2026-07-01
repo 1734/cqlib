@@ -90,7 +90,7 @@ use std::hash::{Hash, Hasher};
 /// # Validate noise parameters
 /// assert noise.is_valid()  # True if probabilities are in [0, 1]
 /// ```
-#[pyclass(name = "SingleQubitNoise", module = "cqlib.device")]
+#[pyclass(name = "SingleQubitNoise", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PySingleQubitNoise {
     pub(crate) inner: SingleQubitNoise,
@@ -282,7 +282,7 @@ impl PySingleQubitNoise {
 /// q1_noise = SingleQubitNoise.depolarizing(0.001)
 /// independent = TwoQubitNoise.independent(q0_noise, q1_noise)
 /// ```
-#[pyclass(name = "TwoQubitNoise", module = "cqlib.device")]
+#[pyclass(name = "TwoQubitNoise", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PyTwoQubitNoise {
     pub(crate) inner: TwoQubitNoise,
@@ -432,7 +432,7 @@ impl PyTwoQubitNoise {
 ///
 /// assert error.is_valid()  # Both probabilities in [0, 1]
 /// ```
-#[pyclass(name = "ReadoutError", module = "cqlib.device")]
+#[pyclass(name = "ReadoutError", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PyReadoutError {
     pub(crate) inner: ReadoutError,
@@ -529,7 +529,7 @@ impl PyReadoutError {
 /// print(key.gate)    # StandardGate.H
 /// print(key.qubits)  # [0]
 /// ```
-#[pyclass(name = "OperationKey", module = "cqlib.device")]
+#[pyclass(name = "OperationKey", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyOperationKey {
     pub(crate) inner: OperationKey,
@@ -690,7 +690,7 @@ impl PyOperationKey {
 /// key = OperationKey.new_single(StandardGate.H, 0)
 /// errors = model.get_single_qubit_errors(key)
 /// ```
-#[pyclass(name = "NoiseModel", module = "cqlib.device")]
+#[pyclass(name = "NoiseModel", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct PyNoiseModel {
     pub(crate) inner: NoiseModel,

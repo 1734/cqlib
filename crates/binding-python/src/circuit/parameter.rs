@@ -27,7 +27,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Immutable symbolic or numeric expression used as a circuit parameter.
-#[pyclass(name = "Parameter", module = "cqlib.circuit")]
+#[pyclass(name = "Parameter", module = "cqlib.circuit", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyParameter {
     pub(crate) inner: Parameter,
