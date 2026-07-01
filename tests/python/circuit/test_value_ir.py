@@ -34,7 +34,12 @@ def test_operation_exposes_value_ir_fields():
     operation = circuit[0]
 
     assert isinstance(operation, ValueOperation)
-    assert operation.instruction.instruction.name == "RX"
+    assert operation.name == "RX"
+    assert operation.num_qubits == 1
+    assert operation.num_params == 1
+    assert operation.instruction_type == "standard"
+    assert operation.is_standard
+    assert operation.instruction.name == "RX"
     assert list(operation.params) == [0.5]
     assert [qubit.index for qubit in operation.qubits] == [0]
 
@@ -50,9 +55,15 @@ def test_instruction_factory_methods_expose_names_and_kinds():
 
 
 def test_value_instruction_wraps_instruction_and_control_variants():
-    standard = ValueInstruction.from_instruction(Instruction.from_standard_gate(StandardGate.X()))
+    standard = ValueInstruction.from_instruction(
+        Instruction.from_standard_gate(StandardGate.X())
+    )
     assert standard.is_instruction
+    assert standard.name == "X"
+    assert standard.instruction_type == "standard"
+    assert standard.is_standard
     assert standard.instruction.name == "X"
+    assert repr(standard.standard_gate) == "X"
 
     body_circuit = Circuit(1)
     body_circuit.h(0)
@@ -63,6 +74,8 @@ def test_value_instruction_wraps_instruction_and_control_variants():
     controlled = ValueInstruction.from_classical_control(control)
 
     assert controlled.is_classical_control
+    assert controlled.name == "if"
+    assert controlled.instruction_type == "classical_control"
     assert controlled.classical_control.kind == "if"
 
 
@@ -77,8 +90,11 @@ def test_value_operation_factories_can_build_and_append_operations():
     circuit.append(operation)
 
     assert operation.label == "rx-label"
+    assert operation.name == "RX"
+    assert operation.num_qubits == 1
+    assert operation.num_params == 1
     assert list(operation.params) == [0.25]
-    assert circuit[0].instruction.instruction.name == "RX"
+    assert circuit[0].name == "RX"
 
 
 def test_value_operation_matrix_for_unitary_gate():
@@ -90,6 +106,11 @@ def test_value_operation_matrix_for_unitary_gate():
 def test_value_operation_matrix_rejects_directive_without_matrix():
     instruction = Instruction.from_directive(Directive.barrier())
     operation = ValueOperation.from_instruction(instruction, [Qubit(0)])
+
+    assert operation.name == "Barrier"
+    assert operation.is_directive
+    assert operation.instruction.is_directive
+    assert operation.instruction.directive.name() == "Barrier"
 
     with pytest.raises(ValueError):
         operation.matrix()
@@ -104,9 +125,10 @@ def test_value_operation_from_classical_control():
     )
     operation = ValueOperation.from_classical_control(control)
 
+    assert operation.name == "if"
+    assert operation.is_classical_control
     assert operation.instruction.is_classical_control
     assert operation.instruction.classical_control.kind == "if"
     assert [
-        op.instruction.instruction.name
-        for op in operation.instruction.classical_control.then_body.operations
+        op.name for op in operation.instruction.classical_control.then_body.operations
     ] == ["Z"]

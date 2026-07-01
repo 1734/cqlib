@@ -229,6 +229,63 @@ impl PyValueInstruction {
     }
 
     #[getter]
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+
+    #[getter]
+    fn instruction_type(&self) -> &'static str {
+        self.inner.instruction_type()
+    }
+
+    #[getter]
+    fn is_standard(&self) -> bool {
+        self.inner.is_standard()
+    }
+
+    #[getter]
+    fn is_mcgate(&self) -> bool {
+        self.inner.is_mcgate()
+    }
+
+    #[getter]
+    fn is_unitary(&self) -> bool {
+        self.inner.is_unitary()
+    }
+
+    #[getter]
+    fn is_circuit_gate(&self) -> bool {
+        self.inner.is_circuit_gate()
+    }
+
+    #[getter]
+    fn is_directive(&self) -> bool {
+        self.inner.is_directive()
+    }
+
+    #[getter]
+    fn is_classical_data(&self) -> bool {
+        self.inner.is_classical_data()
+    }
+
+    #[getter]
+    fn is_delay(&self) -> bool {
+        self.inner.is_delay()
+    }
+
+    #[getter]
+    fn standard_gate(&self) -> Option<PyStandardGate> {
+        self.inner
+            .standard_gate()
+            .map(|gate| PyStandardGate::from(gate, vec![]))
+    }
+
+    #[getter]
+    fn directive(&self) -> Option<PyDirective> {
+        self.inner.directive().map(PyDirective::from)
+    }
+
+    #[getter]
     fn instruction(&self) -> Option<PyInstruction> {
         self.inner
             .as_instruction()

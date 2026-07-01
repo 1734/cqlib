@@ -69,7 +69,7 @@ class TestCircuitGateInCircuit:
         bell_gate = sub.to_gate("Bell")
 
         main = Circuit(4)
-        main.circuit_gate(bell_gate, [0, 1])
+        main.append_circuit_gate(bell_gate, [0, 1])
 
         assert len(main) == 1
         assert main[0].name == "Bell"
@@ -82,8 +82,8 @@ class TestCircuitGateInCircuit:
         bell_gate = sub.to_gate("Bell")
 
         main = Circuit(4)
-        main.circuit_gate(bell_gate, [0, 1])
-        main.circuit_gate(bell_gate, [2, 3])
+        main.append_circuit_gate(bell_gate, [0, 1])
+        main.append_circuit_gate(bell_gate, [2, 3])
 
         assert len(main) == 2
         # Verify both operations use the same gate name
@@ -98,7 +98,7 @@ class TestCircuitGateInCircuit:
         bell_gate = sub.to_gate("Bell")
 
         main = Circuit(4)
-        main.circuit_gate(bell_gate, [1, 2])
+        main.append_circuit_gate(bell_gate, [1, 2])
 
         op = main[0]
         assert op.qubits[0].index == 1
@@ -116,7 +116,7 @@ class TestCircuitGateDecomposition:
         bell_gate = sub.to_gate("Bell")
 
         main = Circuit(2)
-        main.circuit_gate(bell_gate, [0, 1])
+        main.append_circuit_gate(bell_gate, [0, 1])
 
         decomposed = main.decompose()
         # Should expand to H and CX
@@ -133,7 +133,7 @@ class TestCircuitGateDecomposition:
         gate = sub.to_gate("Ordered")
 
         main = Circuit(2)
-        main.circuit_gate(gate, [0, 1])
+        main.append_circuit_gate(gate, [0, 1])
 
         decomposed = main.decompose()
         names = [op.name for op in decomposed]
@@ -146,8 +146,8 @@ class TestCircuitGateDecomposition:
         h_gate = sub.to_gate("H")
 
         main = Circuit(2)
-        main.circuit_gate(h_gate, [0])
-        main.circuit_gate(h_gate, [1])
+        main.append_circuit_gate(h_gate, [0])
+        main.append_circuit_gate(h_gate, [1])
 
         decomposed = main.decompose()
         assert len(decomposed) == 2
@@ -174,8 +174,8 @@ class TestCircuitGateParametric:
         rx_gate = c.to_gate("Rx")
 
         main = Circuit(2)
-        main.circuit_gate(rx_gate, [0])
-        main.circuit_gate(rx_gate, [1])
+        main.append_circuit_gate(rx_gate, [0], [theta])
+        main.append_circuit_gate(rx_gate, [1], [theta])
 
         assert len(main) == 2
 
@@ -200,11 +200,11 @@ class TestCircuitGateNested:
         inner_gate = inner.to_gate("H")
 
         middle = Circuit(1)
-        middle.circuit_gate(inner_gate, [0])
+        middle.append_circuit_gate(inner_gate, [0])
         middle_gate = middle.to_gate("Middle")
 
         outer = Circuit(1)
-        outer.circuit_gate(middle_gate, [0])
+        outer.append_circuit_gate(middle_gate, [0])
 
         assert len(outer) == 1
 
@@ -215,11 +215,11 @@ class TestCircuitGateNested:
         inner_gate = inner.to_gate("X")
 
         middle = Circuit(1)
-        middle.circuit_gate(inner_gate, [0])
+        middle.append_circuit_gate(inner_gate, [0])
         middle_gate = middle.to_gate("Middle")
 
         outer = Circuit(1)
-        outer.circuit_gate(middle_gate, [0])
+        outer.append_circuit_gate(middle_gate, [0])
 
         # Decompose once expands middle to inner
         decomposed_once = outer.decompose()
@@ -247,7 +247,7 @@ class TestCircuitGateType:
         gate = sub.to_gate("CustomH")
 
         main = Circuit(1)
-        main.circuit_gate(gate, [0])
+        main.append_circuit_gate(gate, [0])
 
         op = main[0]
         assert op.name == "CustomH"

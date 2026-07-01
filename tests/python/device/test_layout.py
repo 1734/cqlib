@@ -28,20 +28,20 @@ class TestLayout:
         )
         assert layout.num_logical == 2
         assert layout.num_physical == 3
-        assert layout.num_ancilla == 1
+        assert layout.num_vacant_physical == 1
 
         assert set(layout.logical_qubits) == {Qubit(0), Qubit(1)}
         assert set(layout.physical_qubits) == {Qubit(10), Qubit(11), Qubit(12)}
-        assert set(layout.v2p_map.keys()).issuperset({Qubit(0), Qubit(1)})
-        assert set(layout.p2v_map.keys()).issubset({Qubit(10), Qubit(11), Qubit(12)})
+        assert set(layout.l2p_map.keys()).issuperset({Qubit(0), Qubit(1)})
+        assert set(layout.p2l_map.keys()).issubset({Qubit(10), Qubit(11), Qubit(12)})
 
         assert layout.get_physical(0) == Qubit(11)
-        v_on_11 = layout.get_virtual(11)
-        v_on_12 = layout.get_virtual(12)
+        v_on_11 = layout.get_logical(11)
+        v_on_12 = layout.get_logical(12)
 
         layout.swap_physical(11, 12)
-        assert layout.get_virtual(11) == v_on_12
-        assert layout.get_virtual(12) == v_on_11
+        assert layout.get_logical(11) == v_on_12
+        assert layout.get_logical(12) == v_on_11
 
     def test_layout_swap_rejects_unknown_physical(self):
         """swap_physical should reject physical qubits outside layout."""

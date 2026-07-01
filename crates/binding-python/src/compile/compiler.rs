@@ -145,8 +145,8 @@ impl From<PyCompileMode> for CompileMode {
 impl PyCompileMode {
     pub(crate) fn repr_label(&self) -> &'static str {
         match self.inner {
-            CompileMode::Normal => "CompileMode.normal()",
-            CompileMode::Enhanced => "CompileMode.enhanced()",
+            CompileMode::Normal => "CompileMode.Normal",
+            CompileMode::Enhanced => "CompileMode.Enhanced",
         }
     }
 }

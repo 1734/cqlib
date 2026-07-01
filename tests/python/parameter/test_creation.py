@@ -178,10 +178,8 @@ class TestParameterSymbolsProperty:
         symbols = p.symbols
         assert len(symbols) == 0
 
-    def test_pi_constant_symbols(self):
-        """Pi constant contains the π symbol."""
+    def test_pi_constant_has_no_free_symbols(self):
+        """Pi constant is resolved automatically and has no free symbols."""
         pi = Parameter.pi()
         symbols = pi.symbols
-        # The symbol library treats π as a symbol
-        assert len(symbols) == 1
-        assert "π" in symbols
+        assert len(symbols) == 0

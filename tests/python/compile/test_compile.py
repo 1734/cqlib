@@ -17,7 +17,13 @@ import numpy as np
 import pytest
 
 from cqlib.circuit import Circuit, Instruction, MCGate, Parameter, StandardGate
-from cqlib.compile import CompileMode, CompileResult, WorkflowStepReport, compile
+from cqlib.compile import (
+    CompileMode,
+    CompileResult,
+    CompilerConfigError,
+    WorkflowStepReport,
+    compile,
+)
 from cqlib.compile.compiler import compile as compile_from_submodule
 from cqlib.device import Device, Layout
 
@@ -363,7 +369,7 @@ def test_compile_target_basis_accepts_mixed_names_and_instructions():
 
 
 def test_compile_target_basis_rejects_unknown_names_and_invalid_types():
-    with pytest.raises(ValueError, match="NOT_A_GATE"):
+    with pytest.raises(CompilerConfigError, match="NOT_A_GATE"):
         compile(bell_circuit(), target_basis=["NOT_A_GATE"])
 
     with pytest.raises(TypeError):
@@ -450,27 +456,30 @@ def test_compile_rejects_unsupported_and_non_standard_target_basis():
     circuit = Circuit(1)
     circuit.h(0)
 
-    with pytest.raises(ValueError, match="H"):
+    with pytest.raises(CompilerConfigError, match="H"):
         compile(circuit, target_basis=[instruction(StandardGate.CZ)])
 
-    with pytest.raises(ValueError, match="unsupported workflow target instruction"):
+    with pytest.raises(
+        CompilerConfigError, match="unsupported workflow target instruction"
+    ):
         compile(
             bell_circuit(),
             target_basis=[Instruction.from_mc_gate(MCGate(2, StandardGate.X))],
         )
 
-    with pytest.raises(ValueError, match="FSIM"):
-        compile(
-            ising_exchange_circuit(),
-            target_basis=[
-                instruction(StandardGate.H),
-                instruction(StandardGate.RX),
-                instruction(StandardGate.RY),
-                instruction(StandardGate.RZ),
-                instruction(StandardGate.RZZ),
-                instruction(StandardGate.GPhase),
-            ],
-        )
+    reduced_ising_basis = [
+        instruction(StandardGate.H),
+        instruction(StandardGate.RX),
+        instruction(StandardGate.RY),
+        instruction(StandardGate.RZ),
+        instruction(StandardGate.RZZ),
+        instruction(StandardGate.GPhase),
+    ]
+    result = compile(ising_exchange_circuit(), target_basis=reduced_ising_basis)
+    names = [operation_name(operation) for operation in result.circuit.operations]
+    assert "FSIM" not in names
+    assert_only_standard_basis(result.circuit, standard_names(reduced_ising_basis))
+    assert_unitary_equivalent(ising_exchange_circuit(), result.circuit)
 
 
 def test_compile_routes_long_range_circuit_on_line_device():
@@ -570,11 +579,13 @@ def test_compile_rejects_invalid_device_and_layout_configurations():
     too_wide = Circuit(4)
     too_wide.h(0)
 
-    with pytest.raises(ValueError, match="4 logical qubits"):
+    with pytest.raises(CompilerConfigError, match="4 logical qubits"):
         compile(too_wide, device=Device.line("line-2", 2))
 
     layout = Layout.from_pairs([(0, 0)], 1)
-    with pytest.raises(ValueError, match="initial layout requires a target device"):
+    with pytest.raises(
+        CompilerConfigError, match="initial layout requires a target device"
+    ):
         compile(Circuit(1), initial_layout=layout)
 
 

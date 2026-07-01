@@ -180,7 +180,7 @@ class TestUnitaryGateInCircuit:
         c = Circuit(2)
         h_mat = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
         gate = UnitaryGate("CustomH", 1).with_matrix(h_mat)
-        c.unitary(gate, [0])
+        c.append_unitary_gate(gate, [0])
         assert len(c) == 1
         # Verify operation name is the gate label
         op = c[0]
@@ -193,7 +193,7 @@ class TestUnitaryGateInCircuit:
             [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]], dtype=complex
         )
         gate = UnitaryGate("CustomCNOT", 2).with_matrix(cnot_mat)
-        c.unitary(gate, [0, 1])
+        c.append_unitary_gate(gate, [0, 1])
         assert len(c) == 1
 
     def test_apply_multiple_unitaries(self):
@@ -205,8 +205,8 @@ class TestUnitaryGateInCircuit:
         x_gate = UnitaryGate("X", 1).with_matrix(x_mat)
         h_gate = UnitaryGate("H", 1).with_matrix(h_mat)
 
-        c.unitary(x_gate, [0])
-        c.unitary(h_gate, [1])
+        c.append_unitary_gate(x_gate, [0])
+        c.append_unitary_gate(h_gate, [1])
 
         assert len(c) == 2
 
@@ -217,7 +217,7 @@ class TestUnitaryGateInCircuit:
         gate = UnitaryGate("CustomH", 1).with_matrix(h_mat)
 
         # Apply to qubit 2
-        c.unitary(gate, [2])
+        c.append_unitary_gate(gate, [2])
         assert len(c) == 1
         assert c[0].qubits[0].index == 2
 

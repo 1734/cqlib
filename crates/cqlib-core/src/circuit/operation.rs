@@ -139,6 +139,66 @@ impl ValueOperation {
             label: None,
         }
     }
+
+    /// Returns the human-readable instruction name.
+    pub fn name(&self) -> String {
+        self.instruction.name()
+    }
+
+    /// Returns the number of qubits used by this operation instance.
+    pub fn num_qubits(&self) -> usize {
+        self.qubits.len()
+    }
+
+    /// Returns the number of parameters carried by this operation instance.
+    pub fn num_params(&self) -> usize {
+        self.params.len()
+    }
+
+    /// Returns a stable category name for this operation's instruction.
+    pub fn instruction_type(&self) -> &'static str {
+        self.instruction.instruction_type()
+    }
+
+    /// Returns `true` if this operation uses a standard-gate instruction.
+    pub fn is_standard(&self) -> bool {
+        self.instruction.is_standard()
+    }
+
+    /// Returns `true` if this operation uses a multi-controlled-gate instruction.
+    pub fn is_mcgate(&self) -> bool {
+        self.instruction.is_mcgate()
+    }
+
+    /// Returns `true` if this operation uses a user-defined unitary instruction.
+    pub fn is_unitary(&self) -> bool {
+        self.instruction.is_unitary()
+    }
+
+    /// Returns `true` if this operation uses a circuit-backed gate instruction.
+    pub fn is_circuit_gate(&self) -> bool {
+        self.instruction.is_circuit_gate()
+    }
+
+    /// Returns `true` if this operation uses a directive instruction.
+    pub fn is_directive(&self) -> bool {
+        self.instruction.is_directive()
+    }
+
+    /// Returns `true` if this operation uses a classical-data instruction.
+    pub fn is_classical_data(&self) -> bool {
+        self.instruction.is_classical_data()
+    }
+
+    /// Returns `true` if this operation uses a classical-control instruction.
+    pub fn is_classical_control(&self) -> bool {
+        self.instruction.is_classical_control()
+    }
+
+    /// Returns `true` if this operation uses a delay instruction.
+    pub fn is_delay(&self) -> bool {
+        self.instruction.is_delay()
+    }
 }
 
 impl fmt::Display for ValueOperation {
@@ -161,5 +221,27 @@ impl fmt::Display for ValueOperation {
             write!(f, " [{}]", label)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_operation_exposes_instance_queries() {
+        let operation = ValueOperation::from_standard(
+            StandardGate::RX,
+            [Qubit::new(0)],
+            [ParameterValue::Fixed(0.5)],
+        );
+
+        assert_eq!(operation.name(), "RX");
+        assert_eq!(operation.num_qubits(), 1);
+        assert_eq!(operation.num_params(), 1);
+        assert_eq!(operation.instruction_type(), "standard");
+        assert!(operation.is_standard());
+        assert!(!operation.is_directive());
+        assert!(!operation.is_classical_control());
     }
 }

@@ -121,13 +121,9 @@ impl PyMcGate {
     ///
     /// The inverse of a controlled gate C(U) is C(U†).
     ///
-    /// # Arguments
-    ///
-    /// * `params` - Optional parameters for the base gate.
-    ///
     /// # Returns
     ///
-    /// A tuple of (inverse gate, inverse parameters), or None if not invertible.
+    /// A new multi-controlled gate with inverse parameters already bound.
     pub fn inverse(&self) -> PyResult<Self> {
         if self.params.len() != self.inner.num_params() {
             return Err(PyCircuitError::new_err(format!(

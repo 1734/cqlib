@@ -342,6 +342,66 @@ impl PyValueOperation {
     }
 
     #[getter]
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+
+    #[getter]
+    fn num_qubits(&self) -> usize {
+        self.inner.num_qubits()
+    }
+
+    #[getter]
+    fn num_params(&self) -> usize {
+        self.inner.num_params()
+    }
+
+    #[getter]
+    fn instruction_type(&self) -> &'static str {
+        self.inner.instruction_type()
+    }
+
+    #[getter]
+    fn is_standard(&self) -> bool {
+        self.inner.is_standard()
+    }
+
+    #[getter]
+    fn is_mcgate(&self) -> bool {
+        self.inner.is_mcgate()
+    }
+
+    #[getter]
+    fn is_unitary(&self) -> bool {
+        self.inner.is_unitary()
+    }
+
+    #[getter]
+    fn is_circuit_gate(&self) -> bool {
+        self.inner.is_circuit_gate()
+    }
+
+    #[getter]
+    fn is_directive(&self) -> bool {
+        self.inner.is_directive()
+    }
+
+    #[getter]
+    fn is_classical_data(&self) -> bool {
+        self.inner.is_classical_data()
+    }
+
+    #[getter]
+    fn is_classical_control(&self) -> bool {
+        self.inner.is_classical_control()
+    }
+
+    #[getter]
+    fn is_delay(&self) -> bool {
+        self.inner.is_delay()
+    }
+
+    #[getter]
     fn label(&self) -> Option<String> {
         self.inner.label.as_ref().map(|s| s.to_string())
     }

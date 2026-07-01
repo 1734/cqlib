@@ -16,6 +16,7 @@ import sys
 import pytest
 
 from cqlib.circuit import Circuit
+from cqlib.compile import CompilerConfigError
 from cqlib.compile import sabre
 from cqlib.compile.sabre import (
     SabreConfig,
@@ -157,10 +158,10 @@ def test_route_rejects_invalid_configuration_and_disconnected_interaction():
     line = Device.line("line2", 2)
     layout = Layout(logical=[0, 1], physical=[0, 1])
 
-    with pytest.raises(ValueError, match="routing_trials"):
+    with pytest.raises(CompilerConfigError, match="routing_trials"):
         sabre_route(circuit, line, layout, SabreConfig(routing_trials=0))
 
-    with pytest.raises(ValueError, match="basic_weight"):
+    with pytest.raises(CompilerConfigError, match="basic_weight"):
         sabre_route(
             circuit,
             line,
@@ -173,5 +174,5 @@ def test_route_rejects_invalid_configuration_and_disconnected_interaction():
         [0, 1],
         Topology([0, 1], []),
     )
-    with pytest.raises(ValueError, match="disconnected"):
+    with pytest.raises(CompilerConfigError, match="disconnected"):
         sabre_route(circuit, disconnected, layout)

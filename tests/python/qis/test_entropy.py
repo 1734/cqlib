@@ -60,7 +60,7 @@ def test_entanglement_entropy_pure():
         entropy.entanglement_entropy_pure(sv, [0, 1])  # Subsystem equals full system
     with pytest.raises(ValueError):
         entropy.entanglement_entropy_pure(sv, [0, 0])  # Duplicates
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         entropy.entanglement_entropy_pure(sv, [2])  # Out of bounds
 
 
@@ -79,7 +79,7 @@ def test_negativity():
     assert abs(entropy.negativity(dm_sep, [0]) - 0.0) < 1e-10
 
     # Edge cases
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         entropy.negativity(dm, [2])  # Out of bounds
 
 
@@ -400,5 +400,5 @@ class TestEntropyErrorHandling:
         """Test negativity with invalid subsystem."""
         dm = DensityMatrix(2)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(IndexError):
             entropy.negativity(dm, [0, 1, 2])  # Out of bounds

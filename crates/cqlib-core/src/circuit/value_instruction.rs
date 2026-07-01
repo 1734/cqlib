@@ -46,7 +46,9 @@ use crate::circuit::classical::{ClassicalValue, ClassicalVar};
 use crate::circuit::classical_expr::ClassicalExpr;
 use crate::circuit::control_flow::ControlBody;
 use crate::circuit::error::CircuitError;
+use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::instruction::Instruction;
+use crate::circuit::gate::standard_gate::StandardGate;
 use crate::circuit::operation::{Operation, ValueOperation};
 use alloc::collections::BTreeSet;
 use std::fmt;
@@ -422,6 +424,78 @@ impl ValueInstruction {
         matches!(self, Self::Instruction(_))
     }
 
+    /// Returns the human-readable instruction name.
+    pub fn name(&self) -> String {
+        self.to_string()
+    }
+
+    /// Returns a stable category name for this instruction.
+    pub fn instruction_type(&self) -> &'static str {
+        match self {
+            Self::Instruction(Instruction::Standard(_)) => "standard",
+            Self::Instruction(Instruction::McGate(_)) => "mcgate",
+            Self::Instruction(Instruction::UnitaryGate(_)) => "unitary",
+            Self::Instruction(Instruction::CircuitGate(_)) => "circuit",
+            Self::Instruction(Instruction::Directive(_)) => "directive",
+            Self::Instruction(Instruction::ClassicalData(_)) => "classical_data",
+            Self::Instruction(Instruction::ClassicalControl(_)) | Self::ClassicalControl(_) => {
+                "classical_control"
+            }
+            Self::Instruction(Instruction::Delay) => "delay",
+        }
+    }
+
+    /// Returns `true` if this is a standard-gate instruction.
+    pub fn is_standard(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::Standard(_)))
+    }
+
+    /// Returns `true` if this is a multi-controlled-gate instruction.
+    pub fn is_mcgate(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::McGate(_)))
+    }
+
+    /// Returns `true` if this is a user-defined unitary instruction.
+    pub fn is_unitary(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::UnitaryGate(_)))
+    }
+
+    /// Returns `true` if this is a circuit-backed gate instruction.
+    pub fn is_circuit_gate(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::CircuitGate(_)))
+    }
+
+    /// Returns `true` if this is a non-unitary directive.
+    pub fn is_directive(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::Directive(_)))
+    }
+
+    /// Returns `true` if this is a classical-data instruction.
+    pub fn is_classical_data(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::ClassicalData(_)))
+    }
+
+    /// Returns `true` if this is a delay instruction.
+    pub fn is_delay(&self) -> bool {
+        matches!(self, Self::Instruction(Instruction::Delay))
+    }
+
+    /// Returns the standard gate when this is a standard-gate instruction.
+    pub fn standard_gate(&self) -> Option<StandardGate> {
+        match self {
+            Self::Instruction(Instruction::Standard(gate)) => Some(*gate),
+            _ => None,
+        }
+    }
+
+    /// Returns the directive when this is a directive instruction.
+    pub fn directive(&self) -> Option<Directive> {
+        match self {
+            Self::Instruction(Instruction::Directive(directive)) => Some(*directive),
+            _ => None,
+        }
+    }
+
     /// Returns the wrapped storage instruction when this is a non-control-flow value instruction.
     pub fn as_instruction(&self) -> Option<&Instruction> {
         match self {
@@ -570,7 +644,7 @@ mod tests {
     use super::*;
     use crate::circuit::ClassicalType;
     use crate::circuit::bit::Qubit;
-    use crate::circuit::gate::{ClassicalDataOp, StandardGate};
+    use crate::circuit::gate::{ClassicalDataOp, Directive, StandardGate};
     use std::num::NonZeroU32;
 
     #[test]
@@ -607,6 +681,42 @@ mod tests {
         let vi = ValueInstruction::from(vcc);
         assert!(vi.is_classical_control());
         assert!(!vi.is_instruction());
+    }
+
+    #[test]
+    fn value_instruction_exposes_instruction_queries() {
+        let standard = ValueInstruction::from_instruction(Instruction::Standard(StandardGate::H));
+        assert_eq!(standard.name(), "H");
+        assert_eq!(standard.instruction_type(), "standard");
+        assert!(standard.is_standard());
+        assert_eq!(standard.standard_gate(), Some(StandardGate::H));
+        assert_eq!(standard.directive(), None);
+
+        let directive =
+            ValueInstruction::from_instruction(Instruction::Directive(Directive::Barrier));
+        assert_eq!(directive.name(), "Barrier");
+        assert_eq!(directive.instruction_type(), "directive");
+        assert!(directive.is_directive());
+        assert_eq!(directive.directive(), Some(Directive::Barrier));
+
+        let value =
+            ClassicalValue::new(crate::circuit::CircuitId::default(), 0, ClassicalType::Bit);
+        let classical_data = ValueInstruction::from_instruction(Instruction::ClassicalData(
+            ClassicalDataOp::MeasureBit { result: value },
+        ));
+        assert_eq!(classical_data.name(), "measure_bit");
+        assert_eq!(classical_data.instruction_type(), "classical_data");
+        assert!(classical_data.is_classical_data());
+
+        let control = ValueInstruction::from(ValueClassicalControlOp::Break);
+        assert_eq!(control.name(), "break");
+        assert_eq!(control.instruction_type(), "classical_control");
+        assert!(control.is_classical_control());
+
+        let delay = ValueInstruction::from_instruction(Instruction::Delay);
+        assert_eq!(delay.name(), "delay");
+        assert_eq!(delay.instruction_type(), "delay");
+        assert!(delay.is_delay());
     }
 
     #[test]

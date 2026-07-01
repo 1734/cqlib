@@ -20,6 +20,7 @@ from cqlib.circuit import (
     StandardGate,
     UnitaryGate,
 )
+from cqlib.compile import CompilerConfigError, CompilerTransformError
 from cqlib.compile.resource import ResourceLimits, ResourcePolicy
 from cqlib.compile.transform import TransformResult, decompose
 from cqlib.compile.transform.decompose import (
@@ -122,7 +123,9 @@ def test_decompose_unitaries_preserves_matrix_and_reports_cache_stats() -> None:
     assert result.changed is True
     assert operation_names(circuit) == ["x_matrix", "x_matrix"]
     assert all(name == "U" for name in operation_names(result.circuit))
-    np.testing.assert_allclose(result.circuit.to_matrix(), circuit.to_matrix(), atol=1e-10)
+    np.testing.assert_allclose(
+        result.circuit.to_matrix(), circuit.to_matrix(), atol=1e-10
+    )
     assert (stats.hits, stats.misses, stats.inserts) == (1, 1, 1)
     assert copy.copy(stats) == stats
 
@@ -131,7 +134,7 @@ def test_decompose_unitaries_rejects_missing_matrix() -> None:
     circuit = Circuit(1)
     circuit.append_unitary_gate(UnitaryGate("undefined", 1), [0])
 
-    with pytest.raises(ValueError, match="no matrix representation"):
+    with pytest.raises(CompilerTransformError, match="no matrix representation"):
         decompose_unitaries(circuit)
 
 
@@ -145,8 +148,13 @@ def test_decompose_mc_gates_returns_standard_operations_and_stats() -> None:
 
     assert result.changed is True
     assert len(circuit.operations) == 2
-    assert all(not operation.instruction.instruction.is_mcgate for operation in result.circuit.operations)
-    np.testing.assert_allclose(result.circuit.to_matrix(), circuit.to_matrix(), atol=1e-10)
+    assert all(
+        not operation.instruction.instruction.is_mcgate
+        for operation in result.circuit.operations
+    )
+    np.testing.assert_allclose(
+        result.circuit.to_matrix(), circuit.to_matrix(), atol=1e-10
+    )
     assert stats.hits >= 1
     assert stats.misses >= 1
     assert stats.inserts >= 1
@@ -170,7 +178,7 @@ def test_decompose_mc_gates_for_device_enforces_capacity() -> None:
     assert result.changed is True
     assert result.circuit.num_qubits == 4
 
-    with pytest.raises(ValueError, match="capacity exceeded"):
+    with pytest.raises(CompilerConfigError, match="capacity exceeded"):
         decompose_mc_gates_for_device(circuit, Device.line("line3", 3))
 
 
@@ -182,10 +190,14 @@ def test_numeric_unitary_module_is_registered() -> None:
 
 
 def test_numeric_1q_synthesis_reconstructs_matrix_and_phase() -> None:
-    source = np.exp(0.37j) * np.array(
-        [[1, 1], [1, -1]],
-        dtype=np.complex128,
-    ) / np.sqrt(2)
+    source = (
+        np.exp(0.37j)
+        * np.array(
+            [[1, 1], [1, -1]],
+            dtype=np.complex128,
+        )
+        / np.sqrt(2)
+    )
 
     decomposition = synthesize_numeric_1q_unitary(source)
     circuit = Circuit(1)
@@ -263,9 +275,9 @@ def test_kak_decomposition_reconstructs_matrix_and_returns_owned_arrays() -> Non
 
 
 def test_numeric_synthesis_rejects_invalid_inputs() -> None:
-    with pytest.raises(ValueError, match="2x2"):
+    with pytest.raises(CompilerConfigError, match="2x2"):
         synthesize_numeric_1q_unitary(np.eye(3))
-    with pytest.raises(ValueError, match="distinct qubits"):
+    with pytest.raises(CompilerConfigError, match="distinct qubits"):
         synthesize_numeric_2q_unitary(np.eye(4), 0, 0)
     with pytest.raises(TypeError, match="two-dimensional"):
         kak_decompose([1, 0, 0, 1])
@@ -330,9 +342,11 @@ def test_exact_mcx_primitives_match_mcgate_matrix(
 
 def test_mcx_small_emits_standard_gate_and_validates_inputs() -> None:
     operations = mc.decompose_mcx_small([0, 1], 2)
-    assert [operation.instruction.instruction.name for operation in operations] == ["CCX"]
+    assert [operation.instruction.instruction.name for operation in operations] == [
+        "CCX"
+    ]
 
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(CompilerTransformError, match="duplicate"):
         mc.decompose_mcx_no_aux([0, 0, 1], 2)
     with pytest.raises(ValueError, match="exactly 2"):
         mc.decompose_mcx_2_clean([0, 1, 2], 3, [4])
@@ -348,7 +362,9 @@ def test_mc_su2_and_rotation_primitives_preserve_semantics() -> None:
 
     rotation = mc.decompose_rotation_no_aux(StandardGate.RY, theta, [0, 1], 2)
     rotation_result = circuit_from_value_operations(3, rotation)
-    np.testing.assert_allclose(result.to_matrix(), rotation_result.to_matrix(), atol=1e-10)
+    np.testing.assert_allclose(
+        result.to_matrix(), rotation_result.to_matrix(), atol=1e-10
+    )
 
     assert mc.Su2RotationAxis.x() != mc.Su2RotationAxis.z()
     assert copy.copy(mc.Su2RotationAxis.y()) == mc.Su2RotationAxis.y()
@@ -377,9 +393,9 @@ def test_representative_composite_primitives_return_equivalent_circuits() -> Non
 
 
 def test_clean_composite_primitives_validate_ancilla_contracts() -> None:
-    with pytest.raises(ValueError, match="requires"):
+    with pytest.raises(CompilerTransformError, match="requires"):
         mc.decompose_swap_n_clean([0, 1, 2], 3, 4, [])
-    with pytest.raises(ValueError, match="distinct|duplicate"):
+    with pytest.raises(CompilerTransformError, match="distinct|duplicate"):
         mc.decompose_mc_rzz_n_clean(0.2, [0, 1], 2, 3, [0])
     with pytest.raises(ParameterError, match="finite"):
         mc.decompose_unitary_no_aux(float("inf"), 0.0, 0.0, [0], 1)

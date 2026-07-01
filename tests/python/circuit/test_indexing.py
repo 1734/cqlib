@@ -46,9 +46,9 @@ def test_operation_method_and_getitem_report_out_of_range():
     with pytest.raises(CircuitError):
         circuit.operation(1)
 
-    with pytest.raises(CircuitError):
+    with pytest.raises(IndexError):
         circuit[1]
 
     empty = Circuit(1)
-    with pytest.raises(CircuitError):
+    with pytest.raises(IndexError):
         empty[0]
