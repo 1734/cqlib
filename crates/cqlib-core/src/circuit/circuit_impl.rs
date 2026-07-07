@@ -672,6 +672,233 @@ impl Circuit {
         &self.data
     }
 
+    /// Removes a top-level operation from the circuit schedule.
+    ///
+    /// This deletes exactly one operation from the circuit's top-level
+    /// operation list. Structured control-flow operations and circuit-backed
+    /// gates are removed as whole operations; this API does not delete
+    /// individual operations inside a [`ControlBody`] or nested circuit.
+    ///
+    /// If the removed operation defines measurement-backed classical values,
+    /// those values are removed from the circuit's immutable classical value
+    /// table and remaining value references are compacted. Deletion fails
+    /// atomically when any remaining operation still reads a removed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::remove_operations`] for a single index.
+    pub fn remove_operation(&mut self, index: usize) -> Result<Operation, CircuitError> {
+        let mut removed = self.remove_operations([index])?;
+        Ok(removed.remove(0))
+    }
+
+    /// Removes multiple top-level operations from the circuit schedule.
+    ///
+    /// `indices` are interpreted against the original top-level operation
+    /// list before deletion. Duplicate indices are ignored, and removed
+    /// operations are returned in ascending original-index order. Structured
+    /// control-flow operations and circuit-backed gates are removed as whole
+    /// operations; this API does not delete individual operations inside a
+    /// [`ControlBody`] or nested circuit.
+    ///
+    /// If the removed operations define measurement-backed classical values,
+    /// those values are removed from the circuit's immutable classical value
+    /// table and remaining value references are compacted. Deletion fails
+    /// atomically when any remaining operation still reads a removed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircuitError::OperationIndexOutOfBounds`] when any index is
+    /// not a valid operation index. Returns
+    /// [`CircuitError::ClassicalValueStillInUse`] when a measurement result
+    /// defined by the removed operations is still read by an operation that is
+    /// not also being removed. Also returns any validation or remapping error
+    /// raised by the candidate circuit after deletion.
+    pub fn remove_operations<I>(&mut self, indices: I) -> Result<Vec<Operation>, CircuitError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        let mut indices = indices.into_iter().collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices.dedup();
+
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if let Some(index) = indices
+            .iter()
+            .copied()
+            .find(|&index| index >= self.data.len())
+        {
+            return Err(CircuitError::OperationIndexOutOfBounds {
+                index,
+                len: self.data.len(),
+            });
+        }
+
+        let mut removed = Vec::with_capacity(indices.len());
+        let mut removed_values = Vec::new();
+        for &index in &indices {
+            let operation = self.data[index].clone();
+            Self::collect_defined_classical_values(&operation, &mut removed_values);
+            removed.push(operation);
+        }
+        removed_values.sort_unstable();
+        removed_values.dedup();
+
+        let remove_set = indices.iter().copied().collect::<HashSet<_>>();
+
+        for (operation_index, operation) in self.data.iter().enumerate() {
+            if remove_set.contains(&operation_index) {
+                continue;
+            }
+            for value in &removed_values {
+                if operation.instruction.reads_value(*value) {
+                    return Err(CircuitError::ClassicalValueStillInUse {
+                        index: value.index(),
+                        context: format!("operation {operation_index}"),
+                    });
+                }
+            }
+        }
+
+        let mut candidate_classical_values = self.classical_values.clone();
+        let candidate_data = if removed_values.is_empty() {
+            let mut candidate_data = Vec::with_capacity(self.data.len() - indices.len());
+            for (operation_index, operation) in self.data.iter().cloned().enumerate() {
+                if !remove_set.contains(&operation_index) {
+                    candidate_data.push(operation);
+                }
+            }
+            candidate_data
+        } else {
+            let (compacted_values, value_map) = Self::build_value_compaction_map(
+                self.circuit_id,
+                &candidate_classical_values,
+                &removed_values,
+            );
+            candidate_classical_values = compacted_values;
+
+            let qubit_mapping = self
+                .qubits
+                .iter()
+                .copied()
+                .map(|qubit| (qubit, qubit))
+                .collect::<HashMap<_, _>>();
+            let param_index_map = (0..self.parameters.len())
+                .map(|index| CircuitParam::Index(index as u32))
+                .collect::<Vec<_>>();
+            let var_map = self
+                .classical_vars
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(var_index, ty)| {
+                    let var = ClassicalVar::new(self.circuit_id, var_index as u32, ty);
+                    (var, var)
+                })
+                .collect::<HashMap<_, _>>();
+
+            self.data
+                .iter()
+                .enumerate()
+                .filter(|(operation_index, _)| !remove_set.contains(operation_index))
+                .map(|(_, operation)| {
+                    Self::remap_compose_operation(
+                        operation,
+                        &qubit_mapping,
+                        &param_index_map,
+                        &var_map,
+                        &value_map,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let candidate = Self {
+            circuit_id: self.circuit_id,
+            qubits: self.qubits.clone(),
+            symbols: self.symbols.clone(),
+            parameters: self.parameters.clone(),
+            data: candidate_data,
+            classical_vars: self.classical_vars.clone(),
+            classical_values: candidate_classical_values,
+            control_scope_stack: self.control_scope_stack.clone(),
+            global_phase: self.global_phase.clone(),
+        };
+        candidate.validate()?;
+
+        self.data = candidate.data;
+        self.classical_values = candidate.classical_values;
+
+        Ok(removed)
+    }
+
+    fn collect_defined_classical_values(operation: &Operation, out: &mut Vec<ClassicalValue>) {
+        let collect_from_body = |body: &ControlBody, out: &mut Vec<ClassicalValue>| {
+            for operation in body.operations() {
+                Circuit::collect_defined_classical_values(operation, out);
+            }
+        };
+
+        match &operation.instruction {
+            Instruction::ClassicalData(op) => {
+                if let Some(result) = op.result() {
+                    out.push(result);
+                }
+            }
+            Instruction::ClassicalControl(op) => match op {
+                ClassicalControlOp::If(op) => {
+                    collect_from_body(op.then_body(), out);
+                    if let Some(body) = op.else_body() {
+                        collect_from_body(body, out);
+                    }
+                }
+                ClassicalControlOp::While(op) => collect_from_body(op.body(), out),
+                ClassicalControlOp::For(op) => collect_from_body(op.body(), out),
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        collect_from_body(case.body(), out);
+                    }
+                    if let Some(body) = op.default() {
+                        collect_from_body(body, out);
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn build_value_compaction_map(
+        circuit_id: CircuitId,
+        values: &[ClassicalType],
+        removed: &[ClassicalValue],
+    ) -> (Vec<ClassicalType>, HashMap<ClassicalValue, ClassicalValue>) {
+        let removed_indices = removed
+            .iter()
+            .map(|value| value.index())
+            .collect::<HashSet<_>>();
+        let mut compacted = Vec::with_capacity(values.len().saturating_sub(removed_indices.len()));
+        let mut value_map =
+            HashMap::with_capacity(values.len().saturating_sub(removed_indices.len()));
+
+        for (old_index, ty) in values.iter().copied().enumerate() {
+            if removed_indices.contains(&(old_index as u32)) {
+                continue;
+            }
+            let new_index = compacted.len() as u32;
+            compacted.push(ty);
+            value_map.insert(
+                ClassicalValue::new(circuit_id, old_index as u32, ty),
+                ClassicalValue::new(circuit_id, new_index, ty),
+            );
+        }
+
+        (compacted, value_map)
+    }
+
     /// Returns the circuit depth (longest ASAP schedule path over qubit wires).
     ///
     /// Every instruction node contributes one layer on the qubits it touches;

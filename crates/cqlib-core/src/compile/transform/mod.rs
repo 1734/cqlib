@@ -60,6 +60,7 @@ pub mod rebuild;
 pub mod rewrite;
 pub mod routing;
 pub mod routing_basis;
+pub mod target_basis;
 pub mod transformer;
 
 pub use analysis::CircuitAnalysis;
@@ -78,4 +79,5 @@ pub use rewrite::{
 };
 pub use routing::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
 pub use routing_basis::LowerToRoutingBasis;
+pub use target_basis::TargetBasisLowerer;
 pub use transformer::{TransformResult, Transformer};
