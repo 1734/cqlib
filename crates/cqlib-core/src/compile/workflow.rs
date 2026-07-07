@@ -49,7 +49,8 @@ use crate::compile::transform::decompose::{
 use crate::compile::transform::layout::build_physical_layout_graph;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, KnowledgeRewriter, LayoutObjective, LowerToRoutingBasis,
-    RewriteConfig, TransformResult, Transformer, route_sabre, route_with_layout,
+    RewriteConfig, TargetBasisLowerer, TransformResult, Transformer, route_sabre,
+    route_with_layout,
 };
 
 use super::{CompileConfig, CompileMode, CompileResult};
@@ -82,7 +83,6 @@ enum RewritePhase {
     PreDecomposition,
     PostDecomposition,
     PostRouting,
-    TargetTranslation,
     TargetCleanup,
 }
 
@@ -232,12 +232,11 @@ impl CompilerWorkflow {
 
     /// Builds the rewrite configuration for a workflow phase.
     ///
-    /// Target translation uses the lowering rule set. Other phases use the
-    /// production optimizer, with Enhanced mode only increasing bounded search
-    /// budgets rather than changing correctness requirements.
+    /// Rewrite phases use the production optimizer. Enhanced mode only
+    /// increases bounded search budgets rather than changing correctness
+    /// requirements.
     fn rewrite_config(&self, phase: RewritePhase) -> Result<RewriteConfig, CompilerError> {
         let mut config = match phase {
-            RewritePhase::TargetTranslation => RewriteConfig::lowering(),
             RewritePhase::PreDecomposition
             | RewritePhase::PostDecomposition
             | RewritePhase::PostRouting
@@ -481,15 +480,13 @@ impl CompilerWorkflow {
             return Ok(());
         };
         let target_basis = target_basis.to_vec();
-        let config = self
-            .rewrite_config(RewritePhase::TargetTranslation)?
-            .with_target_instructions(target_basis)?;
+        let lowerer = TargetBasisLowerer::new(target_basis)?;
 
         apply_circuit_transform(
             state,
             "translation",
             "translate.target_basis",
-            |circuit, analysis| KnowledgeRewriter::new(config).transform(circuit, Some(analysis)),
+            |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
         )
     }
 
