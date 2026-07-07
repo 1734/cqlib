@@ -15,7 +15,7 @@
 import pytest
 
 from cqlib import Circuit
-from cqlib.circuit import CircuitError
+from cqlib.circuit import CircuitError, ClassicalType
 
 
 def test_operation_access_by_positive_index():
@@ -52,3 +52,80 @@ def test_operation_method_and_getitem_report_out_of_range():
     empty = Circuit(1)
     with pytest.raises(IndexError):
         empty[0]
+
+
+def test_remove_operation_returns_removed_operation():
+    circuit = Circuit(1)
+    circuit.h(0)
+    circuit.x(0)
+    circuit.z(0)
+
+    removed = circuit.remove_operation(1)
+
+    assert removed.instruction.name == "X"
+    assert [op.instruction.name for op in circuit.operations] == ["H", "Z"]
+
+
+def test_remove_operations_returns_original_index_order_and_deduplicates():
+    circuit = Circuit(1)
+    circuit.h(0)
+    circuit.x(0)
+    circuit.z(0)
+    circuit.y(0)
+
+    removed = circuit.remove_operations([3, 1, 1])
+
+    assert [op.instruction.name for op in removed] == ["X", "Y"]
+    assert [op.instruction.name for op in circuit.operations] == ["H", "Z"]
+
+
+def test_remove_operations_out_of_bounds_does_not_mutate():
+    circuit = Circuit(1)
+    circuit.h(0)
+    circuit.x(0)
+
+    with pytest.raises(CircuitError):
+        circuit.remove_operations([0, 2])
+
+    assert [op.instruction.name for op in circuit.operations] == ["H", "X"]
+
+
+def test_remove_operations_deletes_measurement_with_same_batch_store():
+    circuit = Circuit(1)
+    target = circuit.var(ClassicalType.bit())
+    measured = circuit.measure(0)
+    circuit.store(target, measured.expr())
+
+    removed = circuit.remove_operations([0, 1])
+
+    assert [op.instruction.name for op in removed] == ["measure_bit", "store"]
+    assert circuit.operations == []
+    assert circuit.classical_values == []
+
+
+def test_remove_operations_rejects_measurement_still_used_by_store():
+    circuit = Circuit(1)
+    target = circuit.var(ClassicalType.bit())
+    measured = circuit.measure(0)
+    circuit.store(target, measured.expr())
+
+    with pytest.raises(CircuitError):
+        circuit.remove_operations([0])
+
+    assert [op.instruction.name for op in circuit.operations] == [
+        "measure_bit",
+        "store",
+    ]
+    assert len(circuit.classical_values) == 1
+
+
+def test_remove_operations_deletes_measurement_with_same_batch_control_flow():
+    circuit = Circuit(1)
+    measured = circuit.measure(0)
+    circuit.if_(measured.expr().to_bool(), lambda body: body.x(0))
+
+    removed = circuit.remove_operations([0, 1])
+
+    assert [op.instruction.name for op in removed] == ["measure_bit", "if"]
+    assert circuit.operations == []
+    assert circuit.classical_values == []

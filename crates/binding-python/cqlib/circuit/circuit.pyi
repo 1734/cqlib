@@ -132,7 +132,12 @@ class Circuit:
         """
         ...
     @staticmethod
-    def from_operations(qubits: list[Qubit], operations: list[ValueOperation], classical_vars: list[ClassicalType] | None = ..., classical_values: list[ClassicalType] | None = ...) -> Circuit:
+    def from_operations(
+        qubits: list[Qubit],
+        operations: list[ValueOperation],
+        classical_vars: list[ClassicalType] | None = ...,
+        classical_values: list[ClassicalType] | None = ...,
+    ) -> Circuit:
         """Build a circuit from self-contained construction-IR operations.
 
         This is the low-level entry point for programmatic circuit construction
@@ -226,20 +231,34 @@ class Circuit:
         exception or circuit validation error rolls back the complete body.
         """
         ...
-    def if_else(self, condition: ClassicalExpr, then_body: Callable[[Circuit], None], else_body: Callable[[Circuit], None]) -> None:
+    def if_else(
+        self,
+        condition: ClassicalExpr,
+        then_body: Callable[[Circuit], None],
+        else_body: Callable[[Circuit], None],
+    ) -> None:
         """Append an ``if``/``else`` built by two atomic callbacks."""
         ...
     def while_(self, condition: ClassicalExpr, body: Callable[[Circuit], None]) -> None:
         """Append a runtime ``while`` loop built by an atomic callback."""
         ...
-    def for_uint(self, var: ClassicalVar, start: ClassicalExpr, stop: ClassicalExpr, step: ClassicalExpr, body: Callable[[Circuit, ClassicalExpr], None]) -> None:
+    def for_uint(
+        self,
+        var: ClassicalVar,
+        start: ClassicalExpr,
+        stop: ClassicalExpr,
+        step: ClassicalExpr,
+        body: Callable[[Circuit, ClassicalExpr], None],
+    ) -> None:
         """Append a half-open unsigned runtime loop.
 
         ``body`` receives the scoped circuit and an expression reading ``var``.
         ``start``, ``stop``, and ``step`` must have the same UInt type as ``var``.
         """
         ...
-    def switch(self, target: ClassicalExpr, build: Callable[[_SwitchBuilder], None]) -> None:
+    def switch(
+        self, target: ClassicalExpr, build: Callable[[_SwitchBuilder], None]
+    ) -> None:
         """Append an exact-value UInt switch built atomically by ``build``."""
         ...
     def break_loop(self) -> None:
@@ -251,7 +270,33 @@ class Circuit:
     def operation(self, index: int) -> ValueOperation:
         """Return one operation by index with circuit-local parameters resolved."""
         ...
-    def append_gate(self, gate: StandardGate, qubits: QubitList, label: str | None = ...) -> None:
+    def remove_operation(self, index: int) -> ValueOperation:
+        """Remove one top-level operation and return it.
+
+        Args:
+            index: Original operation index before deletion.
+
+        Raises:
+            CircuitError: If ``index`` is out of bounds or deletion would
+                violate classical-value/control-flow invariants.
+        """
+        ...
+    def remove_operations(self, indices: list[int]) -> list[ValueOperation]:
+        """Remove multiple top-level operations and return them.
+
+        ``indices`` are interpreted against the original operation list before
+        deletion. Duplicate indices are ignored, and removed operations are
+        returned in ascending original-index order.
+
+        Raises:
+            CircuitError: If any index is out of bounds or deletion would
+                violate classical-value/control-flow invariants. On failure the
+                circuit is unchanged.
+        """
+        ...
+    def append_gate(
+        self, gate: StandardGate, qubits: QubitList, label: str | None = ...
+    ) -> None:
         """Append a standard gate with any bound parameters already applied.
 
         Args:
@@ -260,7 +305,9 @@ class Circuit:
             label: Optional diagnostic label attached to the operation.
         """
         ...
-    def append_mc_gate(self, gate: MCGate, qubits: QubitList, label: str | None = ...) -> None:
+    def append_mc_gate(
+        self, gate: MCGate, qubits: QubitList, label: str | None = ...
+    ) -> None:
         """Append a multi-controlled gate.
 
         Args:
@@ -269,7 +316,9 @@ class Circuit:
             label: Optional diagnostic label attached to the operation.
         """
         ...
-    def append_unitary_gate(self, gate: UnitaryGate, qubits: QubitList, params: list[ParamLike] | None = ...) -> None:
+    def append_unitary_gate(
+        self, gate: UnitaryGate, qubits: QubitList, params: list[ParamLike] | None = ...
+    ) -> None:
         """Append a user-defined unitary gate.
 
         Args:
@@ -278,7 +327,9 @@ class Circuit:
             params: Concrete parameters for a parametric unitary; ``None`` keeps symbols.
         """
         ...
-    def append_circuit_gate(self, gate: CircuitGate, qubits: QubitList, params: list[ParamLike] | None = ...) -> None:
+    def append_circuit_gate(
+        self, gate: CircuitGate, qubits: QubitList, params: list[ParamLike] | None = ...
+    ) -> None:
         """Append a sub-circuit wrapped as a gate.
 
         Args:
@@ -382,7 +433,9 @@ class Circuit:
             lambda_: Phase angle (float or :class:`Parameter`).
         """
         ...
-    def u(self, qubit: QubitLike, theta: ParamLike, phi: ParamLike, lambda_: ParamLike) -> None:
+    def u(
+        self, qubit: QubitLike, theta: ParamLike, phi: ParamLike, lambda_: ParamLike
+    ) -> None:
         """Append a general single-qubit unitary U(theta, phi, lambda).
 
         Args:
@@ -470,7 +523,9 @@ class Circuit:
             theta: Rotation angle (float or :class:`Parameter`).
         """
         ...
-    def fsim(self, a: QubitLike, b: QubitLike, theta: ParamLike, phi: ParamLike) -> None:
+    def fsim(
+        self, a: QubitLike, b: QubitLike, theta: ParamLike, phi: ParamLike
+    ) -> None:
         """Append an fSim(theta, phi) gate.
 
         Args:
@@ -571,7 +626,9 @@ class Circuit:
             CircuitError: If the circuit contains non-unitary operations.
         """
         ...
-    def to_symbolic_matrix(self, qubits_order: list[int] | None = ...) -> SymbolicMatrix:
+    def to_symbolic_matrix(
+        self, qubits_order: list[int] | None = ...
+    ) -> SymbolicMatrix:
         """Compute a dense unitary matrix preserving symbolic parameters.
 
         Args:
