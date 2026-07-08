@@ -540,7 +540,7 @@ impl fmt::Display for ValueInstruction {
     }
 }
 
-pub(crate) fn storage_operation_to_value<F>(
+pub fn storage_operation_to_value<F>(
     operation: Operation,
     resolve_parameter: &F,
 ) -> Result<ValueOperation, CircuitError>

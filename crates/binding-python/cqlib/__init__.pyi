@@ -12,9 +12,13 @@
 
 from .circuit import (
     Circuit as Circuit,
+    CircuitDag as CircuitDag,
     CircuitError as CircuitError,
     CircuitGate as CircuitGate,
     CqlibError as CqlibError,
+    DagControlFlow as DagControlFlow,
+    DagSwitchCase as DagSwitchCase,
+    DagWire as DagWire,
     Directive as Directive,
     FrozenCircuit as FrozenCircuit,
     Instruction as Instruction,

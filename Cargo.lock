@@ -176,6 +176,7 @@ dependencies = [
  "num-complex",
  "numpy",
  "pyo3",
+ "rustworkx-core",
  "smallvec",
  "time",
 ]

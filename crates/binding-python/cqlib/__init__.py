@@ -12,9 +12,13 @@
 
 from .circuit import (
     Circuit,
+    CircuitDag,
     CircuitError,
     CircuitGate,
     CqlibError,
+    DagControlFlow,
+    DagSwitchCase,
+    DagWire,
     Directive,
     FrozenCircuit,
     Instruction,
@@ -62,9 +66,13 @@ from .qis import (
 
 __all__ = [
     "Circuit",
+    "CircuitDag",
     "CircuitError",
     "CircuitGate",
     "CqlibError",
+    "DagControlFlow",
+    "DagSwitchCase",
+    "DagWire",
     "Directive",
     "FrozenCircuit",
     "Instruction",

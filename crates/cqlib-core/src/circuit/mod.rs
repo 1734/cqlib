@@ -158,6 +158,7 @@ pub mod circuit_verify;
 pub mod classical;
 pub mod classical_expr;
 pub mod control_flow;
+pub mod dag;
 pub mod depth;
 pub mod error;
 pub mod gate;
@@ -182,6 +183,7 @@ pub use classical_expr::{
 pub use control_flow::{
     ClassicalControlOp, ControlBody, ForOp, IfOp, SwitchCase, SwitchOp, WhileOp,
 };
+pub use dag::{CircuitDag, DagControlFlow, DagNode, DagSwitchCase, DagWire};
 pub use error::CircuitError;
 pub use gate::circuit_gate::CircuitGate;
 pub use gate::classical_data::ClassicalDataOp;
@@ -194,4 +196,5 @@ pub use operation::{Operation, ValueOperation};
 pub use parameter::Parameter;
 pub use value_instruction::{
     ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueSwitchCase,
+    storage_operation_to_value,
 };
