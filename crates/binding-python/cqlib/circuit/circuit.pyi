@@ -274,6 +274,30 @@ class Circuit:
     def operation(self, index: int) -> ValueOperation:
         """Return one operation by index with circuit-local parameters resolved."""
         ...
+    def remove_operation(self, index: int) -> ValueOperation:
+        """Remove one top-level operation and return it.
+
+        Args:
+            index: Original operation index before deletion.
+
+        Raises:
+            CircuitError: If ``index`` is out of bounds or deletion would
+                violate classical-value/control-flow invariants.
+        """
+        ...
+    def remove_operations(self, indices: list[int]) -> list[ValueOperation]:
+        """Remove multiple top-level operations and return them.
+
+        ``indices`` are interpreted against the original operation list before
+        deletion. Duplicate indices are ignored, and removed operations are
+        returned in ascending original-index order.
+
+        Raises:
+            CircuitError: If any index is out of bounds or deletion would
+                violate classical-value/control-flow invariants. On failure the
+                circuit is unchanged.
+        """
+        ...
     def append_gate(
         self, gate: StandardGate, qubits: QubitList, label: str | None = ...
     ) -> None:

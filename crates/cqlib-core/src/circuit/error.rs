@@ -197,6 +197,16 @@ pub enum CircuitError {
         len: usize,
     },
 
+    /// Thrown when deleting an operation would remove a classical value that
+    /// is still read by another operation.
+    #[error("classical value {index} is still used at {context}")]
+    ClassicalValueStillInUse {
+        /// Circuit-local value index.
+        index: u32,
+        /// Description of the remaining use site.
+        context: String,
+    },
+
     /// Thrown when a gate parameter has an invalid value (NaN or Infinity).
     ///
     /// This occurs when appending or evaluating a gate with a non-finite fixed

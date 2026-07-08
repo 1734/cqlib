@@ -469,6 +469,42 @@ impl PyCircuit {
             })
     }
 
+    /// Removes one top-level operation and returns it.
+    fn remove_operation(&mut self, index: usize) -> PyResult<PyValueOperation> {
+        let removed = self
+            .inner
+            .index(index)
+            .map(PyValueOperation::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+        self.inner
+            .remove_operation(index)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+        Ok(removed)
+    }
+
+    /// Removes multiple top-level operations and returns them in original-index order.
+    fn remove_operations(&mut self, indices: Vec<usize>) -> PyResult<Vec<PyValueOperation>> {
+        let mut indices = indices;
+        indices.sort_unstable();
+        indices.dedup();
+
+        let removed = indices
+            .iter()
+            .copied()
+            .map(|index| {
+                self.inner
+                    .index(index)
+                    .map(PyValueOperation::from)
+                    .map_err(|error| PyCircuitError::new_err(error.to_string()))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        self.inner
+            .remove_operations(indices)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+        Ok(removed)
+    }
+
     #[getter]
     fn operations(&self) -> PyResult<Vec<PyValueOperation>> {
         (0..self.inner.operations().len())
