@@ -49,4 +49,11 @@ build-backend = "maturin"
 features = ["pyo3/extension-module"]
 module-name = "cqlib._native"
 include-python-files = ["cqlib/**", ]
+exclude = [
+    "cqlib/**/*.so",
+    "cqlib/**/*.dylib",
+    "cqlib/**/*.dll",
+    "cqlib/**/__pycache__",
+    "cqlib/**/*.pyc",
+]
 sdist-include = ["Cargo.toml", "Cargo.lock", "src/**/*", "cqlib/**/*"]

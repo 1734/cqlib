@@ -116,6 +116,26 @@ fn routing_basis_preserves_existing_two_qubit_standard_gates() {
 }
 
 #[test]
+fn routing_basis_fast_path_does_not_run_optimization_rewrites() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut source = Circuit::new(2);
+    source.x(q0).unwrap();
+    source.x(q0).unwrap();
+    source.cx(q0, q1).unwrap();
+
+    let result = LowerToRoutingBasis::default()
+        .transform(&source, None)
+        .unwrap();
+
+    assert!(!result.changed);
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![StandardGate::X, StandardGate::X, StandardGate::CX]
+    );
+}
+
+#[test]
 fn routing_basis_validation_reports_route_sabre_contract() {
     let mut source = Circuit::new(3);
     let gate = crate::circuit::UnitaryGate::new("THREE_Q", 3, 0);

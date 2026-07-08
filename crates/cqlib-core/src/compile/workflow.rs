@@ -259,6 +259,10 @@ impl CompilerWorkflow {
         state: &WorkflowState,
     ) -> Result<RewriteConfig, CompilerError> {
         let config = self.rewrite_config(phase)?;
+        if !matches!(phase, RewritePhase::TargetCleanup) {
+            return Ok(config);
+        }
+
         let Some(target_basis) = state.target_basis.as_deref() else {
             return Ok(config);
         };

@@ -11,13 +11,14 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::CompilerWorkflow;
+use super::{CompilerWorkflow, RewritePhase, WorkflowState};
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
     Circuit, CircuitGate, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit,
     StandardGate, UnitaryGate,
 };
 use crate::compile::resource::ResourcePolicy;
+use crate::compile::transform::CircuitAnalysis;
 use crate::compile::{CompileConfig, CompileMode, CompilerError, compile};
 use crate::device::{Device, Layout};
 use crate::util::test_utils::{
@@ -44,6 +45,17 @@ fn run_workflow(circuit: &Circuit, mode: CompileMode) -> super::CompileResult {
     CompilerWorkflow::new(compile_config(mode))
         .run(circuit)
         .unwrap()
+}
+
+fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowState {
+    let current = Circuit::new(1);
+    WorkflowState {
+        analysis: CircuitAnalysis::analyze(&current),
+        current,
+        changed: false,
+        steps: Vec::new(),
+        target_basis: Some(target_basis),
+    }
 }
 
 fn binding_case(bindings: &[(&'static str, f64)]) -> Option<HashMap<&'static str, f64>> {
@@ -683,6 +695,50 @@ fn routed_swaps_are_lowered_to_device_native_basis() {
 }
 
 #[test]
+fn routed_swaps_are_lowered_to_qcis_native_subset() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q1, q2).unwrap();
+    circuit.cx(q0, q2).unwrap();
+    let device = Device::line("test-device", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::X2P),
+            Instruction::Standard(StandardGate::CZ),
+        ]);
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target_basis: None,
+        device: Some(device),
+        initial_layout: None,
+        resource_policy: ResourcePolicy::default(),
+        seed: Some(7),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    let routing_basis_step = result
+        .steps
+        .iter()
+        .find(|step| step.name == "decompose.routing_basis")
+        .expect("workflow should report routing-basis decomposition");
+    assert!(!routing_basis_step.skipped);
+    assert!(!routing_basis_step.changed);
+    assert!(step_changed(&result, "route.sabre"));
+    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
+        gate,
+        StandardGate::RZ | StandardGate::X2P | StandardGate::CZ
+    )));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+}
+
+#[test]
 fn enhanced_device_workflow_runs_post_routing_cleanup() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
@@ -823,4 +879,38 @@ fn workflow_config_can_build_enhanced_workflow() {
     let workflow = CompilerWorkflow::new(compile_config(CompileMode::Enhanced));
 
     assert_eq!(workflow.config().mode, CompileMode::Enhanced);
+}
+
+#[test]
+fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let target_basis = vec![
+        Instruction::Standard(StandardGate::RZ),
+        Instruction::Standard(StandardGate::X2P),
+        Instruction::Standard(StandardGate::CZ),
+    ];
+    let state = workflow_state_with_target_basis(target_basis.clone());
+
+    for phase in [
+        RewritePhase::PreDecomposition,
+        RewritePhase::PostDecomposition,
+        RewritePhase::PostRouting,
+    ] {
+        let config = workflow.rewrite_config_for_state(phase, &state).unwrap();
+        assert!(config.target_instruction_basis().is_none());
+    }
+
+    let cleanup_config = workflow
+        .rewrite_config_for_state(RewritePhase::TargetCleanup, &state)
+        .unwrap();
+    let cleanup_basis = cleanup_config.target_instruction_basis().unwrap();
+    assert_eq!(cleanup_basis.len(), target_basis.len());
+    assert!(matches!(
+        cleanup_basis.as_slice(),
+        [
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::X2P),
+            Instruction::Standard(StandardGate::CZ)
+        ]
+    ));
 }
