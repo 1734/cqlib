@@ -95,6 +95,13 @@ impl Transformer for LowerToRoutingBasis {
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
     ) -> Result<TransformResult, CompilerError> {
+        if !has_unroutable_gate_like_operation(circuit.operations()) {
+            return Ok(TransformResult {
+                circuit: circuit.clone(),
+                changed: false,
+            });
+        }
+
         let config =
             RewriteConfig::lowering().with_target_instructions(self.routing_pre_basis(circuit)?)?;
         let result = match KnowledgeRewriter::new(config).transform(circuit, analysis) {
@@ -108,6 +115,35 @@ impl Transformer for LowerToRoutingBasis {
         validate_routing_basis_contract(result.circuit.operations())?;
         Ok(result)
     }
+}
+
+fn has_unroutable_gate_like_operation(operations: &[Operation]) -> bool {
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(_)
+            | Instruction::McGate(_)
+            | Instruction::UnitaryGate(_)
+            | Instruction::CircuitGate(_) => {
+                if operation.qubits.len() > 2 {
+                    return true;
+                }
+            }
+            Instruction::ClassicalControl(op) => {
+                let mut found = false;
+                for_each_control_body(op, |body| {
+                    if !found {
+                        found = has_unroutable_gate_like_operation(body.operations());
+                    }
+                });
+                if found {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 fn collect_routable_two_qubit_gates(operations: &[Operation], basis: &mut Vec<StandardGate>) {

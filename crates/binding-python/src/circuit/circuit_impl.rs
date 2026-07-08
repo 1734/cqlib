@@ -19,16 +19,16 @@
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit, PyIntQubitList, PyQubit};
 use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
 use crate::circuit::{
-    PyCircuitGate, PyCircuitId, PyClassicalControlOp, PyClassicalExpr, PyClassicalType,
-    PyClassicalVar, PyMcGate, PyMeasurement, PyParameter, PyStandardGate, PySwitchBuilder,
-    PySymbolicMatrix, PyUnitaryGate, PyValueOperation,
+    PyCircuitDag, PyCircuitGate, PyCircuitId, PyClassicalControlOp, PyClassicalExpr,
+    PyClassicalType, PyClassicalVar, PyMcGate, PyMeasurement, PyParameter, PyStandardGate,
+    PySwitchBuilder, PySymbolicMatrix, PyUnitaryGate, PyValueOperation,
 };
 use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::Instruction;
 use cqlib_core::circuit::symbolic_matrix::circuit_to_symbolic_matrix;
 use cqlib_core::circuit::{
-    Circuit, CircuitError, ClassicalControlOp, ExternalControlScope, ForOp, IfOp, Parameter,
-    ParameterValue, SwitchOp, ValueInstruction, ValueOperation, WhileOp,
+    Circuit, CircuitDag, CircuitError, ClassicalControlOp, ExternalControlScope, ForOp, IfOp,
+    Parameter, ParameterValue, Qubit, SwitchOp, ValueInstruction, ValueOperation, WhileOp,
 };
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
@@ -517,6 +517,13 @@ impl PyCircuit {
             .collect()
     }
 
+    /// Builds the operation dependency DAG analysis view for this circuit.
+    fn dag(&self) -> PyResult<PyCircuitDag> {
+        CircuitDag::from_circuit(&self.inner)
+            .map(PyCircuitDag::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
     /// Returns the circuit depth (longest ASAP path over qubit wires).
     ///
     /// Every instruction node contributes one layer on the qubits it touches.
@@ -548,7 +555,7 @@ impl PyCircuit {
         self.inner
             .append(
                 Instruction::Standard(gate.inner),
-                Vec::<cqlib_core::circuit::Qubit>::from(qubits),
+                Vec::<Qubit>::from(qubits),
                 gate.params.into_iter().map(ParameterValue::from),
                 label.as_deref(),
             )
@@ -566,7 +573,7 @@ impl PyCircuit {
         self.inner
             .append(
                 Instruction::McGate(Box::new(gate.inner)),
-                Vec::<cqlib_core::circuit::Qubit>::from(qubits),
+                Vec::<Qubit>::from(qubits),
                 gate.params.into_iter().map(ParameterValue::from),
                 label.as_deref(),
             )
@@ -873,7 +880,7 @@ impl PyCircuit {
     }
 
     fn delay(&mut self, qubit: PyIntOrQubit, duration: PyParamLike) -> PyResult<()> {
-        let qubit: cqlib_core::circuit::Qubit = qubit.into();
+        let qubit: Qubit = qubit.into();
         self.inner
             .delay(qubit, duration.into_value()?)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
@@ -1058,7 +1065,9 @@ impl PyCircuit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlib_core::circuit::Qubit;
+    use cqlib_core::circuit::{
+        ClassicalExpr, Qubit, StandardGate, UnitaryGate, ValueClassicalControlOp, ValueControlBody,
+    };
 
     #[test]
     fn repr_contains_circuit_identity_and_shape() {
@@ -1084,8 +1093,6 @@ mod tests {
 
     #[test]
     fn xy_family_matches_core_builders() {
-        use cqlib_core::circuit::StandardGate;
-
         let mut circuit = PyCircuit::from(Circuit::new(1));
         circuit
             .xy(PyIntOrQubit::Int(0), PyParamLike::Float(0.1))
@@ -1115,8 +1122,6 @@ mod tests {
 
     #[test]
     fn append_unitary_gate_preserves_parameter_contract() {
-        use cqlib_core::circuit::gate::UnitaryGate;
-
         let mut circuit = PyCircuit::from(Circuit::new(1));
         let gate = PyUnitaryGate::from(UnitaryGate::new("custom", 1, 1));
         circuit
@@ -1138,8 +1143,6 @@ mod tests {
 
     #[test]
     fn append_control_uses_value_level_control_flow() {
-        use cqlib_core::circuit::{ClassicalExpr, ValueClassicalControlOp, ValueControlBody};
-
         let mut circuit = PyCircuit::from(Circuit::new(1));
         circuit
             .append_control(PyClassicalControlOp::from(ValueClassicalControlOp::If {

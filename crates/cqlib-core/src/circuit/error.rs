@@ -230,6 +230,10 @@ pub enum CircuitError {
     #[error("Invalid control flow graph structure: {0}")]
     InvalidControlFlow(String),
 
+    /// Thrown when the circuit dependency DAG has an invalid or inconsistent structure.
+    #[error("Invalid circuit DAG structure: {0}")]
+    InvalidDag(String),
+
     /// Thrown when a classical handle was created by a different circuit.
     #[error("{kind} {index} belongs to another circuit")]
     ForeignClassicalHandle {

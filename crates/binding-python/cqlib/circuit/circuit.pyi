@@ -46,6 +46,7 @@ from .bit import Qubit
 from .classical import CircuitId, ClassicalType, ClassicalVar, Measurement
 from .classical_expr import ClassicalExpr
 from .control_flow import ClassicalControlOp
+from .dag import CircuitDag
 from .gates import CircuitGate, MCGate, StandardGate, UnitaryGate
 from .operation import ValueOperation
 from .parameter import Parameter
@@ -183,6 +184,9 @@ class Circuit:
     @property
     def operations(self) -> list[ValueOperation]:
         """All operations in insertion order."""
+        ...
+    def dag(self) -> CircuitDag:
+        """Build the operation dependency DAG analysis view."""
         ...
     def depth(self, recurse: bool = False) -> int:
         """Return the circuit depth (longest ASAP path over qubit wires).
