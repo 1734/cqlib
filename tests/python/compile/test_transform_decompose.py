@@ -63,9 +63,16 @@ def test_decompose_module_and_types_are_registered() -> None:
 def test_decompose_configs_are_immutable_copyable_values() -> None:
     pauli = TwoQubitUnitaryDecomposeBasis.pauli_rotations()
     cx = TwoQubitUnitaryDecomposeBasis.cx()
+    cy = TwoQubitUnitaryDecomposeBasis.cy()
+    cz = TwoQubitUnitaryDecomposeBasis.cz()
+    rzz = TwoQubitUnitaryDecomposeBasis.rzz()
     assert pauli != cx
+    assert len({pauli, cx, cy, cz, rzz}) == 5
     assert copy.copy(pauli) == pauli
     assert copy.deepcopy(cx) == cx
+    assert repr(cy) == "TwoQubitUnitaryDecomposeBasis.cy()"
+    assert repr(cz) == "TwoQubitUnitaryDecomposeBasis.cz()"
+    assert repr(rzz) == "TwoQubitUnitaryDecomposeBasis.rzz()"
 
     unitary = UnitaryDecomposeConfig(two_qubit_basis=cx, recurse_control_flow=False)
     assert unitary.two_qubit_basis == cx
@@ -213,6 +220,9 @@ def test_numeric_1q_synthesis_reconstructs_matrix_and_phase() -> None:
     [
         TwoQubitUnitaryDecomposeBasis.pauli_rotations(),
         TwoQubitUnitaryDecomposeBasis.cx(),
+        TwoQubitUnitaryDecomposeBasis.cy(),
+        TwoQubitUnitaryDecomposeBasis.cz(),
+        TwoQubitUnitaryDecomposeBasis.rzz(),
     ],
 )
 def test_numeric_2q_synthesis_reconstructs_matrix(basis) -> None:

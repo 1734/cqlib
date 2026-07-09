@@ -44,12 +44,36 @@ impl PyTwoQubitUnitaryDecomposeBasis {
         }
     }
 
+    #[staticmethod]
+    fn cy() -> Self {
+        Self {
+            inner: TwoQubitUnitaryDecomposeBasis::Cy,
+        }
+    }
+
+    #[staticmethod]
+    fn cz() -> Self {
+        Self {
+            inner: TwoQubitUnitaryDecomposeBasis::Cz,
+        }
+    }
+
+    #[staticmethod]
+    fn rzz() -> Self {
+        Self {
+            inner: TwoQubitUnitaryDecomposeBasis::Rzz,
+        }
+    }
+
     fn __repr__(&self) -> &'static str {
         match self.inner {
             TwoQubitUnitaryDecomposeBasis::PauliRotations => {
                 "TwoQubitUnitaryDecomposeBasis.pauli_rotations()"
             }
             TwoQubitUnitaryDecomposeBasis::Cx => "TwoQubitUnitaryDecomposeBasis.cx()",
+            TwoQubitUnitaryDecomposeBasis::Cy => "TwoQubitUnitaryDecomposeBasis.cy()",
+            TwoQubitUnitaryDecomposeBasis::Cz => "TwoQubitUnitaryDecomposeBasis.cz()",
+            TwoQubitUnitaryDecomposeBasis::Rzz => "TwoQubitUnitaryDecomposeBasis.rzz()",
         }
     }
 
