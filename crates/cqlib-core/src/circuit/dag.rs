@@ -135,6 +135,26 @@ impl CircuitDag {
         )
     }
 
+    /// Builds a dependency DAG for a storage-operation slice using `circuit` metadata.
+    ///
+    /// This is a crate-internal analysis hook for compiler passes that optimize a
+    /// top-level operation slice or a control-flow body while keeping parameter
+    /// and classical handles tied to the source circuit.
+    pub(crate) fn from_circuit_operations(
+        circuit: &Circuit,
+        operations: &[Operation],
+    ) -> Result<Self, CircuitError> {
+        Self::from_parts(
+            circuit.qubits().into_iter().collect(),
+            circuit.symbols().clone(),
+            circuit.parameters().clone(),
+            circuit.classical_vars().to_vec(),
+            circuit.classical_values().to_vec(),
+            circuit.global_phase_param().clone(),
+            operations,
+        )
+    }
+
     /// Reconstructs a circuit from this DAG's deterministic topological order.
     ///
     /// # Errors
@@ -1384,7 +1404,7 @@ impl CircuitDag {
         })
     }
 
-    fn operation_order(&self, node: NodeIndex) -> Option<usize> {
+    pub(crate) fn operation_order(&self, node: NodeIndex) -> Option<usize> {
         match self.graph.node_weight(node) {
             Some(DagNode::Operation { order, .. }) => Some(*order),
             _ => None,
@@ -1405,7 +1425,7 @@ impl CircuitDag {
             .ok_or_else(|| CircuitError::InvalidDag(format!("node {:?} is not an operation", node)))
     }
 
-    fn node_for_order(&self, order: usize) -> Option<NodeIndex> {
+    pub(crate) fn node_for_order(&self, order: usize) -> Option<NodeIndex> {
         self.order_to_node.get(order).copied()
     }
 

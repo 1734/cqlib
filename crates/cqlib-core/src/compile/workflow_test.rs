@@ -170,6 +170,7 @@ fn normal_workflow_reports_staged_order() {
             "decompose.unitary",
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
+            "resynthesize.two_qubit_blocks",
             "optimize.post_decomposition",
             "decompose.routing_basis",
             "route.sabre",
@@ -177,9 +178,9 @@ fn normal_workflow_reports_staged_order() {
             "canonicalize.output",
         ]
     );
-    assert!(result.steps[9].skipped);
     assert!(result.steps[10].skipped);
     assert!(result.steps[11].skipped);
+    assert!(result.steps[12].skipped);
 }
 
 #[test]
@@ -209,19 +210,22 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "decompose.unitary",
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
+            "resynthesize.two_qubit_blocks",
             "optimize.post_decomposition",
             "decompose.routing_basis",
             "route.sabre",
+            "resynthesize.two_qubit_blocks.post_routing",
             "optimize.post_routing",
             "translate.target_basis",
             "optimize.target_cleanup",
             "canonicalize.output",
         ]
     );
-    assert!(enhanced.steps[9].skipped);
     assert!(enhanced.steps[10].skipped);
     assert!(enhanced.steps[11].skipped);
     assert!(enhanced.steps[12].skipped);
+    assert!(enhanced.steps[13].skipped);
+    assert!(enhanced.steps[14].skipped);
     assert!(enhanced.circuit.operations().is_empty());
 }
 
@@ -293,6 +297,37 @@ fn workflow_uses_cx_kak_for_cx_target() {
     assert!(!ops.contains(&StandardGate::RXX));
     assert!(!ops.contains(&StandardGate::RYY));
     assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_runs_two_qubit_resynthesis_after_decomposition() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate.clone(), vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "resynthesize.two_qubit_blocks"));
+    assert!(
+        ops.iter().filter(|gate| **gate == StandardGate::CX).count() < 6,
+        "resynthesis should reduce the six-CX decomposition of two SWAPs"
+    );
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
 }
 

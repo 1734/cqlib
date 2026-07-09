@@ -74,6 +74,9 @@ pub use layout::{
     greedy_layout, greedy_layout_prepared, sabre_layout, sabre_layout_prepared, trivial_layout,
     trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
+pub use resynthesis::{
+    ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
+};
 pub use rewrite::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, RewriteConfig, RewriteMode,
     rewrite_circuit,

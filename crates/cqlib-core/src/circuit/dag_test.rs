@@ -1048,7 +1048,7 @@ fn one_qubit_runs_are_collected_per_wire_and_split_by_blockers() {
             matches!(
                 dag.operation(*node).unwrap().instruction,
                 Instruction::Standard(StandardGate::X)
-            ) && dag.operation(*node).unwrap().qubits.as_slice() == &[q(1)]
+            ) && dag.operation(*node).unwrap().qubits.as_slice() == [q(1)]
         })
     }));
 }

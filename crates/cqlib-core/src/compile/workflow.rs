@@ -51,8 +51,8 @@ use crate::compile::transform::decompose::{
 use crate::compile::transform::layout::build_physical_layout_graph;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, KnowledgeRewriter, LayoutObjective, LowerToRoutingBasis,
-    RewriteConfig, TargetBasisLowerer, TransformResult, Transformer, route_sabre,
-    route_with_layout,
+    ResynthesizeTwoQubitBlocks, RewriteConfig, TargetBasisLowerer, TransformResult, Transformer,
+    TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
 };
 
 use super::{CompileConfig, CompileMode, CompileResult};
@@ -167,7 +167,8 @@ impl CompilerWorkflow {
             "optimization",
             "canonicalize.after_decomposition",
             |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
-        )
+        )?;
+        self.apply_two_qubit_resynthesis(state, "optimization", "resynthesize.two_qubit_blocks")
     }
 
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -197,6 +198,7 @@ impl CompilerWorkflow {
     fn lower_physical(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         self.apply_layout_and_routing(state)?;
         if self.config.mode == CompileMode::Enhanced {
+            self.apply_post_routing_resynthesis(state)?;
             self.apply_post_routing_cleanup(state)?;
         }
         Ok(())
@@ -309,6 +311,49 @@ impl CompilerWorkflow {
             "decompose.mc_gates",
             |circuit, analysis| DecomposeMcGates::new(config).transform(circuit, Some(analysis)),
         )
+    }
+
+    fn apply_two_qubit_resynthesis(
+        &self,
+        state: &mut WorkflowState,
+        stage: &'static str,
+        name: &'static str,
+    ) -> Result<(), CompilerError> {
+        let config = self.two_qubit_resynthesis_config_for_state(state);
+        apply_circuit_transform(state, stage, name, |circuit, analysis| {
+            ResynthesizeTwoQubitBlocks::new(config).transform(circuit, Some(analysis))
+        })
+    }
+
+    fn apply_post_routing_resynthesis(
+        &self,
+        state: &mut WorkflowState,
+    ) -> Result<(), CompilerError> {
+        if self.config.device.is_none() {
+            record_skipped(
+                state,
+                "optimization",
+                "resynthesize.two_qubit_blocks.post_routing",
+                "routing was skipped",
+            );
+            return Ok(());
+        }
+        self.apply_two_qubit_resynthesis(
+            state,
+            "optimization",
+            "resynthesize.two_qubit_blocks.post_routing",
+        )
+    }
+
+    fn two_qubit_resynthesis_config_for_state(
+        &self,
+        state: &WorkflowState,
+    ) -> TwoQubitBlockResynthesisConfig {
+        let basis = pick_two_qubit_unitary_basis(state.target_basis.as_deref());
+        match self.config.mode {
+            CompileMode::Normal => TwoQubitBlockResynthesisConfig::normal(basis),
+            CompileMode::Enhanced => TwoQubitBlockResynthesisConfig::enhanced(basis),
+        }
     }
 
     fn apply_routing_basis_decomposition(

@@ -16,9 +16,7 @@
 //! This adapter adds the operation-level shape and per-pass cache needed by
 //! resynthesis collectors, without changing the public commutation API.
 
-#![allow(dead_code)]
-
-use crate::circuit::{Instruction, Operation, Parameter, ValueInstruction, ValueOperation};
+use crate::circuit::{Operation, Parameter, ValueInstruction, ValueOperation};
 use crate::compile::commutation::{CommutationChecker, CommutationConfig};
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -35,6 +33,20 @@ pub(crate) struct OperationView<'a> {
     /// from the source circuit parameter table. This slice is ready to pass
     /// directly to [`CommutationChecker::check`].
     pub(crate) params: SmallVec<[Parameter; 3]>,
+}
+
+impl<'a> OperationView<'a> {
+    pub(crate) fn new(
+        order: usize,
+        operation: &'a Operation,
+        params: SmallVec<[Parameter; 3]>,
+    ) -> Self {
+        Self {
+            order,
+            operation,
+            params,
+        }
+    }
 }
 
 /// Pass-local cached exact commutation queries for source operations.
@@ -64,7 +76,11 @@ impl CachedCommutation {
             return true;
         }
 
-        let key = normalized_pair(lhs.order, rhs.order);
+        let key = if lhs.order <= rhs.order {
+            (lhs.order, rhs.order)
+        } else {
+            (rhs.order, lhs.order)
+        };
         if let Some(result) = self.cache.get(&key) {
             return *result;
         }
@@ -98,7 +114,12 @@ impl CachedCommutation {
     ) -> bool {
         for crossed_op in crossed {
             for replacement in replacements {
-                if !shares_any_qubit(&crossed_op.operation.qubits, &replacement.qubits) {
+                if !crossed_op
+                    .operation
+                    .qubits
+                    .iter()
+                    .any(|qubit| replacement.qubits.contains(qubit))
+                {
                     continue;
                 }
                 if !self.replacement_commutes_with_op(crossed_op, replacement) {
@@ -109,14 +130,36 @@ impl CachedCommutation {
         true
     }
 
+    pub(crate) fn commute_ops_skip_cache(
+        &self,
+        lhs: &OperationView<'_>,
+        rhs: &OperationView<'_>,
+    ) -> bool {
+        if lhs.order == rhs.order {
+            return true;
+        }
+        self.checker
+            .check(
+                &lhs.operation.instruction,
+                &lhs.operation.qubits,
+                &lhs.params,
+                &rhs.operation.instruction,
+                &rhs.operation.qubits,
+                &rhs.params,
+            )
+            .is_some_and(|commutation| !self.exact_only || commutation.is_exact())
+    }
+
     fn replacement_commutes_with_op(
         &self,
         operation: &OperationView<'_>,
         replacement: &ValueOperation,
     ) -> bool {
-        let Some(replacement_instruction) = replacement_instruction(replacement) else {
-            return false;
+        let replacement_instruction = match &replacement.instruction {
+            ValueInstruction::Instruction(instruction) => instruction,
+            ValueInstruction::ClassicalControl(_) => return false,
         };
+
         let replacement_params = replacement
             .params
             .iter()
@@ -136,189 +179,11 @@ impl CachedCommutation {
     }
 
     #[cfg(test)]
-    fn cache_len(&self) -> usize {
+    pub(super) fn cache_len(&self) -> usize {
         self.cache.len()
     }
 }
 
-fn normalized_pair(lhs: usize, rhs: usize) -> (usize, usize) {
-    if lhs <= rhs { (lhs, rhs) } else { (rhs, lhs) }
-}
-
-fn replacement_instruction(replacement: &ValueOperation) -> Option<&Instruction> {
-    match &replacement.instruction {
-        ValueInstruction::Instruction(instruction) => Some(instruction),
-        ValueInstruction::ClassicalControl(_) => None,
-    }
-}
-
-fn shares_any_qubit(lhs: &[crate::circuit::Qubit], rhs: &[crate::circuit::Qubit]) -> bool {
-    lhs.iter().any(|qubit| rhs.contains(qubit))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::circuit::{
-        CircuitParam, Qubit, StandardGate, ValueClassicalControlOp, ValueInstruction,
-        circuit_param::ParameterValue,
-    };
-    use crate::compile::commutation::CommutationConfig;
-    use smallvec::smallvec;
-
-    fn checker() -> CachedCommutation {
-        CachedCommutation::new(CommutationConfig {
-            enable_rule_oracle: true,
-            enable_matrix_fallback: false,
-            max_matrix_qubits: 4,
-        })
-    }
-
-    fn op(gate: StandardGate, qubits: &[Qubit], params: &[f64]) -> Operation {
-        Operation {
-            instruction: Instruction::Standard(gate),
-            qubits: qubits.iter().copied().collect(),
-            params: params.iter().copied().map(CircuitParam::Fixed).collect(),
-            label: None,
-        }
-    }
-
-    fn view<'a>(
-        order: usize,
-        operation: &'a Operation,
-        params: SmallVec<[Parameter; 3]>,
-    ) -> OperationView<'a> {
-        OperationView {
-            order,
-            operation,
-            params,
-        }
-    }
-
-    fn fixed_params(values: &[f64]) -> SmallVec<[Parameter; 3]> {
-        values.iter().copied().map(Parameter::from).collect()
-    }
-
-    #[test]
-    fn disjoint_source_operations_commute() {
-        let h = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let x = op(StandardGate::X, &[Qubit::new(1)], &[]);
-        let h_view = view(0, &h, smallvec![]);
-        let x_view = view(1, &x, smallvec![]);
-
-        assert!(checker().commute_ops(&h_view, &x_view));
-    }
-
-    #[test]
-    fn same_operation_commutes_without_cache_entry() {
-        let h = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let h_view = view(7, &h, smallvec![]);
-        let mut checker = checker();
-
-        assert!(checker.commute_ops(&h_view, &h_view));
-        assert_eq!(checker.cache_len(), 0);
-    }
-
-    #[test]
-    fn symbolic_same_axis_rotations_commute() {
-        let first = op(StandardGate::RZ, &[Qubit::new(0)], &[]);
-        let second = op(StandardGate::RZ, &[Qubit::new(0)], &[]);
-        let first_view = view(0, &first, smallvec![Parameter::symbol("a")]);
-        let second_view = view(1, &second, smallvec![Parameter::symbol("b")]);
-
-        assert!(checker().commute_ops(&first_view, &second_view));
-    }
-
-    #[test]
-    fn same_qubit_h_and_x_do_not_commute() {
-        let h = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let x = op(StandardGate::X, &[Qubit::new(0)], &[]);
-        let h_view = view(0, &h, smallvec![]);
-        let x_view = view(1, &x, smallvec![]);
-
-        assert!(!checker().commute_ops(&h_view, &x_view));
-    }
-
-    #[test]
-    fn reversed_source_query_reuses_normalized_cache_key() {
-        let h = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let x = op(StandardGate::X, &[Qubit::new(1)], &[]);
-        let h_view = view(3, &h, smallvec![]);
-        let x_view = view(9, &x, smallvec![]);
-        let mut checker = checker();
-
-        assert!(checker.commute_ops(&h_view, &x_view));
-        assert_eq!(checker.cache_len(), 1);
-        assert!(checker.commute_ops(&x_view, &h_view));
-        assert_eq!(checker.cache_len(), 1);
-    }
-
-    #[test]
-    fn empty_crossed_or_replacements_are_safe() {
-        let op = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let op_view = view(0, &op, smallvec![]);
-        let replacement = ValueOperation::from_standard(StandardGate::X, [Qubit::new(0)], []);
-        let checker = checker();
-
-        assert!(checker.replacements_commute_with_crossed(&[], &[replacement.clone()]));
-        assert!(checker.replacements_commute_with_crossed(&[&op_view], &[]));
-    }
-
-    #[test]
-    fn disjoint_replacement_commutes_with_crossed_operation() {
-        let crossed = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let crossed_view = view(0, &crossed, smallvec![]);
-        let replacement = ValueOperation::from_standard(StandardGate::X, [Qubit::new(1)], []);
-
-        assert!(checker().replacements_commute_with_crossed(&[&crossed_view], &[replacement]));
-    }
-
-    #[test]
-    fn shared_non_commuting_replacement_is_rejected() {
-        let crossed = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let crossed_view = view(0, &crossed, smallvec![]);
-        let replacement = ValueOperation::from_standard(StandardGate::X, [Qubit::new(0)], []);
-
-        assert!(!checker().replacements_commute_with_crossed(&[&crossed_view], &[replacement]));
-    }
-
-    #[test]
-    fn classical_control_replacement_is_rejected() {
-        let crossed = op(StandardGate::H, &[Qubit::new(0)], &[]);
-        let crossed_view = view(0, &crossed, smallvec![]);
-        let replacement = ValueOperation {
-            instruction: ValueInstruction::ClassicalControl(ValueClassicalControlOp::Break),
-            qubits: smallvec![Qubit::new(0)],
-            params: smallvec![],
-            label: None,
-        };
-
-        assert!(!checker().replacements_commute_with_crossed(&[&crossed_view], &[replacement]));
-    }
-
-    #[test]
-    fn symbolic_parameters_do_not_panic() {
-        let crossed = op(StandardGate::RZ, &[Qubit::new(0)], &[]);
-        let crossed_view = view(0, &crossed, smallvec![Parameter::symbol("theta")]);
-        let replacement = ValueOperation::from_standard(
-            StandardGate::RZ,
-            [Qubit::new(0)],
-            [ParameterValue::Param(Parameter::symbol("phi"))],
-        );
-
-        assert!(checker().replacements_commute_with_crossed(&[&crossed_view], &[replacement]));
-    }
-
-    #[test]
-    fn fixed_replacement_params_bridge_to_checker() {
-        let crossed = op(StandardGate::RZ, &[Qubit::new(0)], &[]);
-        let crossed_view = view(0, &crossed, fixed_params(&[0.25]));
-        let replacement = ValueOperation::from_standard(
-            StandardGate::RZ,
-            [Qubit::new(0)],
-            [ParameterValue::Fixed(0.5)],
-        );
-
-        assert!(checker().replacements_commute_with_crossed(&[&crossed_view], &[replacement]));
-    }
-}
+#[path = "commutation_test.rs"]
+mod commutation_test;
