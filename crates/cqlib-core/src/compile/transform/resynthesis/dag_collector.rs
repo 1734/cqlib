@@ -23,25 +23,60 @@ use super::collector::{
 };
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
-use crate::circuit::{Circuit, CircuitDag, Instruction};
+use crate::circuit::{CircuitDag, CircuitParam, Directive, Instruction, Operation};
 use crate::compile::CompilerError;
+use indexmap::IndexSet;
 use rustworkx_core::petgraph::prelude::NodeIndex;
+use smallvec::SmallVec;
 use std::collections::{HashSet, VecDeque};
 
 pub(super) fn collect_two_qubit_blocks_dag(
-    source: &Circuit,
     ops: &[OperationView<'_>],
     commutation: &mut CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
 ) -> Result<Vec<TwoQubitNumericBlock>, CompilerError> {
-    // TODO: optimize by building the DAG directly from operation views if this
-    // O(n) analysis construction becomes visible in benchmarks.
+    let mut qubits = IndexSet::new();
     let operations = ops
         .iter()
-        .map(|view| view.operation.clone())
+        .map(|view| {
+            qubits.extend(view.operation.qubits.iter().copied());
+
+            // The DAG collector only needs dependency edges. Standard gates
+            // retain their instruction and resolved numeric parameters so the
+            // normal DAG validation path remains active. Non-standard and
+            // classical operations are represented as barriers on the same
+            // qubits: they are hard boundaries for collection, while their
+            // qubit footprint still preserves dependency ordering.
+            if matches!(view.operation.instruction, Instruction::Standard(_)) {
+                Operation {
+                    instruction: view.operation.instruction.clone(),
+                    qubits: view.operation.qubits.clone(),
+                    params: view
+                        .params
+                        .iter()
+                        .map(|param| {
+                            CircuitParam::Fixed(
+                                param
+                                    .evaluate(&None)
+                                    .ok()
+                                    .filter(|value| value.is_finite())
+                                    .unwrap_or(0.0),
+                            )
+                        })
+                        .collect::<SmallVec<[_; 1]>>(),
+                    label: view.operation.label.clone(),
+                }
+            } else {
+                Operation {
+                    instruction: Instruction::Directive(Directive::Barrier),
+                    qubits: view.operation.qubits.clone(),
+                    params: SmallVec::new(),
+                    label: view.operation.label.clone(),
+                }
+            }
+        })
         .collect::<Vec<_>>();
-    let dag =
-        CircuitDag::from_circuit_operations(source, &operations).map_err(CompilerError::Circuit)?;
+    let dag = CircuitDag::from_operations(qubits, &operations).map_err(CompilerError::Circuit)?;
 
     let mut blocks = Vec::new();
     for anchor in 0..ops.len() {
@@ -141,7 +176,9 @@ fn collect_dag_direction(
             }
             builder.add_matched(order);
             accepted.insert(order);
-            push_neighbors(&mut frontier, dag, node, direction);
+            for neighbor in sorted_neighbors(dag, node, direction) {
+                frontier.push_back(neighbor);
+            }
             continue;
         }
 
@@ -151,10 +188,19 @@ fn collect_dag_direction(
         }
         builder.add_crossed(order);
         accepted.insert(order);
-        push_neighbors(&mut frontier, dag, node, direction);
+        for neighbor in sorted_neighbors(dag, node, direction) {
+            frontier.push_back(neighbor);
+        }
     }
 }
 
+/// Ensures a candidate's intervening DAG dependencies have already been
+/// accepted into this block expansion.
+///
+/// For right expansion this means every predecessor between the anchor and the
+/// candidate has been matched or crossed. For left expansion the same condition
+/// is applied to successors. This prevents the collector from jumping over a
+/// non-commuting dependency just because it is not adjacent in source order.
 fn dependencies_are_accepted(
     dag: &CircuitDag,
     node: NodeIndex,
@@ -178,17 +224,10 @@ fn dependencies_are_accepted(
     })
 }
 
-fn push_neighbors(
-    frontier: &mut VecDeque<NodeIndex>,
-    dag: &CircuitDag,
-    node: NodeIndex,
-    direction: Direction,
-) {
-    for neighbor in sorted_neighbors(dag, node, direction) {
-        frontier.push_back(neighbor);
-    }
-}
-
+/// Returns operation neighbors in deterministic source order.
+///
+/// Left expansion visits larger source orders first while moving backward, and
+/// right expansion visits smaller source orders first while moving forward.
 fn sorted_neighbors(dag: &CircuitDag, node: NodeIndex, direction: Direction) -> Vec<NodeIndex> {
     let mut neighbors = match direction {
         Direction::Left => dag.predecessors(node).collect::<Vec<_>>(),

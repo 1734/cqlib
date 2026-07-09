@@ -18,9 +18,9 @@
 //! fresh circuit. Rebuilding from a flat sequence avoids fragile in-place DAG
 //! surgery while preserving source operations that are not part of a patch.
 
-use super::collector::collect_two_qubit_blocks;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
+use super::dag_collector::collect_two_qubit_blocks_dag;
 use super::selector::{BlockPatch, select_patches};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
@@ -134,7 +134,7 @@ impl<'a> ResynthesisPass<'a> {
     ) -> Result<SequenceRewrite, CompilerError> {
         let views = self.build_views(operations)?;
         let mut commutation = CachedCommutation::new(self.config.commutation.clone());
-        let blocks = collect_two_qubit_blocks(self.source, &views, &mut commutation, &self.config)?;
+        let blocks = collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?;
         let patches = select_patches(blocks, &views, &commutation, &self.config)?;
 
         if patches.is_empty() {
@@ -164,25 +164,23 @@ impl<'a> ResynthesisPass<'a> {
                 let params = operation
                     .params
                     .iter()
-                    .map(|param| self.resolve_parameter(param))
+                    .map(|param| match param {
+                        CircuitParam::Fixed(value) => Ok(Parameter::from(*value)),
+                        CircuitParam::Index(index) => self
+                            .source
+                            .parameters()
+                            .get_index(*index as usize)
+                            .cloned()
+                            .ok_or_else(|| {
+                                CompilerError::InvalidInput(format!(
+                                    "missing parameter index {index}"
+                                ))
+                            }),
+                    })
                     .collect::<Result<smallvec::SmallVec<[_; 3]>, _>>()?;
                 Ok(OperationView::new(order, operation, params))
             })
             .collect()
-    }
-
-    fn resolve_parameter(&self, param: &CircuitParam) -> Result<Parameter, CompilerError> {
-        match param {
-            CircuitParam::Fixed(value) => Ok(Parameter::from(*value)),
-            CircuitParam::Index(index) => self
-                .source
-                .parameters()
-                .get_index(*index as usize)
-                .cloned()
-                .ok_or_else(|| {
-                    CompilerError::InvalidInput(format!("missing parameter index {index}"))
-                }),
-        }
     }
 
     fn preserve_sequence(

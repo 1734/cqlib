@@ -2,10 +2,9 @@ use super::{CircuitDag, DagControlFlow, DagNode, DagWire};
 use crate::circuit::Parameter;
 use crate::circuit::{
     Circuit, CircuitError, CircuitParam, ClassicalControlOp, ClassicalDataOp, ClassicalExpr,
-    ClassicalType, ControlBody, IfOp, Instruction, Operation, ParameterValue, Qubit, StandardGate,
-    ValueInstruction, ValueOperation,
+    ClassicalType, Directive, Instruction, Operation, ParameterValue, Qubit, StandardGate,
+    ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
 };
-use indexmap::IndexSet;
 use proptest::prelude::*;
 use rustworkx_core::petgraph::visit::EdgeRef;
 use smallvec::smallvec;
@@ -39,22 +38,6 @@ fn store_op(target: crate::circuit::ClassicalVar, value: ClassicalExpr) -> Opera
         params: smallvec![],
         label: None,
     }
-}
-
-fn dag_from_ops_with_bool_var(
-    var: crate::circuit::ClassicalVar,
-    operations: &[Operation],
-) -> CircuitDag {
-    CircuitDag::from_parts(
-        vec![q(0)].into_iter().collect(),
-        IndexSet::new(),
-        IndexSet::new(),
-        vec![var.ty()],
-        vec![],
-        CircuitParam::Fixed(0.0),
-        operations,
-    )
-    .unwrap()
 }
 
 /// Returns the instruction of the node at `index` in topological order.
@@ -163,6 +146,73 @@ fn symbolic_parameter_round_trips() {
     };
     let recovered_param = recovered.parameters().get_index(index as usize).unwrap();
     assert!(recovered_param.get_symbols().contains("theta"));
+}
+
+#[test]
+fn from_operations_builds_self_contained_fixed_param_dag() {
+    let op = Operation {
+        instruction: Instruction::Standard(StandardGate::RZ),
+        qubits: smallvec![q(0)],
+        params: smallvec![CircuitParam::Fixed(0.25)],
+        label: None,
+    };
+
+    let dag = CircuitDag::from_operations([q(0)], &[op]).unwrap();
+
+    assert_eq!(dag.num_ops(), 1);
+    assert_eq!(dag.parameters().len(), 0);
+}
+
+#[test]
+fn from_operations_rejects_indexed_parameter() {
+    let op = Operation {
+        instruction: Instruction::Standard(StandardGate::RZ),
+        qubits: smallvec![q(0)],
+        params: smallvec![CircuitParam::Index(0)],
+        label: None,
+    };
+
+    let error = CircuitDag::from_operations([q(0)], &[op]).unwrap_err();
+
+    assert!(matches!(error, CircuitError::InvalidParameterIndex(0)));
+}
+
+#[test]
+fn from_operations_rejects_duplicate_qubits() {
+    let error = CircuitDag::from_operations([q(0), q(0)], &[]).unwrap_err();
+
+    assert!(matches!(error, CircuitError::DuplicateQubits));
+}
+
+#[test]
+fn from_operations_rejects_external_classical_handle() {
+    let mut source = Circuit::new(1);
+    let flag = source.var(ClassicalType::Bool);
+    let op = store_op(flag, ClassicalExpr::bool_literal(true));
+
+    let error = CircuitDag::from_operations([q(0)], &[op]).unwrap_err();
+
+    assert!(matches!(error, CircuitError::ForeignClassicalHandle { .. }));
+}
+
+#[test]
+fn from_operations_empty_barrier_synchronizes_all_qubits() {
+    let operations = vec![
+        h_op(q(0)),
+        Operation {
+            instruction: Instruction::Directive(Directive::Barrier),
+            qubits: smallvec![],
+            params: smallvec![],
+            label: None,
+        },
+        x_op(q(1)),
+    ];
+
+    let dag = CircuitDag::from_operations([q(0), q(1)], &operations).unwrap();
+    let nodes = dag.topological_op_nodes().unwrap();
+
+    assert!(op_predecessors(&dag, nodes[1]).contains(&nodes[0]));
+    assert!(op_predecessors(&dag, nodes[2]).contains(&nodes[1]));
 }
 
 #[test]
@@ -1155,29 +1205,54 @@ fn substitute_node_with_dag_uses_original_dag_for_empty_barrier_footprint() {
 fn substitute_node_with_dag_rejects_classical_write_outside_old_write_footprint() {
     let mut circuit = Circuit::new(1);
     let flag = circuit.var(ClassicalType::Bool);
-    let old = Operation {
-        instruction: Instruction::ClassicalControl(ClassicalControlOp::If(
-            IfOp::new(flag.expr(), ControlBody::new(vec![h_op(q(0))]), None).unwrap(),
-        )),
-        qubits: smallvec![],
-        params: smallvec![],
-        label: None,
-    };
-    let replacement = Operation {
-        instruction: Instruction::ClassicalControl(ClassicalControlOp::If(
-            IfOp::new(
-                flag.expr(),
-                ControlBody::new(vec![store_op(flag, ClassicalExpr::bool_literal(true))]),
-                None,
-            )
-            .unwrap(),
-        )),
-        qubits: smallvec![],
-        params: smallvec![],
-        label: None,
-    };
-    let mut dag = dag_from_ops_with_bool_var(flag, &[old]);
-    let replacement_dag = dag_from_ops_with_bool_var(flag, &[replacement]);
+    let old_circuit = Circuit::from_operations(
+        vec![q(0)],
+        vec![ValueOperation {
+            instruction: ValueInstruction::ClassicalControl(ValueClassicalControlOp::If {
+                condition: flag.expr(),
+                then_body: ValueControlBody::new(vec![ValueOperation::from_standard(
+                    StandardGate::H,
+                    [q(0)],
+                    [],
+                )]),
+                else_body: None,
+            }),
+            qubits: smallvec![q(0)],
+            params: smallvec![],
+            label: None,
+        }],
+        Some(vec![flag.ty()]),
+        None,
+    )
+    .unwrap();
+    let replacement_circuit = Circuit::from_operations(
+        vec![q(0)],
+        vec![ValueOperation {
+            instruction: ValueInstruction::ClassicalControl(ValueClassicalControlOp::If {
+                condition: flag.expr(),
+                then_body: ValueControlBody::new(vec![ValueOperation {
+                    instruction: ValueInstruction::from_instruction(Instruction::ClassicalData(
+                        ClassicalDataOp::Store {
+                            target: flag,
+                            value: ClassicalExpr::bool_literal(true),
+                        },
+                    )),
+                    qubits: smallvec![],
+                    params: smallvec![],
+                    label: None,
+                }]),
+                else_body: None,
+            }),
+            qubits: smallvec![],
+            params: smallvec![],
+            label: None,
+        }],
+        Some(vec![flag.ty()]),
+        None,
+    )
+    .unwrap();
+    let mut dag = CircuitDag::from_circuit(&old_circuit).unwrap();
+    let replacement_dag = CircuitDag::from_circuit(&replacement_circuit).unwrap();
 
     let node = dag.topological_op_nodes().unwrap()[0];
     let error = dag

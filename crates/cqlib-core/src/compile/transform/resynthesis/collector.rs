@@ -20,10 +20,15 @@
 
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
-use super::dag_collector::collect_two_qubit_blocks_dag;
-use crate::circuit::{Circuit, Instruction, Qubit, StandardGate};
-use crate::compile::CompilerError;
+use crate::circuit::{Instruction, Qubit, StandardGate};
 
+/// Dependency-closed operation block that can be converted into a 4x4 unitary.
+///
+/// `matched_orders` are the source operations consumed by numerical synthesis.
+/// `crossed_orders` are source operations skipped during collection and emitted
+/// unchanged at their original source positions. The selector later verifies
+/// that synthesized replacement operations still commute with every crossed
+/// operation before accepting a patch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TwoQubitNumericBlock {
     /// Canonical qubit order used for matrix construction and synthesis.
@@ -60,15 +65,11 @@ impl TwoQubitNumericBlock {
     }
 }
 
-pub(crate) fn collect_two_qubit_blocks(
-    source: &Circuit,
-    ops: &[OperationView<'_>],
-    commutation: &mut CachedCommutation,
-    config: &TwoQubitBlockResynthesisConfig,
-) -> Result<Vec<TwoQubitNumericBlock>, CompilerError> {
-    collect_two_qubit_blocks_dag(source, ops, commutation, config)
-}
-
+/// Mutable state for one anchor expansion.
+///
+/// The builder keeps positions rather than cloned operations so all
+/// commutation checks and later synthesis use the same resolved
+/// [`OperationView`] table.
 pub(super) struct BlockBuilder<'a> {
     pub(super) qubits: [Qubit; 2],
     matched_positions: Vec<usize>,
@@ -102,6 +103,12 @@ impl<'a> BlockBuilder<'a> {
         self.crossed_positions.push(position);
     }
 
+    /// Returns whether a same-block candidate can be inserted after already
+    /// crossed operations.
+    ///
+    /// This check is intentionally uncached: these checks are tied to one
+    /// partially built block and are not repeated as heavily as source/source
+    /// crossing checks.
     pub(super) fn can_add_candidate(
         &self,
         candidate: usize,
@@ -115,6 +122,8 @@ impl<'a> BlockBuilder<'a> {
         })
     }
 
+    /// Returns whether `skipped` can be crossed by all matched block
+    /// operations collected so far.
     pub(super) fn can_cross(
         &mut self,
         skipped: usize,

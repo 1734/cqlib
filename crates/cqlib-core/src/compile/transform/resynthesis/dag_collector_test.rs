@@ -53,7 +53,7 @@ fn dag_collector_collects_simple_linear_block() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config()).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
 
     assert!(
         blocks
@@ -74,7 +74,7 @@ fn dag_collector_ignores_disjoint_source_order_interleaving() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config()).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
 
     let block = blocks
         .iter()
@@ -94,7 +94,7 @@ fn shared_commuting_operation_can_be_crossed() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config()).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
 
     assert!(
         blocks
@@ -114,7 +114,7 @@ fn shared_non_commuting_operation_blocks_dag_expansion() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config()).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
 
     assert!(
         !blocks
@@ -134,7 +134,7 @@ fn boundary_stops_dag_expansion() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config()).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
 
     assert!(
         !blocks
@@ -157,7 +157,7 @@ fn dag_scan_span_counts_visited_operation_nodes_per_direction() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config).unwrap();
 
     assert!(
         !blocks
@@ -179,7 +179,7 @@ fn crossed_budget_bounds_dag_collection() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config).unwrap();
 
     assert!(
         !blocks
@@ -202,7 +202,7 @@ fn block_size_budget_bounds_dag_collection() {
     let views = views(&circuit);
     let mut checker = checker();
 
-    let blocks = collect_two_qubit_blocks_dag(&circuit, &views, &mut checker, &config).unwrap();
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config).unwrap();
 
     assert!(blocks.iter().all(|block| block.matched_orders.len() <= 2));
 }

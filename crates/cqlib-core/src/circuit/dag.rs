@@ -112,47 +112,78 @@ pub struct CircuitDag {
     node_layers_cache: OnceLock<IndexMap<NodeIndex, usize>>,
 }
 
-struct DagParts {
-    qubits: IndexSet<Qubit>,
-    symbols: IndexSet<String>,
-    parameters: IndexSet<Parameter>,
-    classical_vars: Vec<ClassicalType>,
-    classical_values: Vec<ClassicalType>,
-    global_phase: CircuitParam,
-}
-
 impl CircuitDag {
     /// Builds a dependency DAG from a circuit.
     pub fn from_circuit(circuit: &Circuit) -> Result<Self, CircuitError> {
-        Self::from_parts(
-            circuit.qubits().into_iter().collect(),
-            circuit.symbols().clone(),
-            circuit.parameters().clone(),
-            circuit.classical_vars().to_vec(),
-            circuit.classical_values().to_vec(),
-            circuit.global_phase_param().clone(),
-            circuit.operations(),
-        )
+        let mut dag = Self {
+            qubits: circuit.qubits().into_iter().collect(),
+            symbols: circuit.symbols().clone(),
+            parameters: circuit.parameters().clone(),
+            classical_vars: circuit.classical_vars().to_vec(),
+            classical_values: circuit.classical_values().to_vec(),
+            global_phase: circuit.global_phase_param().clone(),
+            graph: StableDiGraph::new(),
+            wire_io: IndexMap::new(),
+            control_flow: HashMap::new(),
+            order_to_node: Vec::with_capacity(circuit.operations().len()),
+            topological_op_nodes_cache: OnceLock::new(),
+            node_layers_cache: OnceLock::new(),
+        };
+        dag.initialize_wires();
+        dag.add_operations(circuit.operations())?;
+        dag.validate()?;
+        Ok(dag)
     }
 
-    /// Builds a dependency DAG for a storage-operation slice using `circuit` metadata.
+    /// Builds a dependency DAG from a self-contained operation slice.
     ///
-    /// This is a crate-internal analysis hook for compiler passes that optimize a
-    /// top-level operation slice or a control-flow body while keeping parameter
-    /// and classical handles tied to the source circuit.
-    pub(crate) fn from_circuit_operations(
-        circuit: &Circuit,
+    /// This is the narrow constructor for pass-local analysis when the caller
+    /// already owns an operation stream and only needs quantum dependency
+    /// structure. It deliberately does not accept parameter tables, classical
+    /// declarations, or a global phase: every operation must be valid against
+    /// exactly the supplied qubit set and must be independent of external
+    /// circuit metadata.
+    ///
+    /// Use [`CircuitDag::from_circuit`] when the operation stream contains
+    /// indexed parameters, classical variables/values, control-flow bodies, or
+    /// any other resource that belongs to a full [`Circuit`]. Analysis passes
+    /// that intentionally ignore those resources should normalize them before
+    /// calling this constructor, for example by resolving parameters and
+    /// replacing non-quantum operations with dependency barriers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `qubits` contains duplicates, an operation
+    /// references a qubit outside that set, or the operation slice is not
+    /// self-contained.
+    pub fn from_operations(
+        qubits: impl IntoIterator<Item = Qubit>,
         operations: &[Operation],
     ) -> Result<Self, CircuitError> {
-        Self::from_parts(
-            circuit.qubits().into_iter().collect(),
-            circuit.symbols().clone(),
-            circuit.parameters().clone(),
-            circuit.classical_vars().to_vec(),
-            circuit.classical_values().to_vec(),
-            circuit.global_phase_param().clone(),
-            operations,
-        )
+        let mut qubit_set = IndexSet::new();
+        for qubit in qubits {
+            if !qubit_set.insert(qubit) {
+                return Err(CircuitError::DuplicateQubits);
+            }
+        }
+        let mut dag = Self {
+            qubits: qubit_set,
+            symbols: IndexSet::new(),
+            parameters: IndexSet::new(),
+            classical_vars: Vec::new(),
+            classical_values: Vec::new(),
+            global_phase: CircuitParam::Fixed(0.0),
+            graph: StableDiGraph::new(),
+            wire_io: IndexMap::new(),
+            control_flow: HashMap::new(),
+            order_to_node: Vec::with_capacity(operations.len()),
+            topological_op_nodes_cache: OnceLock::new(),
+            node_layers_cache: OnceLock::new(),
+        };
+        dag.initialize_wires();
+        dag.add_operations(operations)?;
+        dag.validate()?;
+        Ok(dag)
     }
 
     /// Reconstructs a circuit from this DAG's deterministic topological order.
@@ -780,56 +811,6 @@ impl CircuitDag {
         self.rebuild_from_operations(&operations)
     }
 
-    fn from_parts(
-        qubits: IndexSet<Qubit>,
-        symbols: IndexSet<String>,
-        parameters: IndexSet<Parameter>,
-        classical_vars: Vec<ClassicalType>,
-        classical_values: Vec<ClassicalType>,
-        global_phase: CircuitParam,
-        operations: &[Operation],
-    ) -> Result<Self, CircuitError> {
-        Self::from_parts_with_validation(
-            DagParts {
-                qubits,
-                symbols,
-                parameters,
-                classical_vars,
-                classical_values,
-                global_phase,
-            },
-            operations,
-            true,
-        )
-    }
-
-    fn from_parts_with_validation(
-        parts: DagParts,
-        operations: &[Operation],
-        validate: bool,
-    ) -> Result<Self, CircuitError> {
-        let mut dag = Self {
-            qubits: parts.qubits,
-            symbols: parts.symbols,
-            parameters: parts.parameters,
-            classical_vars: parts.classical_vars,
-            classical_values: parts.classical_values,
-            global_phase: parts.global_phase,
-            graph: StableDiGraph::new(),
-            wire_io: IndexMap::new(),
-            control_flow: HashMap::new(),
-            order_to_node: Vec::with_capacity(operations.len()),
-            topological_op_nodes_cache: OnceLock::new(),
-            node_layers_cache: OnceLock::new(),
-        };
-        dag.initialize_wires();
-        dag.add_operations(operations)?;
-        if validate {
-            dag.validate()?;
-        }
-        Ok(dag)
-    }
-
     fn initialize_wires(&mut self) {
         let mut wires = Vec::new();
         wires.push(DagWire::GlobalOrder);
@@ -915,18 +896,25 @@ impl CircuitDag {
         operations: &[Operation],
         validate: bool,
     ) -> Result<(), CircuitError> {
-        let rebuilt = Self::from_parts_with_validation(
-            DagParts {
-                qubits: self.qubits.clone(),
-                symbols: self.symbols.clone(),
-                parameters: self.parameters.clone(),
-                classical_vars: self.classical_vars.clone(),
-                classical_values: self.classical_values.clone(),
-                global_phase: self.global_phase.clone(),
-            },
-            operations,
-            validate,
-        )?;
+        let mut rebuilt = Self {
+            qubits: self.qubits.clone(),
+            symbols: self.symbols.clone(),
+            parameters: self.parameters.clone(),
+            classical_vars: self.classical_vars.clone(),
+            classical_values: self.classical_values.clone(),
+            global_phase: self.global_phase.clone(),
+            graph: StableDiGraph::new(),
+            wire_io: IndexMap::new(),
+            control_flow: HashMap::new(),
+            order_to_node: Vec::with_capacity(operations.len()),
+            topological_op_nodes_cache: OnceLock::new(),
+            node_layers_cache: OnceLock::new(),
+        };
+        rebuilt.initialize_wires();
+        rebuilt.add_operations(operations)?;
+        if validate {
+            rebuilt.validate()?;
+        }
         *self = rebuilt;
         Ok(())
     }
@@ -938,17 +926,25 @@ impl CircuitDag {
         let Instruction::ClassicalControl(control) = &operation.instruction else {
             return Ok(None);
         };
-        let build_body = |ops: &[Operation]| {
-            Self::from_parts(
-                self.qubits.clone(),
-                self.symbols.clone(),
-                self.parameters.clone(),
-                self.classical_vars.clone(),
-                self.classical_values.clone(),
-                self.global_phase.clone(),
-                ops,
-            )
-            .map(Box::new)
+        let build_body = |ops: &[Operation]| -> Result<Box<CircuitDag>, CircuitError> {
+            let mut dag = Self {
+                qubits: self.qubits.clone(),
+                symbols: self.symbols.clone(),
+                parameters: self.parameters.clone(),
+                classical_vars: self.classical_vars.clone(),
+                classical_values: self.classical_values.clone(),
+                global_phase: self.global_phase.clone(),
+                graph: StableDiGraph::new(),
+                wire_io: IndexMap::new(),
+                control_flow: HashMap::new(),
+                order_to_node: Vec::with_capacity(ops.len()),
+                topological_op_nodes_cache: OnceLock::new(),
+                node_layers_cache: OnceLock::new(),
+            };
+            dag.initialize_wires();
+            dag.add_operations(ops)?;
+            dag.validate()?;
+            Ok(Box::new(dag))
         };
 
         Ok(Some(match control {
