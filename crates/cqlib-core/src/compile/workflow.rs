@@ -39,12 +39,14 @@
 //! and the output canonicalizer removes representation noise introduced by
 //! previous stages.
 
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, StandardGate};
 use crate::compile::CompilerError;
 use crate::compile::resource::ResourceLimits;
 use crate::compile::sabre::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
+use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
 use crate::compile::transform::decompose::{
     DecomposeDefinitions, DecomposeMcGates, DecomposeUnitaries, McGateDecomposeConfig,
+    UnitaryDecomposeConfig,
 };
 use crate::compile::transform::layout::build_physical_layout_graph;
 use crate::compile::transform::{
@@ -283,12 +285,20 @@ impl CompilerWorkflow {
     }
 
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        let config = self.unitary_decompose_config_for_state(state);
         apply_circuit_transform(
             state,
             "translation",
             "decompose.unitary",
-            |circuit, analysis| DecomposeUnitaries::default().transform(circuit, Some(analysis)),
+            |circuit, analysis| DecomposeUnitaries::new(config).transform(circuit, Some(analysis)),
         )
+    }
+
+    fn unitary_decompose_config_for_state(&self, state: &WorkflowState) -> UnitaryDecomposeConfig {
+        UnitaryDecomposeConfig {
+            two_qubit_basis: pick_two_qubit_unitary_basis(state.target_basis.as_deref()),
+            ..Default::default()
+        }
     }
 
     fn apply_mc_gate_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -581,6 +591,46 @@ fn record_skipped(
         skipped: true,
         reason: Some(reason.into()),
     });
+}
+
+fn pick_two_qubit_unitary_basis(
+    target_basis: Option<&[Instruction]>,
+) -> TwoQubitUnitaryDecomposeBasis {
+    let Some(target_basis) = target_basis else {
+        return TwoQubitUnitaryDecomposeBasis::PauliRotations;
+    };
+
+    // Until per-edge error and duration data participate in unitary synthesis,
+    // target-basis order is the only explicit preference signal available for
+    // locally equivalent controlled-Pauli backends.
+    if let Some(basis) = target_basis
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::Standard(StandardGate::CX) => Some(TwoQubitUnitaryDecomposeBasis::Cx),
+            Instruction::Standard(StandardGate::CY) => Some(TwoQubitUnitaryDecomposeBasis::Cy),
+            Instruction::Standard(StandardGate::CZ) => Some(TwoQubitUnitaryDecomposeBasis::Cz),
+            _ => None,
+        })
+    {
+        return basis;
+    }
+
+    let has_rxx = target_basis
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Standard(StandardGate::RXX)));
+    let has_ryy = target_basis
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Standard(StandardGate::RYY)));
+    let has_rzz = target_basis
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Standard(StandardGate::RZZ)));
+
+    if has_rzz && !has_rxx && !has_ryy {
+        // RZZ-only native devices are common enough to justify direct emission.
+        TwoQubitUnitaryDecomposeBasis::Rzz
+    } else {
+        TwoQubitUnitaryDecomposeBasis::PauliRotations
+    }
 }
 
 fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {

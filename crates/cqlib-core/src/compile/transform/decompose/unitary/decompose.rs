@@ -815,6 +815,98 @@ mod tests {
     }
 
     #[test]
+    fn decomposes_numeric_2q_unitary_gate_with_cz_backend() {
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let gate = UnitaryGate::new("custom_2q", 2, 0)
+            .with_matrix(matrix)
+            .unwrap();
+        let mut circuit = Circuit::new(2);
+        circuit
+            .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+            .unwrap();
+        let config = UnitaryDecomposeConfig {
+            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Cz,
+            ..Default::default()
+        };
+
+        let before = circuit_to_matrix(&circuit, None).unwrap();
+        let decomposed = decompose_unitaries(&circuit, config).unwrap();
+        let after = circuit_to_matrix(&decomposed, None).unwrap();
+
+        assert!(decomposed.operations().iter().all(|operation| matches!(
+            operation.instruction,
+            Instruction::Standard(StandardGate::U) | Instruction::Standard(StandardGate::CZ)
+        )));
+        assert_abs_diff_eq!(before, after, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn decomposes_numeric_2q_unitary_gate_with_cy_backend() {
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let gate = UnitaryGate::new("custom_2q", 2, 0)
+            .with_matrix(matrix)
+            .unwrap();
+        let mut circuit = Circuit::new(2);
+        circuit
+            .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+            .unwrap();
+        let config = UnitaryDecomposeConfig {
+            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Cy,
+            ..Default::default()
+        };
+
+        let before = circuit_to_matrix(&circuit, None).unwrap();
+        let decomposed = decompose_unitaries(&circuit, config).unwrap();
+        let after = circuit_to_matrix(&decomposed, None).unwrap();
+
+        assert!(decomposed.operations().iter().all(|operation| matches!(
+            operation.instruction,
+            Instruction::Standard(StandardGate::U) | Instruction::Standard(StandardGate::CY)
+        )));
+        assert_abs_diff_eq!(before, after, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn decomposes_numeric_2q_unitary_gate_with_rzz_backend() {
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let gate = UnitaryGate::new("custom_2q", 2, 0)
+            .with_matrix(matrix)
+            .unwrap();
+        let mut circuit = Circuit::new(2);
+        circuit
+            .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+            .unwrap();
+        let config = UnitaryDecomposeConfig {
+            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Rzz,
+            ..Default::default()
+        };
+
+        let before = circuit_to_matrix(&circuit, None).unwrap();
+        let decomposed = decompose_unitaries(&circuit, config).unwrap();
+        let after = circuit_to_matrix(&decomposed, None).unwrap();
+
+        assert!(decomposed.operations().iter().all(|operation| matches!(
+            operation.instruction,
+            Instruction::Standard(StandardGate::U)
+                | Instruction::Standard(StandardGate::H)
+                | Instruction::Standard(StandardGate::RX)
+                | Instruction::Standard(StandardGate::RZZ)
+        )));
+        assert_eq!(
+            decomposed
+                .operations()
+                .iter()
+                .filter(|operation| matches!(
+                    operation.instruction,
+                    Instruction::Standard(StandardGate::RZZ)
+                ))
+                .count(),
+            3
+        );
+        assert_abs_diff_eq!(before, after, epsilon = 1e-8);
+    }
+
+    #[test]
     fn remaps_preserved_top_level_operation_parameters() {
         let mut circuit = Circuit::new(2);
         circuit.add_parameter(Parameter::symbol("unused"));

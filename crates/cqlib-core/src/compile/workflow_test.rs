@@ -265,6 +265,232 @@ fn workflow_synthesizes_matrix_backed_unitary_gates() {
 }
 
 #[test]
+fn workflow_uses_cx_kak_for_cx_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CX).count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_cz_kak_for_cz_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CZ).count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_cy_kak_for_cy_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CY),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CY).count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_rzz_kak_for_rzz_only_entangler_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::RX),
+            Instruction::Standard(StandardGate::RZZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert_eq!(
+        ops.iter()
+            .filter(|gate| **gate == StandardGate::RZZ)
+            .count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_keeps_pauli_kak_for_full_ising_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::RXX),
+            Instruction::Standard(StandardGate::RYY),
+            Instruction::Standard(StandardGate::RZZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(ops.contains(&StandardGate::RXX));
+    assert!(ops.contains(&StandardGate::RYY));
+    assert!(ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_keeps_pauli_kak_for_partial_ising_target() {
+    let rxx = StandardGate::RXX.matrix(&[0.7]).unwrap().into_owned();
+    let ryy = StandardGate::RYY.matrix(&[-0.4]).unwrap().into_owned();
+    let matrix = rxx.dot(&ryy);
+    let gate = UnitaryGate::new("PARTIAL_ISING_MATRIX", 2, 0)
+        .with_matrix(matrix)
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target_basis: Some(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::RX),
+            Instruction::Standard(StandardGate::RXX),
+            Instruction::Standard(StandardGate::RZZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(ops.contains(&StandardGate::RXX));
+    assert!(ops.contains(&StandardGate::RZZ));
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_keeps_pauli_kak_without_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+    let ops = standard_ops(&result.circuit);
+
+    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(
+        ops.contains(&StandardGate::RXX)
+            || ops.contains(&StandardGate::RYY)
+            || ops.contains(&StandardGate::RZZ)
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
 fn workflow_decomposes_multi_controlled_gates() {
     let qubits = (0..4).map(Qubit::new).collect::<Vec<_>>();
     let mut circuit = Circuit::new(4);
