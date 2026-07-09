@@ -57,6 +57,7 @@ pub mod canonicalize;
 pub mod decompose;
 pub mod layout;
 pub mod rebuild;
+pub mod resynthesis;
 pub mod rewrite;
 pub mod routing;
 pub mod routing_basis;
