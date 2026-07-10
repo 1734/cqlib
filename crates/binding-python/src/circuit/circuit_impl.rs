@@ -867,6 +867,11 @@ impl PyCircuit {
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
+    /// Inserts a compiler barrier.
+    ///
+    /// A non-empty list constrains optimization and reordering on exactly those qubits. An empty
+    /// list creates a global barrier over every qubit in this circuit. Barriers have no physical
+    /// effect on the quantum state.
     fn barrier(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
         self.inner
             .barrier(qubits.into())

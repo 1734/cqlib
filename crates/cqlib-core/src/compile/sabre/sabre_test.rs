@@ -12,8 +12,8 @@
 
 use super::*;
 use crate::circuit::{
-    Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Instruction,
-    Operation, Parameter, ParameterValue, Qubit, StandardGate,
+    Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Directive,
+    Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::CompilerError;
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit, Topology};
@@ -106,6 +106,35 @@ fn route_keeps_adjacent_two_qubit_gate_without_swap() {
         result.final_layout.get_physical(LogicalQubit::new(0)),
         Some(PhysicalQubit::new(0))
     );
+}
+
+#[test]
+fn route_preserves_empty_barrier_as_global_ordering_boundary() {
+    let q0 = Qubit::new(0);
+    let device = Device::line("line", 1).unwrap();
+    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    let config = SabreConfig::deterministic_seeded(7);
+    let mut circuit = Circuit::new(1);
+    circuit.x(q0).unwrap();
+    circuit.barrier(Vec::new()).unwrap();
+    circuit.x(q0).unwrap();
+
+    let result = sabre_route(&circuit, &device, &layout, &config).unwrap();
+
+    assert_eq!(result.circuit.operations().len(), 3);
+    assert!(matches!(
+        result.circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    assert!(matches!(
+        result.circuit.operations()[1].instruction,
+        Instruction::Directive(Directive::Barrier)
+    ));
+    assert!(result.circuit.operations()[1].qubits.is_empty());
+    assert!(matches!(
+        result.circuit.operations()[2].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
 }
 
 #[test]

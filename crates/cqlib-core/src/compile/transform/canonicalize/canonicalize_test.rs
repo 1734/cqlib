@@ -517,25 +517,61 @@ fn barrier_partial_overlap_and_non_adjacent_barriers_are_not_merged() {
 }
 
 #[test]
-fn empty_barrier_is_removed() {
+fn empty_barrier_is_preserved_as_global_boundary() {
     let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.x(q0).unwrap();
     circuit
         .append(
             Instruction::Directive(Directive::Barrier),
             std::iter::empty::<Qubit>(),
             std::iter::empty(),
-            Some("drop-empty"),
+            Some("global-boundary"),
         )
         .unwrap();
-    circuit.h(Qubit::new(0)).unwrap();
+    circuit.x(q0).unwrap();
 
     let result = canonicalize_circuit(&circuit).unwrap();
 
-    assert_eq!(result.circuit.operations().len(), 1);
+    assert_eq!(result.circuit.operations().len(), 3);
     assert!(matches!(
         result.circuit.operations()[0].instruction,
-        Instruction::Standard(StandardGate::H)
+        Instruction::Standard(StandardGate::X)
     ));
+    assert!(matches!(
+        result.circuit.operations()[1].instruction,
+        Instruction::Directive(Directive::Barrier)
+    ));
+    assert!(result.circuit.operations()[1].qubits.is_empty());
+    assert!(matches!(
+        result.circuit.operations()[2].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+}
+
+#[test]
+fn global_and_local_adjacent_barriers_merge_to_global_boundary() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+
+    for barriers in [
+        vec![Vec::new(), vec![q0, q1]],
+        vec![vec![q0, q1], Vec::new()],
+    ] {
+        let mut circuit = Circuit::new(2);
+        for qubits in barriers {
+            circuit.barrier(qubits).unwrap();
+        }
+
+        let result = canonicalize_circuit(&circuit).unwrap();
+
+        assert_eq!(result.circuit.operations().len(), 1);
+        assert!(matches!(
+            result.circuit.operations()[0].instruction,
+            Instruction::Directive(Directive::Barrier)
+        ));
+        assert!(result.circuit.operations()[0].qubits.is_empty());
+    }
 }
 
 #[test]

@@ -27,15 +27,19 @@
 //! [`SabreNodeKind::Synchronize`] is used for zero- and one-qubit operations,
 //! delays, and directives. These operations do not create a routed two-qubit
 //! interaction, but they still preserve sequencing at the current dependency
-//! boundary. Initial synchronize operations that touch no mapped frontier stay
-//! in [`SabreDag::initial`].
+//! boundary. An empty-qubit barrier is a global synchronization boundary: it
+//! waits for every active wire and becomes a dependency of every subsequent
+//! operation. Other initial synchronize operations that touch no mapped
+//! frontier stay in [`SabreDag::initial`].
 //!
 //! Control-flow operations become recursive DAG nodes. The outer node preserves
 //! the control-flow operation as a scheduling boundary, while each body is
 //! decomposed into its own [`SabreDag`] so routing can restore layouts at block
 //! boundaries.
 
-use crate::circuit::{ClassicalControlOp, ClassicalExpr, ClassicalVar, Instruction, Operation};
+use crate::circuit::{
+    ClassicalControlOp, ClassicalExpr, ClassicalVar, Directive, Instruction, Operation,
+};
 use crate::compile::CompilerError;
 use crate::device::LogicalQubit;
 use rustworkx_core::petgraph::Direction;
@@ -105,10 +109,14 @@ impl SabreDag {
 
         for operation in operations {
             let kind = kind_from_operation(operation)?;
+            let is_global_barrier = matches!(
+                operation.instruction,
+                Instruction::Directive(Directive::Barrier)
+            ) && operation.qubits.is_empty();
             let ordering_barrier = matches!(
                 operation.instruction,
                 Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
-            );
+            ) || is_global_barrier;
             let qubits = operation
                 .qubits
                 .iter()

@@ -131,7 +131,7 @@ fn verify_operations(
                 .iter()
                 .map(|param| circuit.resolve_parameter(param))
                 .collect::<Result<Vec<_>, _>>()?;
-            if is_strict_noop(&operation.instruction, &params, &operation.qubits)? {
+            if is_strict_noop(&operation.instruction, &params)? {
                 return Err(CompilerError::InvariantViolation(format!(
                     "{op_scope} contains a removable no-op"
                 )));
@@ -374,18 +374,17 @@ fn verify_output_barrier(
     next: Option<&Operation>,
     scope: &str,
 ) -> Result<(), CompilerError> {
-    if operation.qubits.is_empty() {
-        return Err(CompilerError::InvariantViolation(format!(
-            "{scope} contains empty barrier"
-        )));
-    }
-    let mut sorted = operation.qubits.clone();
-    sorted.sort_unstable_by_key(|qubit| qubit.id());
-    sorted.dedup();
-    if operation.qubits != sorted {
-        return Err(CompilerError::InvariantViolation(format!(
-            "{scope} barrier qubits are not sorted and deduplicated"
-        )));
+    // An empty scope is the canonical representation of a global barrier.
+    // Only local barrier scopes require sorted, deduplicated operands.
+    if !operation.qubits.is_empty() {
+        let mut sorted = operation.qubits.clone();
+        sorted.sort_unstable_by_key(|qubit| qubit.id());
+        sorted.dedup();
+        if operation.qubits != sorted {
+            return Err(CompilerError::InvariantViolation(format!(
+                "{scope} barrier qubits are not sorted and deduplicated"
+            )));
+        }
     }
     if operation.label.is_some() {
         return Err(CompilerError::InvariantViolation(format!(

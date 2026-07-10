@@ -261,7 +261,7 @@ impl<'a> CanonicalizeRound<'a> {
             return Ok(RewriteResult::phase(phase));
         }
 
-        if self.config.drops_noops() && is_strict_noop(&instruction, &semantic_params, &qubits)? {
+        if self.config.drops_noops() && is_strict_noop(&instruction, &semantic_params)? {
             return Ok(RewriteResult::drop());
         }
 

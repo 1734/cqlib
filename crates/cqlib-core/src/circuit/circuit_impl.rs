@@ -1596,8 +1596,12 @@ impl Circuit {
 
     /// Inserts a Barrier.
     ///
-    /// A barrier forbids the compiler from optimizing across this line. It has no physical effect
-    /// on the qubits but is crucial for debugging and manual optimization control.
+    /// A barrier forbids the compiler from optimizing or reordering across this line. It has no
+    /// physical effect on the quantum state, but is crucial for debugging and manual optimization
+    /// control.
+    ///
+    /// A non-empty `qubits` list creates a barrier over exactly those qubits. An empty list
+    /// creates a global barrier over every qubit in this circuit.
     pub fn barrier(&mut self, qubits: Vec<Qubit>) -> Result<(), CircuitError> {
         self.append(
             Instruction::Directive(Directive::Barrier),
