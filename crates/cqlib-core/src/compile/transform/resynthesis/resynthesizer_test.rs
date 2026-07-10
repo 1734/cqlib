@@ -1,10 +1,29 @@
 use super::*;
 use crate::circuit::{ClassicalExpr, Qubit};
-use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::util::test_utils::assert_compiled_circuit_equivalent;
 
 fn cx_config() -> TwoQubitBlockResynthesisConfig {
-    TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx)
+    config_for_native_2q(StandardGate::CX)
+}
+
+fn config_for_native_2q(gate: StandardGate) -> TwoQubitBlockResynthesisConfig {
+    TwoQubitBlockResynthesisConfig::normal(
+        TwoQubitSynthesisTarget::from_standard_gates(
+            vec![
+                StandardGate::U,
+                StandardGate::H,
+                StandardGate::RX,
+                StandardGate::RY,
+                StandardGate::RZ,
+                StandardGate::S,
+                StandardGate::SDG,
+            ],
+            vec![gate],
+            true,
+        )
+        .unwrap(),
+    )
 }
 
 fn standard_ops(circuit: &Circuit) -> Vec<StandardGate> {
@@ -261,29 +280,49 @@ fn swap_pair_is_resynthesized_when_cost_improves() {
 }
 
 #[test]
+fn interleaved_swap_dependency_is_not_moved_by_left_absorption() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.h(q0).unwrap();
+    circuit.rx(q1, 0.17).unwrap();
+    circuit.ry(q2, -0.19).unwrap();
+    circuit.swap(q0, q2).unwrap();
+    circuit.swap(q1, q2).unwrap();
+    let config = TwoQubitBlockResynthesisConfig::normal(
+        TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::H, StandardGate::RX, StandardGate::RY],
+            vec![StandardGate::RXX, StandardGate::RYY, StandardGate::RZZ],
+            true,
+        )
+        .unwrap(),
+    );
+
+    let result = resynthesize_two_qubit_blocks(&circuit, config).unwrap();
+
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
 fn adjacent_inverse_pair_resynthesizes_across_supported_backends() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
-    let backends = [
-        TwoQubitUnitaryDecomposeBasis::Cx,
-        TwoQubitUnitaryDecomposeBasis::Cz,
-        TwoQubitUnitaryDecomposeBasis::Rzz,
-        TwoQubitUnitaryDecomposeBasis::PauliRotations,
+    let configs = [
+        ("cx", config_for_native_2q(StandardGate::CX)),
+        ("cz", config_for_native_2q(StandardGate::CZ)),
+        ("rzz", config_for_native_2q(StandardGate::RZZ)),
+        ("pauli-fallback", TwoQubitBlockResynthesisConfig::default()),
     ];
 
-    for basis in backends {
+    for (name, config) in configs {
         let mut circuit = Circuit::new(2);
         circuit.cx(q0, q1).unwrap();
         circuit.cx(q0, q1).unwrap();
 
-        let result =
-            resynthesize_two_qubit_blocks(&circuit, TwoQubitBlockResynthesisConfig::normal(basis))
-                .unwrap();
+        let result = resynthesize_two_qubit_blocks(&circuit, config).unwrap();
 
-        assert!(
-            result.changed,
-            "basis {basis:?} should accept identity block"
-        );
+        assert!(result.changed, "target {name} should accept identity block");
         assert_eq!(two_qubit_op_count(&result.circuit), 0);
         assert_compiled_circuit_equivalent(&result.circuit, &circuit);
     }

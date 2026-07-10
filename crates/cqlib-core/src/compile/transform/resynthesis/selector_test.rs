@@ -1,11 +1,10 @@
 use super::*;
-use crate::circuit::{CircuitParam, Operation, Parameter, Qubit};
-use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+use crate::circuit::{CircuitParam, Operation, Parameter, Qubit, StandardGate};
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use ndarray::Array2;
 use ndarray::linalg::kron;
-use smallvec::smallvec;
 
-fn view<'a>(order: usize, operation: &'a Operation) -> OperationView<'a> {
+fn view(order: usize, operation: &Operation) -> OperationView<'_> {
     OperationView::new(
         order,
         operation,
@@ -24,9 +23,20 @@ fn standard_op(gate: StandardGate, qubits: &[Qubit]) -> Operation {
     Operation {
         instruction: Instruction::Standard(gate),
         qubits: qubits.iter().copied().collect(),
-        params: smallvec![],
+        params: Default::default(),
         label: None,
     }
+}
+
+fn cx_config() -> TwoQubitBlockResynthesisConfig {
+    TwoQubitBlockResynthesisConfig::normal(
+        TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::U],
+            vec![StandardGate::CX],
+            true,
+        )
+        .unwrap(),
+    )
 }
 
 fn block(qubits: [Qubit; 2], matched_orders: Vec<usize>) -> TwoQubitNumericBlock {
@@ -114,17 +124,10 @@ fn select_patches_keeps_strictly_improving_non_overlapping_candidate() {
     let second = standard_op(StandardGate::CX, &[q0, q1]);
     let ops = vec![view(0, &first), view(1, &second)];
     let blocks = vec![block([q0, q1], vec![0, 1])];
-    let commutation = CachedCommutation::new(
-        TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx).commutation,
-    );
+    let config = cx_config();
+    let commutation = CachedCommutation::new(config.commutation.clone());
 
-    let patches = select_patches(
-        blocks,
-        &ops,
-        &commutation,
-        &TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx),
-    )
-    .unwrap();
+    let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
 
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0].matched_orders, vec![0, 1]);
@@ -139,7 +142,7 @@ fn select_patches_deduplicates_identical_blocks_before_selection() {
     let second = standard_op(StandardGate::CX, &[q0, q1]);
     let ops = vec![view(0, &first), view(1, &second)];
     let blocks = vec![block([q0, q1], vec![0, 1]), block([q0, q1], vec![0, 1])];
-    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+    let config = cx_config();
     let commutation = CachedCommutation::new(config.commutation.clone());
 
     let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
@@ -156,7 +159,7 @@ fn select_patches_uses_non_overlapping_greedy_selection() {
     let third = standard_op(StandardGate::CX, &[q0, q1]);
     let ops = vec![view(0, &first), view(1, &second), view(2, &third)];
     let blocks = vec![block([q0, q1], vec![0, 1]), block([q0, q1], vec![1, 2])];
-    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+    let config = cx_config();
     let commutation = CachedCommutation::new(config.commutation.clone());
 
     let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
@@ -180,7 +183,7 @@ fn select_patches_rejects_when_replacement_does_not_commute_with_crossed_op() {
         view(3, &third),
     ];
     let blocks = vec![block_with_crossed([q0, q1], vec![0, 2, 3], vec![1])];
-    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+    let config = cx_config();
     let commutation = CachedCommutation::new(config.commutation.clone());
 
     let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
@@ -204,7 +207,7 @@ fn select_patches_accepts_when_replacement_commutes_with_disjoint_crossed_op() {
         view(3, &third),
     ];
     let blocks = vec![block_with_crossed([q0, q1], vec![0, 2, 3], vec![1])];
-    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+    let config = cx_config();
     let commutation = CachedCommutation::new(config.commutation.clone());
 
     let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
@@ -214,13 +217,73 @@ fn select_patches_accepts_when_replacement_commutes_with_disjoint_crossed_op() {
 }
 
 #[test]
+fn select_patches_rejects_patch_that_changes_relevant_span() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let first = standard_op(StandardGate::CX, &[q0, q1]);
+    let bystander = standard_op(StandardGate::H, &[q0]);
+    let second = standard_op(StandardGate::CX, &[q0, q1]);
+    let ops = vec![view(0, &first), view(1, &bystander), view(2, &second)];
+    let blocks = vec![block([q0, q1], vec![0, 2])];
+    let config = cx_config();
+    let commutation = CachedCommutation::new(config.commutation.clone());
+
+    let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
+
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn patch_span_validation_accounts_for_synthesis_phase() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let first = standard_op(StandardGate::CX, &[q0, q1]);
+    let second = standard_op(StandardGate::CX, &[q0, q1]);
+    let ops = vec![view(0, &first), view(1, &second)];
+    let block = block([q0, q1], vec![0, 1]);
+
+    assert!(
+        patch_preserves_relevant_span(&block, &ops, &[], 0.0).unwrap(),
+        "identity replacement should preserve a CX inverse pair"
+    );
+    assert!(
+        !patch_preserves_relevant_span(&block, &ops, &[], 0.25).unwrap(),
+        "non-zero synthesis phase must be part of span validation"
+    );
+}
+
+#[test]
+fn patch_span_validation_rejects_too_many_relevant_qubits() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut operations = vec![
+        standard_op(StandardGate::CX, &[q0, q1]),
+        standard_op(StandardGate::CX, &[q0, q1]),
+    ];
+    let mut crossed = Vec::new();
+    for index in 2..=6 {
+        let order = operations.len();
+        operations.push(standard_op(StandardGate::H, &[Qubit::new(index)]));
+        crossed.push(order);
+    }
+    let ops = operations
+        .iter()
+        .enumerate()
+        .map(|(order, operation)| view(order, operation))
+        .collect::<Vec<_>>();
+    let block = block_with_crossed([q0, q1], vec![0, 1], crossed);
+
+    assert!(!patch_preserves_relevant_span(&block, &ops, &[], 0.0).unwrap());
+}
+
+#[test]
 fn select_patches_rejects_single_cx_without_cost_improvement() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let cx = standard_op(StandardGate::CX, &[q0, q1]);
     let ops = vec![view(0, &cx)];
     let blocks = vec![block([q0, q1], vec![0])];
-    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+    let config = cx_config();
     let commutation = CachedCommutation::new(config.commutation.clone());
 
     let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();

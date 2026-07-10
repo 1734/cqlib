@@ -37,7 +37,7 @@
 
 use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 use super::unitary_2q::{
-    TwoQubitUnitaryDecomposeBasis, TwoQubitUnitarySynthesisResult, synthesize_numeric_2q_unitary,
+    TwoQubitSynthesisRequest, TwoQubitSynthesisTarget, plan_numeric_2q_unitary,
 };
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
@@ -47,6 +47,7 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::transform::decompose::rule::{
     DecompositionRuleCache, DecompositionRuleStats, NumericUnitaryRuleRequest,
+    NumericUnitarySynthesisKey,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
@@ -60,13 +61,10 @@ const ANGLE_EPS: f64 = 1e-12;
 const PHASE_EPS: f64 = 1e-12;
 
 /// Configuration for circuit-level matrix-backed `UnitaryGate` synthesis.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitaryDecomposeConfig {
-    /// Output basis for synthesized two-qubit numeric unitaries.
-    ///
-    /// This affects only emitted two-qubit interaction gates. Local factors are
-    /// emitted as [`StandardGate::U`] operations in both modes.
-    pub two_qubit_basis: TwoQubitUnitaryDecomposeBasis,
+    /// Target capability used by exact two-qubit numerical synthesis.
+    pub two_qubit_target: TwoQubitSynthesisTarget,
     /// Whether matrix-backed `UnitaryGate` operations inside control-flow
     /// bodies should be synthesized recursively.
     pub recurse_control_flow: bool,
@@ -75,7 +73,7 @@ pub struct UnitaryDecomposeConfig {
 impl Default for UnitaryDecomposeConfig {
     fn default() -> Self {
         Self {
-            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::PauliRotations,
+            two_qubit_target: TwoQubitSynthesisTarget::default(),
             recurse_control_flow: true,
         }
     }
@@ -125,7 +123,7 @@ impl Transformer for DecomposeUnitaries {
                 changed: false,
             });
         }
-        let result = decompose_unitaries_transform(circuit, self.config)?;
+        let result = decompose_unitaries_transform(circuit, self.config.clone())?;
         if result.changed {
             Ok(result)
         } else {
@@ -145,7 +143,7 @@ impl Transformer for DecomposeUnitaries {
 ///
 /// One-qubit matrices are emitted as [`StandardGate::U`] operations when a
 /// non-trivial local gate remains. Two-qubit matrices are emitted according to
-/// [`UnitaryDecomposeConfig::two_qubit_basis`]. Synthesized scalar phases are
+/// [`UnitaryDecomposeConfig::two_qubit_target`]. Synthesized scalar phases are
 /// preserved either as circuit global phase or, within recursively processed
 /// control-flow bodies, as explicit [`StandardGate::GPhase`] operations.
 ///
@@ -408,23 +406,22 @@ impl<'a> UnitaryDecomposer<'a> {
         }
 
         let matrix = self.numeric_matrix_for_gate(gate, operation)?;
-        let request = NumericUnitaryRuleRequest {
-            num_qubits: gate.num_qubits(),
-            matrix: matrix.as_ref(),
-            two_qubit_basis: self.config.two_qubit_basis,
-        };
-        if let Some((operations, phase_delta)) = self
-            .rule_cache
-            .instantiate_numeric_unitary(request, &operation.qubits)?
-        {
-            return Ok(Decomposition {
-                operations,
-                phase_delta,
-            });
-        }
-
         match gate.num_qubits() {
             1 => {
+                let request = NumericUnitaryRuleRequest {
+                    num_qubits: gate.num_qubits(),
+                    matrix: matrix.as_ref(),
+                    synthesis_key: NumericUnitarySynthesisKey::one_qubit(),
+                };
+                if let Some((operations, phase_delta)) = self
+                    .rule_cache
+                    .instantiate_numeric_unitary(request.clone(), &operation.qubits)?
+                {
+                    return Ok(Decomposition {
+                        operations,
+                        phase_delta,
+                    });
+                }
                 let OneQubitUnitaryDecomposition {
                     theta,
                     phi,
@@ -468,21 +465,45 @@ impl<'a> UnitaryDecomposer<'a> {
             }
             2 => {
                 let qubits = [operation.qubits[0], operation.qubits[1]];
-                let TwoQubitUnitarySynthesisResult {
+                let request = NumericUnitaryRuleRequest {
+                    num_qubits: gate.num_qubits(),
+                    matrix: matrix.as_ref(),
+                    synthesis_key: NumericUnitarySynthesisKey::two_qubit(
+                        &self.config.two_qubit_target,
+                    ),
+                };
+                if let Some((operations, phase_delta)) = self
+                    .rule_cache
+                    .instantiate_numeric_unitary(request.clone(), &operation.qubits)?
+                {
+                    return Ok(Decomposition {
+                        operations,
+                        phase_delta,
+                    });
+                }
+                let candidate = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+                    matrix: matrix.as_ref(),
+                    qubits,
+                    target: self.config.two_qubit_target.clone(),
+                })
+                .and_then(|mut candidates| {
+                    if candidates.is_empty() {
+                        Err(CompilerError::TransformFailed {
+                            name: SYNTHESIS_NAME,
+                            reason: format!(
+                                "no exact two-qubit synthesis candidate for UnitaryGate '{}'",
+                                gate.label()
+                            ),
+                        })
+                    } else {
+                        Ok(candidates.remove(0))
+                    }
+                })?;
+                let crate::compile::transform::decompose::unitary::TwoQubitSynthesisCandidate {
                     operations,
                     global_phase,
-                } = synthesize_numeric_2q_unitary(
-                    matrix.as_ref(),
-                    qubits,
-                    self.config.two_qubit_basis,
-                )
-                .map_err(|source| CompilerError::TransformFailed {
-                    name: SYNTHESIS_NAME,
-                    reason: format!(
-                        "two-qubit synthesis failed for UnitaryGate '{}': {source}",
-                        gate.label(),
-                    ),
-                })?;
+                    ..
+                } = candidate;
                 let decomposition = Decomposition {
                     operations,
                     phase_delta: global_phase,
@@ -579,6 +600,26 @@ mod tests {
     use crate::circuit::{CircuitError, ClassicalExpr, circuit_to_matrix};
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    fn config_for_native_2q(gate: StandardGate) -> UnitaryDecomposeConfig {
+        UnitaryDecomposeConfig {
+            two_qubit_target: TwoQubitSynthesisTarget::from_standard_gates(
+                vec![
+                    StandardGate::U,
+                    StandardGate::H,
+                    StandardGate::RX,
+                    StandardGate::RY,
+                    StandardGate::RZ,
+                    StandardGate::S,
+                    StandardGate::SDG,
+                ],
+                vec![gate],
+                true,
+            )
+            .unwrap(),
+            ..Default::default()
+        }
+    }
 
     fn operation_parameter(circuit: &Circuit, operation: &Operation, position: usize) -> Parameter {
         match operation.params.get(position) {
@@ -750,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_numeric_2q_unitary_reuses_runtime_rule() {
+    fn repeated_numeric_2q_unitary_reuses_target_aware_runtime_rule() {
         let matrix = StandardGate::FSIM
             .matrix(&[0.23, -0.31])
             .unwrap()
@@ -798,10 +839,7 @@ mod tests {
         circuit
             .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
             .unwrap();
-        let config = UnitaryDecomposeConfig {
-            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Cx,
-            ..Default::default()
-        };
+        let config = config_for_native_2q(StandardGate::CX);
 
         let before = circuit_to_matrix(&circuit, None).unwrap();
         let decomposed = decompose_unitaries(&circuit, config).unwrap();
@@ -824,10 +862,7 @@ mod tests {
         circuit
             .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
             .unwrap();
-        let config = UnitaryDecomposeConfig {
-            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Cz,
-            ..Default::default()
-        };
+        let config = config_for_native_2q(StandardGate::CZ);
 
         let before = circuit_to_matrix(&circuit, None).unwrap();
         let decomposed = decompose_unitaries(&circuit, config).unwrap();
@@ -850,10 +885,7 @@ mod tests {
         circuit
             .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
             .unwrap();
-        let config = UnitaryDecomposeConfig {
-            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Cy,
-            ..Default::default()
-        };
+        let config = config_for_native_2q(StandardGate::CY);
 
         let before = circuit_to_matrix(&circuit, None).unwrap();
         let decomposed = decompose_unitaries(&circuit, config).unwrap();
@@ -876,10 +908,7 @@ mod tests {
         circuit
             .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
             .unwrap();
-        let config = UnitaryDecomposeConfig {
-            two_qubit_basis: TwoQubitUnitaryDecomposeBasis::Rzz,
-            ..Default::default()
-        };
+        let config = config_for_native_2q(StandardGate::RZZ);
 
         let before = circuit_to_matrix(&circuit, None).unwrap();
         let decomposed = decompose_unitaries(&circuit, config).unwrap();

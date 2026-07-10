@@ -39,11 +39,11 @@
 //! and the output canonicalizer removes representation noise introduced by
 //! previous stages.
 
-use crate::circuit::{Circuit, Instruction, StandardGate};
+use crate::circuit::{Circuit, Instruction};
 use crate::compile::CompilerError;
 use crate::compile::resource::ResourceLimits;
 use crate::compile::sabre::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
-use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::transform::decompose::{
     DecomposeDefinitions, DecomposeMcGates, DecomposeUnitaries, McGateDecomposeConfig,
     UnitaryDecomposeConfig,
@@ -78,6 +78,7 @@ struct WorkflowState {
     changed: bool,
     steps: Vec<WorkflowStepReport>,
     target_basis: Option<Vec<Instruction>>,
+    two_qubit_target: TwoQubitSynthesisTarget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,12 +109,15 @@ impl CompilerWorkflow {
     /// execution metadata.
     pub fn run(&self, circuit: &Circuit) -> Result<CompileResult, CompilerError> {
         let resolved_target = self.resolve_target_basis()?;
+        let two_qubit_target =
+            TwoQubitSynthesisTarget::from_instructions(resolved_target.as_deref())?;
         let mut state = WorkflowState {
             current: circuit.clone(),
             analysis: CircuitAnalysis::analyze(circuit),
             changed: false,
             steps: Vec::new(),
             target_basis: resolved_target,
+            two_qubit_target,
         };
 
         self.record_pre_init(&mut state);
@@ -298,7 +302,7 @@ impl CompilerWorkflow {
 
     fn unitary_decompose_config_for_state(&self, state: &WorkflowState) -> UnitaryDecomposeConfig {
         UnitaryDecomposeConfig {
-            two_qubit_basis: pick_two_qubit_unitary_basis(state.target_basis.as_deref()),
+            two_qubit_target: state.two_qubit_target.clone(),
             ..Default::default()
         }
     }
@@ -349,10 +353,13 @@ impl CompilerWorkflow {
         &self,
         state: &WorkflowState,
     ) -> TwoQubitBlockResynthesisConfig {
-        let basis = pick_two_qubit_unitary_basis(state.target_basis.as_deref());
         match self.config.mode {
-            CompileMode::Normal => TwoQubitBlockResynthesisConfig::normal(basis),
-            CompileMode::Enhanced => TwoQubitBlockResynthesisConfig::enhanced(basis),
+            CompileMode::Normal => {
+                TwoQubitBlockResynthesisConfig::normal(state.two_qubit_target.clone())
+            }
+            CompileMode::Enhanced => {
+                TwoQubitBlockResynthesisConfig::enhanced(state.two_qubit_target.clone())
+            }
         }
     }
 
@@ -636,46 +643,6 @@ fn record_skipped(
         skipped: true,
         reason: Some(reason.into()),
     });
-}
-
-fn pick_two_qubit_unitary_basis(
-    target_basis: Option<&[Instruction]>,
-) -> TwoQubitUnitaryDecomposeBasis {
-    let Some(target_basis) = target_basis else {
-        return TwoQubitUnitaryDecomposeBasis::PauliRotations;
-    };
-
-    // Until per-edge error and duration data participate in unitary synthesis,
-    // target-basis order is the only explicit preference signal available for
-    // locally equivalent controlled-Pauli backends.
-    if let Some(basis) = target_basis
-        .iter()
-        .find_map(|instruction| match instruction {
-            Instruction::Standard(StandardGate::CX) => Some(TwoQubitUnitaryDecomposeBasis::Cx),
-            Instruction::Standard(StandardGate::CY) => Some(TwoQubitUnitaryDecomposeBasis::Cy),
-            Instruction::Standard(StandardGate::CZ) => Some(TwoQubitUnitaryDecomposeBasis::Cz),
-            _ => None,
-        })
-    {
-        return basis;
-    }
-
-    let has_rxx = target_basis
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::Standard(StandardGate::RXX)));
-    let has_ryy = target_basis
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::Standard(StandardGate::RYY)));
-    let has_rzz = target_basis
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::Standard(StandardGate::RZZ)));
-
-    if has_rzz && !has_rxx && !has_ryy {
-        // RZZ-only native devices are common enough to justify direct emission.
-        TwoQubitUnitaryDecomposeBasis::Rzz
-    } else {
-        TwoQubitUnitaryDecomposeBasis::PauliRotations
-    }
 }
 
 fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {

@@ -83,5 +83,7 @@ pub use rewrite::{
 };
 pub use routing::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
 pub use routing_basis::LowerToRoutingBasis;
-pub use target_basis::TargetBasisLowerer;
+pub use target_basis::{
+    TargetBasisCost, TargetBasisCostModel, TargetBasisLowerer, TargetBasisSignature,
+};
 pub use transformer::{TransformResult, Transformer};

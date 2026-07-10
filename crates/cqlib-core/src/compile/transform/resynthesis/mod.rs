@@ -33,10 +33,11 @@
 //!
 //! ```
 //! use cqlib_core::circuit::{Circuit, Qubit};
+//! use cqlib_core::circuit::{Instruction, StandardGate};
 //! use cqlib_core::compile::transform::{
 //!     ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig, Transformer,
 //! };
-//! use cqlib_core::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+//! use cqlib_core::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 //!
 //! let q0 = Qubit::new(0);
 //! let q1 = Qubit::new(1);
@@ -44,7 +45,11 @@
 //! circuit.cx(q0, q1)?;
 //! circuit.cx(q0, q1)?;
 //!
-//! let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+//! let target = TwoQubitSynthesisTarget::from_instructions(Some(&[
+//!     Instruction::Standard(StandardGate::U),
+//!     Instruction::Standard(StandardGate::CX),
+//! ]))?;
+//! let config = TwoQubitBlockResynthesisConfig::normal(target);
 //! let result = ResynthesizeTwoQubitBlocks::new(config).transform(&circuit, None)?;
 //! assert!(result.changed);
 //! assert!(result.circuit.operations().is_empty());

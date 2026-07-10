@@ -53,5 +53,7 @@ pub use decompose::{
 pub use two_qubit_kak::{KakDecomposition, kak_decompose};
 pub use unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 pub use unitary_2q::{
-    TwoQubitUnitaryDecomposeBasis, TwoQubitUnitarySynthesisResult, synthesize_numeric_2q_unitary,
+    TargetAwareSynthesisCost, TwoQubitSynthesisCandidate, TwoQubitSynthesisRequest,
+    TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis, TwoQubitUnitarySynthesisResult,
+    plan_numeric_2q_unitary, synthesize_numeric_2q_unitary, target_aware_cost_of_value_operations,
 };

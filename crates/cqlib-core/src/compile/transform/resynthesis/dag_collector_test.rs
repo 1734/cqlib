@@ -124,6 +124,29 @@ fn shared_non_commuting_operation_blocks_dag_expansion() {
 }
 
 #[test]
+fn left_expansion_stops_at_unaccepted_anchor_dependency() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.rx(q1, 0.17).unwrap();
+    circuit.ry(q2, -0.19).unwrap();
+    circuit.swap(q0, q2).unwrap();
+    circuit.swap(q1, q2).unwrap();
+    let views = views(&circuit);
+    let mut checker = checker();
+
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
+
+    assert!(
+        !blocks
+            .iter()
+            .any(|block| block.qubits == [q1, q2] && block.matched_orders.contains(&0)),
+        "the anchor SWAP(q1,q2) must not move left across SWAP(q0,q2)"
+    );
+}
+
+#[test]
 fn boundary_stops_dag_expansion() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);

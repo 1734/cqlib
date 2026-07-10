@@ -19,6 +19,7 @@ use crate::circuit::{
 };
 use crate::compile::resource::ResourcePolicy;
 use crate::compile::transform::CircuitAnalysis;
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::{CompileConfig, CompileMode, CompilerError, compile};
 use crate::device::{Device, Layout};
 use crate::util::test_utils::{
@@ -49,12 +50,14 @@ fn run_workflow(circuit: &Circuit, mode: CompileMode) -> super::CompileResult {
 
 fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowState {
     let current = Circuit::new(1);
+    let two_qubit_target = TwoQubitSynthesisTarget::from_instructions(Some(&target_basis)).unwrap();
     WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
         changed: false,
         steps: Vec::new(),
         target_basis: Some(target_basis),
+        two_qubit_target,
     }
 }
 
@@ -492,8 +495,9 @@ fn workflow_keeps_pauli_kak_for_partial_ising_target() {
     let ops = standard_ops(&result.circuit);
 
     assert!(step_changed(&result, "decompose.unitary"));
-    assert!(ops.contains(&StandardGate::RXX));
     assert!(ops.contains(&StandardGate::RZZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
     assert!(!ops.contains(&StandardGate::CX));
     assert!(!ops.contains(&StandardGate::CY));
     assert!(!ops.contains(&StandardGate::CZ));

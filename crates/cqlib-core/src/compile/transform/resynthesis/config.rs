@@ -13,7 +13,7 @@
 //! Configuration for numeric two-qubit block resynthesis.
 
 use crate::compile::commutation::CommutationConfig;
-use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 
 /// Configuration for ordinary standard-gate two-qubit block resynthesis.
 ///
@@ -22,8 +22,8 @@ use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis
 /// explicitly traded for better post-routing cleanup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TwoQubitBlockResynthesisConfig {
-    /// Two-qubit interaction family used by KAK synthesis.
-    pub two_qubit_basis: TwoQubitUnitaryDecomposeBasis,
+    /// Target capability used by exact two-qubit numerical synthesis.
+    pub two_qubit_target: TwoQubitSynthesisTarget,
     /// Maximum number of source operations allowed in one synthesized block.
     pub max_block_ops: usize,
     /// Maximum number of non-block operations that may be crossed while
@@ -47,9 +47,9 @@ pub struct TwoQubitBlockResynthesisConfig {
 impl TwoQubitBlockResynthesisConfig {
     /// Returns the default-budget configuration for the selected two-qubit
     /// synthesis basis.
-    pub fn normal(two_qubit_basis: TwoQubitUnitaryDecomposeBasis) -> Self {
+    pub fn normal(two_qubit_target: TwoQubitSynthesisTarget) -> Self {
         Self {
-            two_qubit_basis,
+            two_qubit_target,
             max_block_ops: 16,
             max_crossed_ops: 4,
             max_scan_span: 32,
@@ -64,19 +64,19 @@ impl TwoQubitBlockResynthesisConfig {
     }
 
     /// Returns a higher-budget configuration for enhanced optimization modes.
-    pub fn enhanced(two_qubit_basis: TwoQubitUnitaryDecomposeBasis) -> Self {
+    pub fn enhanced(two_qubit_target: TwoQubitSynthesisTarget) -> Self {
         Self {
             max_block_ops: 32,
             max_crossed_ops: 8,
             max_scan_span: 64,
-            ..Self::normal(two_qubit_basis)
+            ..Self::normal(two_qubit_target)
         }
     }
 }
 
 impl Default for TwoQubitBlockResynthesisConfig {
     fn default() -> Self {
-        Self::normal(TwoQubitUnitaryDecomposeBasis::PauliRotations)
+        Self::normal(TwoQubitSynthesisTarget::default())
     }
 }
 

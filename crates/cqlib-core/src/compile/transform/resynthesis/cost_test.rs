@@ -1,16 +1,33 @@
 use super::*;
 use crate::circuit::{Instruction, Qubit, StandardGate, ValueOperation};
+use crate::compile::transform::decompose::unitary::{
+    TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis, target_aware_cost_of_value_operations,
+};
+
+fn target() -> TwoQubitSynthesisTarget {
+    TwoQubitSynthesisTarget::from_standard_gates(
+        vec![StandardGate::H, StandardGate::X, StandardGate::U],
+        vec![StandardGate::CX],
+        true,
+    )
+    .unwrap()
+}
+
+fn replacement_cost(ops: &[ValueOperation]) -> ResynthesisCost {
+    target_aware_cost_of_value_operations(ops, &target(), TwoQubitUnitaryDecomposeBasis::Cx)
+        .unwrap()
+}
 
 #[test]
 fn cost_order_prefers_fewer_two_qubit_ops_before_total_gate_count() {
     let lower_two_qubit = ResynthesisCost {
-        two_qubit_ops: 1,
-        total_ops: 8,
+        lowered_two_qubit_ops: 1,
+        lowered_total_ops: 8,
         ..ResynthesisCost::default()
     };
     let higher_two_qubit = ResynthesisCost {
-        two_qubit_ops: 2,
-        total_ops: 2,
+        lowered_two_qubit_ops: 2,
+        lowered_total_ops: 2,
         ..ResynthesisCost::default()
     };
 
@@ -21,7 +38,7 @@ fn cost_order_prefers_fewer_two_qubit_ops_before_total_gate_count() {
 fn gphase_replacements_are_cost_free() {
     let op = ValueOperation::from_standard(StandardGate::GPhase, [], [0.3.into()]);
 
-    assert_eq!(cost_of_replacements(&[op]), ResynthesisCost::default());
+    assert_eq!(replacement_cost(&[op]), ResynthesisCost::default());
 }
 
 #[test]
@@ -30,15 +47,15 @@ fn replacement_cost_counts_two_qubit_gate_and_depth() {
     let q1 = Qubit::new(1);
     let op = ValueOperation::from_standard(StandardGate::CX, [q0, q1], []);
 
-    let cost = cost_of_replacements(&[op]);
+    let cost = replacement_cost(&[op]);
 
-    assert_eq!(cost.two_qubit_ops, 1);
-    assert_eq!(cost.total_ops, 1);
-    assert_eq!(cost.depth_estimate, 1);
+    assert_eq!(cost.lowered_two_qubit_ops, 1);
+    assert_eq!(cost.lowered_total_ops, 1);
+    assert_eq!(cost.lowered_depth, 1);
 }
 
 #[test]
-fn unsupported_replacement_is_worse_than_standard_operation() {
+fn non_standard_replacement_is_rejected_by_exact_lowering_cost() {
     let q0 = Qubit::new(0);
     let unsupported = ValueOperation {
         instruction: crate::circuit::ValueInstruction::from_instruction(Instruction::Delay),
@@ -47,7 +64,14 @@ fn unsupported_replacement_is_worse_than_standard_operation() {
         label: None,
     };
 
-    assert_eq!(cost_of_replacements(&[unsupported]).unsupported_ops, 1);
+    assert!(
+        target_aware_cost_of_value_operations(
+            &[unsupported],
+            &target(),
+            TwoQubitUnitaryDecomposeBasis::Cx,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -59,10 +83,10 @@ fn depth_estimate_keeps_disjoint_single_qubit_ops_parallel() {
         ValueOperation::from_standard(StandardGate::X, [q1], []),
     ];
 
-    let cost = cost_of_replacements(&ops);
+    let cost = replacement_cost(&ops);
 
-    assert_eq!(cost.total_ops, 2);
-    assert_eq!(cost.depth_estimate, 1);
+    assert_eq!(cost.lowered_total_ops, 2);
+    assert_eq!(cost.lowered_depth, 1);
 }
 
 #[test]
@@ -73,8 +97,8 @@ fn depth_estimate_serializes_ops_on_shared_qubit() {
         ValueOperation::from_standard(StandardGate::X, [q0], []),
     ];
 
-    let cost = cost_of_replacements(&ops);
+    let cost = replacement_cost(&ops);
 
-    assert_eq!(cost.total_ops, 2);
-    assert_eq!(cost.depth_estimate, 2);
+    assert_eq!(cost.lowered_total_ops, 2);
+    assert_eq!(cost.lowered_depth, 2);
 }

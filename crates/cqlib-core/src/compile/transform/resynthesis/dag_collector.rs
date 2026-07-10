@@ -160,11 +160,17 @@ fn collect_dag_direction(
         visited += 1;
 
         if !dependencies_are_accepted(dag, node, direction, anchor_order, &accepted) {
+            if matches!(direction, Direction::Left) {
+                break;
+            }
             continue;
         }
 
         let view = &builder.ops[order];
         if is_hard_boundary(view, config) {
+            if matches!(direction, Direction::Left) {
+                break;
+            }
             continue;
         }
 
@@ -172,6 +178,9 @@ fn collect_dag_direction(
             if builder.matched_len() >= config.max_block_ops
                 || !builder.can_add_candidate(order, commutation)
             {
+                if matches!(direction, Direction::Left) {
+                    break;
+                }
                 continue;
             }
             builder.add_matched(order);
@@ -184,6 +193,9 @@ fn collect_dag_direction(
 
         if builder.crossed_len() >= config.max_crossed_ops || !builder.can_cross(order, commutation)
         {
+            if matches!(direction, Direction::Left) {
+                break;
+            }
             continue;
         }
         builder.add_crossed(order);

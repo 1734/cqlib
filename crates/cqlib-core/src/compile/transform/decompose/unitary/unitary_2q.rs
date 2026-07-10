@@ -24,27 +24,29 @@
 //! interaction rotations are omitted using `ANGLE_EPS`, while their scalar
 //! phases remain accumulated in the returned phase.
 //!
-//! The `PauliRotations` backend emits the Cartan core directly as
-//! `RXX`/`RYY`/`RZZ`. The `Cx`/`Cy`/`Cz` backends deterministically select
-//! among templates containing zero through three native entanglers using an
-//! average-fidelity score. The `Rzz` backend emits the Cartan core with at most
-//! three `RZZ` interactions, using local basis changes for the `XX` and `YY`
-//! axes. For template backends, a higher-count template is selected only when
-//! its score improves by more than `1e-12`, so near-boundary inputs may
-//! intentionally keep a lower-count approximation.
+//! The target-aware planner emits only exact candidates. `PauliRotations`
+//! emits the Cartan core directly as `RXX`/`RYY`/`RZZ`; `Rzz` emits the same
+//! Cartan core with local basis changes for `XX` and `YY`; `Cx`/`Cy`/`Cz`
+//! enumerate zero through three entangler templates and keep only candidates
+//! whose reconstructed matrix matches the input matrix within exact numerical
+//! tolerance.
 
 use super::two_qubit_kak::{KakDecomposition, kak_decompose};
 use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 use crate::circuit::gate::gate_matrix::rz_gate;
-use crate::circuit::{ParameterValue, Qubit, StandardGate, ValueOperation};
+use crate::circuit::{Instruction, ParameterValue, Qubit, StandardGate, ValueOperation};
 use crate::compile::CompilerError;
+use crate::compile::transform::target_basis::{
+    TargetBasisCost, TargetBasisCostModel, TargetBasisSignature,
+};
 use crate::util::matrix::{c, dagger, mat2};
 use ndarray::Array2;
+use ndarray::linalg::kron;
 use num_complex::Complex64;
-use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
 
 const ANGLE_EPS: f64 = 1e-12;
-const FIDELITY_IMPROVEMENT_EPS: f64 = 1e-12;
+const TWO_QUBIT_EXACT_TOLERANCE: f64 = 1e-10;
 
 /// Output basis used for two-qubit unitary synthesis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +61,186 @@ pub enum TwoQubitUnitaryDecomposeBasis {
     Cz,
     /// Emit local `U` gates plus `RZZ` interactions for the Cartan core.
     Rzz,
+}
+
+/// Target capability used by the two-qubit synthesis planner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TwoQubitSynthesisTarget {
+    native_2q: Vec<StandardGate>,
+    native_1q: Vec<StandardGate>,
+    fallback_pauli: bool,
+    lowering_cost_model: Option<TargetBasisCostModel>,
+}
+
+impl TwoQubitSynthesisTarget {
+    /// Builds target capability and exact lowering cost model from workflow
+    /// target instructions.
+    ///
+    /// `None` represents no target constraints and enables the neutral exact
+    /// Pauli-rotation fallback.
+    pub fn from_instructions(target_basis: Option<&[Instruction]>) -> Result<Self, CompilerError> {
+        let Some(target_basis) = target_basis else {
+            return Ok(Self::unconstrained());
+        };
+
+        let mut native_1q = Vec::new();
+        let mut native_2q = Vec::new();
+        for instruction in target_basis {
+            let Instruction::Standard(gate) = instruction else {
+                return Err(CompilerError::InvalidInput(format!(
+                    "two-qubit synthesis target requires standard instructions, got {instruction:?}"
+                )));
+            };
+            match gate.num_qubits() {
+                1 if !native_1q.contains(gate) => native_1q.push(*gate),
+                2 if !native_2q.contains(gate) => native_2q.push(*gate),
+                _ => {}
+            }
+        }
+        let lowering_cost_model = TargetBasisCostModel::new(target_basis.to_vec())?;
+        Ok(Self {
+            native_2q,
+            native_1q,
+            fallback_pauli: true,
+            lowering_cost_model: Some(lowering_cost_model),
+        })
+    }
+
+    /// Builds a target from standard native gates and attaches the active
+    /// target-basis lowering model used for exact cost evaluation.
+    pub fn from_standard_gates(
+        mut native_1q: Vec<StandardGate>,
+        mut native_2q: Vec<StandardGate>,
+        fallback_pauli: bool,
+    ) -> Result<Self, CompilerError> {
+        if let Some(gate) = native_1q.iter().find(|gate| gate.num_qubits() != 1) {
+            return Err(CompilerError::InvalidInput(format!(
+                "one-qubit target capability contains non-1q gate {gate:?}"
+            )));
+        }
+        if let Some(gate) = native_2q.iter().find(|gate| gate.num_qubits() != 2) {
+            return Err(CompilerError::InvalidInput(format!(
+                "two-qubit target capability contains non-2q gate {gate:?}"
+            )));
+        }
+        native_1q.sort_by_key(|gate| *gate as u8);
+        native_1q.dedup();
+        native_2q.sort_by_key(|gate| *gate as u8);
+        native_2q.dedup();
+        let mut gates = native_1q
+            .iter()
+            .chain(&native_2q)
+            .copied()
+            .collect::<Vec<_>>();
+        gates.sort_by_key(|gate| *gate as u8);
+        gates.dedup();
+        let instructions = gates
+            .into_iter()
+            .map(Instruction::Standard)
+            .collect::<Vec<_>>();
+        let lowering_cost_model = TargetBasisCostModel::new(instructions)?;
+        Ok(Self {
+            native_2q,
+            native_1q,
+            fallback_pauli,
+            lowering_cost_model: Some(lowering_cost_model),
+        })
+    }
+
+    /// Returns a target with no physical-basis constraints.
+    pub const fn unconstrained() -> Self {
+        Self {
+            native_2q: Vec::new(),
+            native_1q: Vec::new(),
+            fallback_pauli: true,
+            lowering_cost_model: None,
+        }
+    }
+
+    /// Native two-qubit gates in the configured target basis.
+    pub fn native_2q(&self) -> &[StandardGate] {
+        &self.native_2q
+    }
+
+    /// Native one-qubit gates in the configured target basis.
+    pub fn native_1q(&self) -> &[StandardGate] {
+        &self.native_1q
+    }
+
+    /// Whether Pauli-rotation fallback is permitted.
+    pub const fn fallback_pauli(&self) -> bool {
+        self.fallback_pauli
+    }
+
+    pub(crate) fn lowering_cost_model(&self) -> Option<&TargetBasisCostModel> {
+        self.lowering_cost_model.as_ref()
+    }
+
+    pub(crate) fn cache_signature(&self) -> Option<TargetBasisSignature> {
+        self.lowering_cost_model
+            .as_ref()
+            .map(|model| model.signature().clone())
+    }
+}
+
+impl Default for TwoQubitSynthesisTarget {
+    fn default() -> Self {
+        Self::unconstrained()
+    }
+}
+
+/// Request passed to the target-aware two-qubit synthesis planner.
+pub struct TwoQubitSynthesisRequest<'a> {
+    pub matrix: &'a Array2<Complex64>,
+    pub qubits: [Qubit; 2],
+    pub target: TwoQubitSynthesisTarget,
+}
+
+/// Target-aware cost used to order exact two-qubit synthesis candidates.
+///
+/// Costs are ordered lexicographically in the same order as the fields below:
+/// minimize final two-qubit count, final depth, final operation count,
+/// remaining parameterized operations, and finally a deterministic backend
+/// tie-breaker. When a target basis is configured these values are measured
+/// after applying the same lowering rules used by final translation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TargetAwareSynthesisCost {
+    /// Two-qubit operations after target-basis lowering.
+    pub lowered_two_qubit_ops: usize,
+    /// Greedy depth estimate after target-basis lowering.
+    pub lowered_depth: usize,
+    /// Total operation count after target-basis lowering.
+    pub lowered_total_ops: usize,
+    /// Operations that still carry numeric parameters.
+    pub parameterized_ops: usize,
+    /// Stable backend tie-breaker used only when all semantic cost fields tie.
+    pub backend_order: usize,
+}
+
+impl Ord for TargetAwareSynthesisCost {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.lowered_two_qubit_ops
+            .cmp(&other.lowered_two_qubit_ops)
+            .then_with(|| self.lowered_depth.cmp(&other.lowered_depth))
+            .then_with(|| self.lowered_total_ops.cmp(&other.lowered_total_ops))
+            .then_with(|| self.parameterized_ops.cmp(&other.parameterized_ops))
+            .then_with(|| self.backend_order.cmp(&other.backend_order))
+    }
+}
+
+impl PartialOrd for TargetAwareSynthesisCost {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Exact synthesis candidate emitted by the target-aware planner.
+#[derive(Clone, Debug)]
+pub struct TwoQubitSynthesisCandidate {
+    pub backend: TwoQubitUnitaryDecomposeBasis,
+    pub operations: Vec<ValueOperation>,
+    pub global_phase: f64,
+    pub cost: TargetAwareSynthesisCost,
 }
 
 /// Numeric synthesis result for a two-qubit unitary matrix.
@@ -82,29 +264,79 @@ pub fn synthesize_numeric_2q_unitary(
     qubits: [Qubit; 2],
     basis: TwoQubitUnitaryDecomposeBasis,
 ) -> Result<TwoQubitUnitarySynthesisResult, CompilerError> {
-    if qubits[0] == qubits[1] {
+    let target = target_for_single_backend(basis)?;
+    let mut candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+        matrix,
+        qubits,
+        target,
+    })?;
+    let Some(candidate) = candidates
+        .drain(..)
+        .find(|candidate| candidate.backend == basis)
+    else {
+        return Err(CompilerError::TransformFailed {
+            name: "synthesize.numeric_2q_unitary",
+            reason: format!("no exact candidate for {basis:?} backend"),
+        });
+    };
+    Ok(TwoQubitUnitarySynthesisResult {
+        operations: candidate.operations,
+        global_phase: candidate.global_phase,
+    })
+}
+
+/// Plans exact two-qubit synthesis candidates for the requested target.
+pub fn plan_numeric_2q_unitary(
+    request: TwoQubitSynthesisRequest<'_>,
+) -> Result<Vec<TwoQubitSynthesisCandidate>, CompilerError> {
+    if request.qubits[0] == request.qubits[1] {
         return Err(CompilerError::InvalidInput(format!(
             "2q unitary synthesis requires distinct qubits, both are {}",
-            qubits[0]
+            request.qubits[0]
         )));
     }
-    let decomp = kak_decompose(matrix)?;
-    let mut builder = OperationBuilder::default();
-    match basis {
-        TwoQubitUnitaryDecomposeBasis::PauliRotations => {
-            emit_pauli_rotations(&mut builder, &decomp, qubits[0], qubits[1])?
+    let decomp = kak_decompose(request.matrix)?;
+    let mut candidates = Vec::new();
+    let needs_cx_family = request
+        .target
+        .native_2q()
+        .iter()
+        .any(|gate| matches!(gate, StandardGate::CX | StandardGate::CY | StandardGate::CZ));
+    let cx_basis = if needs_cx_family {
+        Some(CxBasisData::new()?)
+    } else {
+        None
+    };
+
+    for backend in [
+        TwoQubitUnitaryDecomposeBasis::Cx,
+        TwoQubitUnitaryDecomposeBasis::Cy,
+        TwoQubitUnitaryDecomposeBasis::Cz,
+        TwoQubitUnitaryDecomposeBasis::Rzz,
+        TwoQubitUnitaryDecomposeBasis::PauliRotations,
+    ] {
+        if !should_generate_backend(backend, &request.target, candidates.is_empty()) {
+            continue;
         }
-        TwoQubitUnitaryDecomposeBasis::Cx => emit_cx(&mut builder, &decomp, qubits[0], qubits[1])?,
-        TwoQubitUnitaryDecomposeBasis::Cy => emit_cy(&mut builder, &decomp, qubits[0], qubits[1])?,
-        TwoQubitUnitaryDecomposeBasis::Cz => emit_cz(&mut builder, &decomp, qubits[0], qubits[1])?,
-        TwoQubitUnitaryDecomposeBasis::Rzz => {
-            emit_rzz_only(&mut builder, &decomp, qubits[0], qubits[1])?
-        }
+        generate_backend_candidates(
+            &mut candidates,
+            backend,
+            CandidateGenerationContext {
+                matrix: request.matrix,
+                decomp: &decomp,
+                qubits: request.qubits,
+                target: &request.target,
+                cx_basis: cx_basis.as_ref(),
+            },
+        )?;
     }
-    Ok(TwoQubitUnitarySynthesisResult {
-        operations: builder.operations,
-        global_phase: builder.global_phase,
-    })
+
+    candidates.sort_by(|lhs, rhs| {
+        lhs.cost
+            .cmp(&rhs.cost)
+            .then_with(|| lhs.operations.len().cmp(&rhs.operations.len()))
+    });
+    Ok(candidates)
 }
 
 #[derive(Default)]
@@ -213,6 +445,280 @@ fn emit_pauli_rotations(
     Ok(())
 }
 
+fn should_generate_backend(
+    backend: TwoQubitUnitaryDecomposeBasis,
+    target: &TwoQubitSynthesisTarget,
+    no_candidates_yet: bool,
+) -> bool {
+    match backend {
+        TwoQubitUnitaryDecomposeBasis::Cx => target.native_2q().contains(&StandardGate::CX),
+        TwoQubitUnitaryDecomposeBasis::Cy => target.native_2q().contains(&StandardGate::CY),
+        TwoQubitUnitaryDecomposeBasis::Cz => target.native_2q().contains(&StandardGate::CZ),
+        TwoQubitUnitaryDecomposeBasis::Rzz => target.native_2q().contains(&StandardGate::RZZ),
+        TwoQubitUnitaryDecomposeBasis::PauliRotations => {
+            let has_full_pauli = [StandardGate::RXX, StandardGate::RYY, StandardGate::RZZ]
+                .iter()
+                .all(|gate| target.native_2q().contains(gate));
+            has_full_pauli || (target.fallback_pauli() && no_candidates_yet)
+        }
+    }
+}
+
+fn target_for_single_backend(
+    basis: TwoQubitUnitaryDecomposeBasis,
+) -> Result<TwoQubitSynthesisTarget, CompilerError> {
+    let native_2q = match basis {
+        TwoQubitUnitaryDecomposeBasis::PauliRotations => {
+            vec![StandardGate::RXX, StandardGate::RYY, StandardGate::RZZ]
+        }
+        TwoQubitUnitaryDecomposeBasis::Cx => vec![StandardGate::CX],
+        TwoQubitUnitaryDecomposeBasis::Cy => vec![StandardGate::CY],
+        TwoQubitUnitaryDecomposeBasis::Cz => vec![StandardGate::CZ],
+        TwoQubitUnitaryDecomposeBasis::Rzz => vec![StandardGate::RZZ],
+    };
+    let native_1q = match basis {
+        TwoQubitUnitaryDecomposeBasis::Rzz => {
+            vec![StandardGate::U, StandardGate::H, StandardGate::RX]
+        }
+        _ => vec![StandardGate::U],
+    };
+    TwoQubitSynthesisTarget::from_standard_gates(native_1q, native_2q, false)
+}
+
+struct CandidateGenerationContext<'a> {
+    matrix: &'a Array2<Complex64>,
+    decomp: &'a KakDecomposition,
+    qubits: [Qubit; 2],
+    target: &'a TwoQubitSynthesisTarget,
+    cx_basis: Option<&'a CxBasisData>,
+}
+
+fn generate_backend_candidates(
+    candidates: &mut Vec<TwoQubitSynthesisCandidate>,
+    backend: TwoQubitUnitaryDecomposeBasis,
+    context: CandidateGenerationContext<'_>,
+) -> Result<(), CompilerError> {
+    match backend {
+        TwoQubitUnitaryDecomposeBasis::PauliRotations => {
+            let mut builder = OperationBuilder::default();
+            emit_pauli_rotations(
+                &mut builder,
+                context.decomp,
+                context.qubits[0],
+                context.qubits[1],
+            )?;
+            push_validated_candidate(
+                candidates,
+                backend,
+                builder,
+                context.matrix,
+                context.qubits,
+                context.target,
+            )?;
+        }
+        TwoQubitUnitaryDecomposeBasis::Rzz => {
+            let mut builder = OperationBuilder::default();
+            emit_rzz_only(
+                &mut builder,
+                context.decomp,
+                context.qubits[0],
+                context.qubits[1],
+            )?;
+            push_validated_candidate(
+                candidates,
+                backend,
+                builder,
+                context.matrix,
+                context.qubits,
+                context.target,
+            )?;
+        }
+        TwoQubitUnitaryDecomposeBasis::Cx
+        | TwoQubitUnitaryDecomposeBasis::Cy
+        | TwoQubitUnitaryDecomposeBasis::Cz => {
+            let basis = context.cx_basis.ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "missing shared CX-family basis data for 2q synthesis planner".to_string(),
+                )
+            })?;
+            for entanglers in 0..=3 {
+                let mut builder = OperationBuilder::default();
+                match backend {
+                    TwoQubitUnitaryDecomposeBasis::Cx => emit_cx_with_count(
+                        &mut builder,
+                        context.decomp,
+                        basis,
+                        context.qubits[0],
+                        context.qubits[1],
+                        entanglers,
+                    )?,
+                    TwoQubitUnitaryDecomposeBasis::Cy => emit_cy_with_count(
+                        &mut builder,
+                        context.decomp,
+                        basis,
+                        context.qubits[0],
+                        context.qubits[1],
+                        entanglers,
+                    )?,
+                    TwoQubitUnitaryDecomposeBasis::Cz => emit_cz_with_count(
+                        &mut builder,
+                        context.decomp,
+                        basis,
+                        context.qubits[0],
+                        context.qubits[1],
+                        entanglers,
+                    )?,
+                    _ => unreachable!(),
+                }
+                push_validated_candidate(
+                    candidates,
+                    backend,
+                    builder,
+                    context.matrix,
+                    context.qubits,
+                    context.target,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_validated_candidate(
+    candidates: &mut Vec<TwoQubitSynthesisCandidate>,
+    backend: TwoQubitUnitaryDecomposeBasis,
+    builder: OperationBuilder,
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    target: &TwoQubitSynthesisTarget,
+) -> Result<(), CompilerError> {
+    if !candidate_matches_matrix(&builder.operations, builder.global_phase, matrix, qubits)? {
+        return Ok(());
+    }
+    let cost = match target_aware_cost_of_value_operations(&builder.operations, target, backend) {
+        Ok(cost) => cost,
+        Err(CompilerError::InvalidInput(_)) => {
+            // A candidate that cannot be lowered to the configured physical
+            // target is not a viable exact synthesis option. Other backends
+            // may still be.
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    candidates.push(TwoQubitSynthesisCandidate {
+        backend,
+        operations: builder.operations,
+        global_phase: builder.global_phase,
+        cost,
+    });
+    Ok(())
+}
+
+/// Computes target-aware cost for value operations emitted by synthesis.
+pub fn target_aware_cost_of_value_operations(
+    operations: &[ValueOperation],
+    target: &TwoQubitSynthesisTarget,
+    backend: TwoQubitUnitaryDecomposeBasis,
+) -> Result<TargetAwareSynthesisCost, CompilerError> {
+    if let Some(model) = target.lowering_cost_model() {
+        let qubits = operation_qubits(operations);
+        let TargetBasisCost {
+            two_qubit_ops,
+            depth,
+            total_ops,
+            parameterized_ops,
+        } = model.cost_of_fixed_operations(qubits, operations.to_vec())?;
+        return Ok(TargetAwareSynthesisCost {
+            lowered_two_qubit_ops: two_qubit_ops,
+            lowered_depth: depth,
+            lowered_total_ops: total_ops,
+            parameterized_ops,
+            backend_order: backend_order(backend),
+        });
+    }
+
+    let mut cost = TargetAwareSynthesisCost {
+        backend_order: backend_order(backend),
+        ..TargetAwareSynthesisCost::default()
+    };
+    let mut depths = std::collections::HashMap::new();
+    for operation in operations {
+        let gate = match &operation.instruction {
+            crate::circuit::ValueInstruction::Instruction(Instruction::Standard(gate)) => {
+                Some(*gate)
+            }
+            _ => None,
+        };
+        add_target_aware_cost(
+            &mut cost,
+            &mut depths,
+            gate,
+            operation.qubits.as_slice(),
+            operation.params.len(),
+            target,
+        );
+    }
+    Ok(cost)
+}
+
+fn add_target_aware_cost(
+    cost: &mut TargetAwareSynthesisCost,
+    depths: &mut std::collections::HashMap<Qubit, usize>,
+    gate: Option<StandardGate>,
+    qubits: &[Qubit],
+    param_count: usize,
+    _target: &TwoQubitSynthesisTarget,
+) {
+    if gate == Some(StandardGate::GPhase) {
+        return;
+    }
+
+    cost.lowered_total_ops += 1;
+    if qubits.len() == 2 {
+        cost.lowered_two_qubit_ops += 1;
+    }
+    if param_count > 0 {
+        cost.parameterized_ops += 1;
+    }
+    if qubits.is_empty() {
+        return;
+    }
+
+    let next = qubits
+        .iter()
+        .filter_map(|qubit| depths.get(qubit))
+        .max()
+        .copied()
+        .unwrap_or(0)
+        + 1;
+    for &qubit in qubits {
+        depths.insert(qubit, next);
+    }
+    cost.lowered_depth = cost.lowered_depth.max(next);
+}
+
+fn operation_qubits(operations: &[ValueOperation]) -> Vec<Qubit> {
+    let mut qubits = operations
+        .iter()
+        .flat_map(|operation| operation.qubits.iter().copied())
+        .collect::<Vec<_>>();
+    qubits.sort_by_key(|qubit| qubit.index());
+    qubits.dedup();
+    qubits
+}
+
+fn backend_order(backend: TwoQubitUnitaryDecomposeBasis) -> usize {
+    // This is only a deterministic tie-breaker after target-aware cost fields
+    // tie exactly. It does not override native target capability or 2Q count.
+    match backend {
+        TwoQubitUnitaryDecomposeBasis::Cx => 0,
+        TwoQubitUnitaryDecomposeBasis::Cz => 1,
+        TwoQubitUnitaryDecomposeBasis::Cy => 2,
+        TwoQubitUnitaryDecomposeBasis::Rzz => 3,
+        TwoQubitUnitaryDecomposeBasis::PauliRotations => 4,
+    }
+}
+
 fn emit_rzz_only(
     builder: &mut OperationBuilder,
     decomp: &KakDecomposition,
@@ -254,14 +760,14 @@ fn emit_ryy_as_rzz(builder: &mut OperationBuilder, first: Qubit, second: Qubit, 
     builder.push_1q_rotation(StandardGate::RX, first, -FRAC_PI_2);
 }
 
-fn emit_cx(
+fn emit_cx_with_count(
     builder: &mut OperationBuilder,
     target: &KakDecomposition,
+    basis: &CxBasisData,
     first: Qubit,
     second: Qubit,
+    num_cx: usize,
 ) -> Result<(), CompilerError> {
-    let basis = CxBasisData::new()?;
-    let num_cx = basis.num_basis_gates(target);
     let locals = basis.local_decomposition(target, num_cx);
 
     builder.global_phase += target.global_phase - num_cx as f64 * basis.global_phase;
@@ -279,14 +785,14 @@ fn emit_cx(
     Ok(())
 }
 
-fn emit_cy(
+fn emit_cy_with_count(
     builder: &mut OperationBuilder,
     target: &KakDecomposition,
+    basis: &CxBasisData,
     first: Qubit,
     second: Qubit,
+    num_cy: usize,
 ) -> Result<(), CompilerError> {
-    let basis = CxBasisData::new()?;
-    let num_cy = basis.num_basis_gates(target);
     let mut locals = basis.local_decomposition(target, num_cy);
     let s = StandardGate::S
         .matrix(&[])
@@ -313,14 +819,14 @@ fn emit_cy(
     Ok(())
 }
 
-fn emit_cz(
+fn emit_cz_with_count(
     builder: &mut OperationBuilder,
     target: &KakDecomposition,
+    basis: &CxBasisData,
     first: Qubit,
     second: Qubit,
+    num_cz: usize,
 ) -> Result<(), CompilerError> {
-    let basis = CxBasisData::new()?;
-    let num_cz = basis.num_basis_gates(target);
     let mut locals = basis.local_decomposition(target, num_cz);
     let h = StandardGate::H
         .matrix(&[])
@@ -361,6 +867,110 @@ fn absorb_cx_replacement_locals(
             _ => pre.dot(&locals[right_index].dot(post)),
         };
     }
+}
+
+fn candidate_matches_matrix(
+    operations: &[ValueOperation],
+    global_phase: f64,
+    expected: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+) -> Result<bool, CompilerError> {
+    let actual = value_operations_matrix(operations, global_phase, qubits)?;
+    Ok(actual
+        .iter()
+        .zip(expected.iter())
+        .all(|(actual, expected)| (*actual - *expected).norm() <= TWO_QUBIT_EXACT_TOLERANCE))
+}
+
+fn value_operations_matrix(
+    operations: &[ValueOperation],
+    global_phase: f64,
+    qubits: [Qubit; 2],
+) -> Result<Array2<Complex64>, CompilerError> {
+    let mut resolved = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let crate::circuit::ValueInstruction::Instruction(Instruction::Standard(gate)) =
+            &operation.instruction
+        else {
+            return Err(CompilerError::InvariantViolation(
+                "2q synthesis candidate contains non-standard operation".to_string(),
+            ));
+        };
+        let params = operation
+            .params
+            .iter()
+            .map(|param| match param {
+                ParameterValue::Fixed(value) => Ok(*value),
+                ParameterValue::Param(_) => Err(CompilerError::InvariantViolation(
+                    "2q synthesis candidate contains symbolic parameter".to_string(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        resolved.push(TwoQubitMatrixOp {
+            gate: *gate,
+            qubits: operation.qubits.iter().copied().collect(),
+            params,
+        });
+    }
+    two_qubit_operation_matrix_product(
+        &resolved,
+        global_phase,
+        qubits,
+        "2q synthesis candidate references outside qubits",
+    )
+}
+
+/// Resolved standard-gate operation used to build a two-qubit matrix product.
+///
+/// The operation may be global, one-qubit, or two-qubit, but all qubits must be
+/// contained in the canonical two-qubit frame passed to
+/// [`two_qubit_operation_matrix_product`].
+#[derive(Clone, Debug)]
+pub(crate) struct TwoQubitMatrixOp {
+    pub(crate) gate: StandardGate,
+    pub(crate) qubits: Vec<Qubit>,
+    pub(crate) params: Vec<f64>,
+}
+
+/// Builds a 4x4 matrix for resolved operations in a canonical two-qubit frame.
+///
+/// Source operations are multiplied using the same convention as
+/// `circuit_to_matrix`: `gate_n * ... * gate_0`, where `gate_0` is the earliest
+/// operation. `qubits[0]` is the first tensor factor; operations applied to the
+/// reversed pair are converted by `SWAP * matrix * SWAP`.
+pub(crate) fn two_qubit_operation_matrix_product(
+    operations: &[TwoQubitMatrixOp],
+    global_phase: f64,
+    qubits: [Qubit; 2],
+    outside_qubits_error: &str,
+) -> Result<Array2<Complex64>, CompilerError> {
+    let mut result = Array2::<Complex64>::eye(4);
+    for operation in operations {
+        let matrix = operation
+            .gate
+            .matrix(&operation.params)
+            .map_err(CompilerError::Circuit)?
+            .into_owned();
+        let identity = Array2::<Complex64>::eye(2);
+        let expanded = match operation.qubits.as_slice() {
+            [] => matrix,
+            [q] if *q == qubits[0] => kron(&matrix.view(), &identity.view()),
+            [q] if *q == qubits[1] => kron(&identity.view(), &matrix.view()),
+            [a, b] if *a == qubits[0] && *b == qubits[1] => matrix,
+            [a, b] if *a == qubits[1] && *b == qubits[0] => {
+                let swap = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+                swap.dot(&matrix).dot(&swap)
+            }
+            _ => {
+                return Err(CompilerError::InvariantViolation(
+                    outside_qubits_error.to_string(),
+                ));
+            }
+        };
+        result = expanded.dot(&result);
+    }
+    let phase = Complex64::from_polar(1.0, global_phase);
+    Ok(result.mapv(|value| phase * value))
 }
 
 struct CxBasisData {
@@ -513,36 +1123,6 @@ impl CxBasisData {
         })
     }
 
-    fn num_basis_gates(&self, target: &KakDecomposition) -> usize {
-        let traces = [
-            c(
-                4.0 * target.a.cos() * target.b.cos() * target.c.cos(),
-                4.0 * target.a.sin() * target.b.sin() * target.c.sin(),
-            ),
-            c(
-                4.0 * (FRAC_PI_4 - target.a).cos()
-                    * (self.basis.b - target.b).cos()
-                    * target.c.cos(),
-                4.0 * (FRAC_PI_4 - target.a).sin()
-                    * (self.basis.b - target.b).sin()
-                    * target.c.sin(),
-            ),
-            c(4.0 * target.c.cos(), 0.0),
-            c(4.0, 0.0),
-        ];
-
-        let mut best_index = 0usize;
-        let mut best_fidelity = (4.0 + traces[0].norm_sqr()) / 20.0;
-        for (index, trace) in traces.iter().enumerate().skip(1) {
-            let fidelity = (4.0 + trace.norm_sqr()) / 20.0;
-            if fidelity > best_fidelity + FIDELITY_IMPROVEMENT_EPS {
-                best_index = index;
-                best_fidelity = fidelity;
-            }
-        }
-        best_index
-    }
-
     fn local_decomposition(
         &self,
         target: &KakDecomposition,
@@ -583,6 +1163,7 @@ impl CxBasisData {
 mod tests {
     use super::*;
     use crate::circuit::{Circuit, Instruction, Parameter, UnitaryGate, circuit_to_matrix};
+    use crate::compile::transform::{TargetBasisLowerer, Transformer};
     use approx::assert_abs_diff_eq;
     use ndarray::linalg::kron;
     use rand::rngs::StdRng;
@@ -664,6 +1245,206 @@ mod tests {
             .zip(rhs)
             .map(|(left, right)| left.conj() * right)
             .sum()
+    }
+
+    fn target(native_2q: Vec<StandardGate>) -> TwoQubitSynthesisTarget {
+        TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::U, StandardGate::H, StandardGate::RX],
+            native_2q,
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn planner_filters_candidates_to_native_two_qubit_family() {
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+            matrix: &matrix,
+            qubits: [Qubit::new(0), Qubit::new(1)],
+            target: target(vec![StandardGate::CX]),
+        })
+        .unwrap();
+
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| {
+            candidate.backend == TwoQubitUnitaryDecomposeBasis::Cx
+                && candidate.operations.iter().all(|operation| {
+                    matches!(
+                        operation.instruction,
+                        crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::U
+                        )) | crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::CX
+                        ))
+                    )
+                })
+        }));
+    }
+
+    #[test]
+    fn target_capability_rejects_gates_with_wrong_arity() {
+        let one_qubit_error =
+            TwoQubitSynthesisTarget::from_standard_gates(vec![StandardGate::CX], vec![], true)
+                .unwrap_err();
+        assert!(one_qubit_error.to_string().contains("non-1q gate"));
+
+        let two_qubit_error = TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::U],
+            vec![StandardGate::H],
+            true,
+        )
+        .unwrap_err();
+        assert!(two_qubit_error.to_string().contains("non-2q gate"));
+    }
+
+    #[test]
+    fn planner_selection_is_independent_of_target_basis_order() {
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let cx_first = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+            matrix: &matrix,
+            qubits: [Qubit::new(0), Qubit::new(1)],
+            target: target(vec![StandardGate::CX, StandardGate::CZ]),
+        })
+        .unwrap();
+        let cz_first = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+            matrix: &matrix,
+            qubits: [Qubit::new(0), Qubit::new(1)],
+            target: target(vec![StandardGate::CZ, StandardGate::CX]),
+        })
+        .unwrap();
+
+        assert_eq!(cx_first[0].backend, cz_first[0].backend);
+        assert_eq!(cx_first[0].cost, cz_first[0].cost);
+    }
+
+    #[test]
+    fn planner_costs_match_final_target_lowering_costs() {
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        let native_1q = vec![StandardGate::U, StandardGate::H];
+        let native_2q = vec![StandardGate::CX, StandardGate::CZ];
+        let target = TwoQubitSynthesisTarget::from_standard_gates(
+            native_1q.clone(),
+            native_2q.clone(),
+            true,
+        )
+        .unwrap();
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+            matrix: &matrix,
+            qubits: [q0, q1],
+            target,
+        })
+        .unwrap();
+        let instructions = native_1q
+            .into_iter()
+            .chain(native_2q)
+            .map(Instruction::Standard)
+            .collect::<Vec<_>>();
+        let cost_model = TargetBasisCostModel::new(instructions).unwrap();
+
+        assert!(!candidates.is_empty());
+        for candidate in &candidates {
+            let lowered = cost_model
+                .cost_of_fixed_operations(vec![q0, q1], candidate.operations.clone())
+                .unwrap();
+            assert_eq!(candidate.cost.lowered_two_qubit_ops, lowered.two_qubit_ops);
+            assert_eq!(candidate.cost.lowered_depth, lowered.depth);
+            assert_eq!(candidate.cost.lowered_total_ops, lowered.total_ops);
+            assert_eq!(candidate.cost.parameterized_ops, lowered.parameterized_ops);
+        }
+        assert!(
+            candidates
+                .windows(2)
+                .all(|pair| pair[0].cost <= pair[1].cost)
+        );
+    }
+
+    #[test]
+    fn planner_uses_rzz_backend_for_rzz_only_target() {
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+            matrix: &matrix,
+            qubits: [Qubit::new(0), Qubit::new(1)],
+            target: target(vec![StandardGate::RZZ]),
+        })
+        .unwrap();
+
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| {
+            candidate.backend == TwoQubitUnitaryDecomposeBasis::Rzz
+                && candidate.operations.iter().all(|operation| {
+                    !matches!(
+                        operation.instruction,
+                        crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::CX
+                        )) | crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::CY
+                        )) | crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::CZ
+                        )) | crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::RXX
+                        )) | crate::circuit::ValueInstruction::Instruction(Instruction::Standard(
+                            StandardGate::RYY
+                        ))
+                    )
+                })
+        }));
+    }
+
+    #[test]
+    fn pauli_fallback_lowers_to_a_target_without_a_direct_planner_backend() {
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        let native_1q = vec![StandardGate::U, StandardGate::H, StandardGate::RX];
+        let native_2q = vec![StandardGate::RXX];
+        let target = TwoQubitSynthesisTarget::from_standard_gates(
+            native_1q.clone(),
+            native_2q.clone(),
+            true,
+        )
+        .unwrap();
+        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
+        let candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+            matrix: &matrix,
+            qubits: [q0, q1],
+            target,
+        })
+        .unwrap();
+
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| {
+            candidate.backend == TwoQubitUnitaryDecomposeBasis::PauliRotations
+        }));
+        let candidate = &candidates[0];
+        let mut synthesized =
+            Circuit::from_operations(vec![q0, q1], candidate.operations.clone(), None, None)
+                .unwrap();
+        synthesized.set_global_phase(Parameter::from(candidate.global_phase));
+        let target_basis = native_1q
+            .iter()
+            .chain(&native_2q)
+            .copied()
+            .map(Instruction::Standard)
+            .collect::<Vec<_>>();
+        let lowered = TargetBasisLowerer::new(target_basis)
+            .unwrap()
+            .transform(&synthesized, None)
+            .unwrap()
+            .circuit;
+
+        assert!(lowered.operations().iter().all(|operation| matches!(
+            operation.instruction,
+            Instruction::Standard(
+                StandardGate::U | StandardGate::H | StandardGate::RX | StandardGate::RXX
+            )
+        )));
+        assert_abs_diff_eq!(
+            matrix,
+            circuit_to_matrix(&lowered, None).unwrap(),
+            epsilon = 1e-8
+        );
     }
 
     #[test]

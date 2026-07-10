@@ -1,11 +1,16 @@
 use super::*;
-use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+use crate::circuit::StandardGate;
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+
+fn target(gate: StandardGate) -> TwoQubitSynthesisTarget {
+    TwoQubitSynthesisTarget::from_standard_gates(vec![StandardGate::U], vec![gate], true).unwrap()
+}
 
 #[test]
 fn normal_config_uses_bounded_default_search_budget() {
-    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cx);
+    let config = TwoQubitBlockResynthesisConfig::normal(target(StandardGate::CX));
 
-    assert_eq!(config.two_qubit_basis, TwoQubitUnitaryDecomposeBasis::Cx);
+    assert_eq!(config.two_qubit_target.native_2q(), &[StandardGate::CX]);
     assert_eq!(config.max_block_ops, 16);
     assert_eq!(config.max_crossed_ops, 4);
     assert_eq!(config.max_scan_span, 32);
@@ -17,10 +22,10 @@ fn normal_config_uses_bounded_default_search_budget() {
 
 #[test]
 fn enhanced_config_increases_only_search_budgets() {
-    let normal = TwoQubitBlockResynthesisConfig::normal(TwoQubitUnitaryDecomposeBasis::Cz);
-    let enhanced = TwoQubitBlockResynthesisConfig::enhanced(TwoQubitUnitaryDecomposeBasis::Cz);
+    let normal = TwoQubitBlockResynthesisConfig::normal(target(StandardGate::CZ));
+    let enhanced = TwoQubitBlockResynthesisConfig::enhanced(target(StandardGate::CZ));
 
-    assert_eq!(enhanced.two_qubit_basis, normal.two_qubit_basis);
+    assert_eq!(enhanced.two_qubit_target, normal.two_qubit_target);
     assert!(enhanced.max_block_ops > normal.max_block_ops);
     assert!(enhanced.max_crossed_ops > normal.max_crossed_ops);
     assert!(enhanced.max_scan_span > normal.max_scan_span);

@@ -20,17 +20,25 @@
 use super::collector::TwoQubitNumericBlock;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
-use super::cost::{ResynthesisCost, cost_of_replacements, cost_of_source_ops};
-use crate::circuit::{Instruction, StandardGate, ValueOperation};
+use super::cost::{ResynthesisCost, cost_of_source_ops};
+use crate::circuit::{
+    Circuit, Instruction, Parameter, ParameterValue, ValueInstruction, ValueOperation,
+    circuit_to_matrix,
+};
 use crate::compile::CompilerError;
+use crate::compile::transform::decompose::unitary::unitary_2q::{
+    TwoQubitMatrixOp, two_qubit_operation_matrix_product,
+};
 use crate::compile::transform::decompose::unitary::{
-    TwoQubitUnitarySynthesisResult, synthesize_numeric_2q_unitary,
+    TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
 };
 use ndarray::Array2;
-use ndarray::linalg::kron;
 use num_complex::Complex64;
 use std::cmp::{Ordering, Reverse};
 use std::collections::HashSet;
+
+const MAX_PATCH_VALIDATION_QUBITS: usize = 6;
+const PATCH_VALIDATION_TOLERANCE: f64 = 1e-8;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockPatch {
@@ -105,12 +113,12 @@ fn compare_blocks(lhs: &TwoQubitNumericBlock, rhs: &TwoQubitNumericBlock) -> Ord
 fn compare_patches(lhs: &BlockPatch, rhs: &BlockPatch) -> Ordering {
     let lhs_reduction = lhs
         .before_cost
-        .two_qubit_ops
-        .saturating_sub(lhs.after_cost.two_qubit_ops);
+        .lowered_two_qubit_ops
+        .saturating_sub(lhs.after_cost.lowered_two_qubit_ops);
     let rhs_reduction = rhs
         .before_cost
-        .two_qubit_ops
-        .saturating_sub(rhs.after_cost.two_qubit_ops);
+        .lowered_two_qubit_ops
+        .saturating_sub(rhs.after_cost.lowered_two_qubit_ops);
 
     lhs.after_cost
         .cmp(&rhs.after_cost)
@@ -129,43 +137,57 @@ fn try_synthesize_block(
         Ok(matrix) => matrix,
         Err(_) => return Ok(None),
     };
-    let TwoQubitUnitarySynthesisResult {
-        operations,
-        global_phase,
-    } = match synthesize_numeric_2q_unitary(&matrix, block.qubits, config.two_qubit_basis) {
-        Ok(result) => result,
-        Err(_) => return Ok(None),
-    };
-
     let matched = block
         .matched_orders
         .iter()
         .map(|&order| &ops[order])
         .collect::<Vec<_>>();
-    let before_cost = cost_of_source_ops(&matched);
-    let after_cost = cost_of_replacements(&operations);
-    if after_cost >= before_cost {
-        return Ok(None);
-    }
+    let before_cost = match cost_of_source_ops(&matched, &config.two_qubit_target) {
+        Ok(cost) => cost,
+        Err(_) => return Ok(None),
+    };
 
     let crossed = block
         .crossed_orders
         .iter()
         .map(|&order| &ops[order])
         .collect::<Vec<_>>();
-    if !commutation.replacements_commute_with_crossed(&crossed, &operations) {
-        return Ok(None);
-    }
+    let candidates = match plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+        matrix: &matrix,
+        qubits: block.qubits,
+        target: config.two_qubit_target.clone(),
+    }) {
+        Ok(candidates) => candidates,
+        Err(_) => return Ok(None),
+    };
 
-    Ok(Some(BlockPatch {
-        first_order: block.first_order(),
-        matched_orders: block.matched_orders.clone(),
-        crossed_orders: block.crossed_orders.clone(),
-        replacement: operations,
-        before_cost,
-        after_cost,
-        synthesis_phase: global_phase,
-    }))
+    for candidate in candidates {
+        if candidate.cost >= before_cost {
+            continue;
+        }
+        if !commutation.replacements_commute_with_crossed(&crossed, &candidate.operations) {
+            continue;
+        }
+        if !patch_preserves_relevant_span(
+            block,
+            ops,
+            &candidate.operations,
+            candidate.global_phase,
+        )? {
+            continue;
+        }
+
+        return Ok(Some(BlockPatch {
+            first_order: block.first_order(),
+            matched_orders: block.matched_orders.clone(),
+            crossed_orders: block.crossed_orders.clone(),
+            replacement: candidate.operations,
+            before_cost,
+            after_cost: candidate.cost,
+            synthesis_phase: candidate.global_phase,
+        }));
+    }
+    Ok(None)
 }
 
 // Matrix construction uses the same convention as `circuit_to_matrix`: source
@@ -175,9 +197,9 @@ fn block_matrix(
     block: &TwoQubitNumericBlock,
     ops: &[OperationView<'_>],
 ) -> Result<Array2<Complex64>, CompilerError> {
-    let mut result = Array2::<Complex64>::eye(4);
     let mut orders = block.matched_orders.clone();
     orders.sort_unstable();
+    let mut resolved = Vec::with_capacity(orders.len());
     for order in orders {
         let view = &ops[order];
         let Instruction::Standard(gate) = view.operation.instruction else {
@@ -195,28 +217,152 @@ fn block_matrix(
                     "resynthesis matrix requested for symbolic operation".to_string(),
                 )
             })?;
-        let matrix = gate
-            .matrix(&params)
-            .map_err(CompilerError::Circuit)?
-            .into_owned();
-        let identity = Array2::<Complex64>::eye(2);
-        let expanded = match view.operation.qubits.as_slice() {
-            [q] if *q == block.qubits[0] => kron(&matrix.view(), &identity.view()),
-            [q] if *q == block.qubits[1] => kron(&identity.view(), &matrix.view()),
-            [a, b] if *a == block.qubits[0] && *b == block.qubits[1] => matrix,
-            [a, b] if *a == block.qubits[1] && *b == block.qubits[0] => {
-                let swap = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
-                swap.dot(&matrix).dot(&swap)
-            }
-            _ => {
-                return Err(CompilerError::InvariantViolation(
-                    "resynthesis block contains operation outside canonical qubits".to_string(),
-                ));
-            }
-        };
-        result = expanded.dot(&result);
+        resolved.push(TwoQubitMatrixOp {
+            gate,
+            qubits: view.operation.qubits.iter().copied().collect(),
+            params,
+        });
     }
-    Ok(result)
+    two_qubit_operation_matrix_product(
+        &resolved,
+        0.0,
+        block.qubits,
+        "resynthesis block contains operation outside canonical qubits",
+    )
+}
+
+fn patch_preserves_relevant_span(
+    block: &TwoQubitNumericBlock,
+    ops: &[OperationView<'_>],
+    replacement: &[ValueOperation],
+    synthesis_phase: f64,
+) -> Result<bool, CompilerError> {
+    let mut relevant_qubits = HashSet::new();
+    let mut included_orders = block
+        .matched_orders
+        .iter()
+        .chain(&block.crossed_orders)
+        .copied()
+        .collect::<HashSet<_>>();
+    for &order in &included_orders {
+        relevant_qubits.extend(ops[order].operation.qubits.iter().copied());
+    }
+    for operation in replacement {
+        relevant_qubits.extend(operation.qubits.iter().copied());
+    }
+    if relevant_qubits.len() > MAX_PATCH_VALIDATION_QUBITS {
+        return Ok(false);
+    }
+
+    let Some(span_start) = included_orders.iter().min().copied() else {
+        return Ok(false);
+    };
+    let Some(span_end) = included_orders.iter().max().copied() else {
+        return Ok(false);
+    };
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (order, view) in ops.iter().enumerate().take(span_end + 1).skip(span_start) {
+            if included_orders.contains(&order) {
+                continue;
+            }
+            if !view.operation.qubits.is_empty()
+                && !view
+                    .operation
+                    .qubits
+                    .iter()
+                    .any(|qubit| relevant_qubits.contains(qubit))
+            {
+                continue;
+            }
+            if operation_view_to_value(view).is_none() {
+                return Ok(false);
+            }
+            included_orders.insert(order);
+            relevant_qubits.extend(view.operation.qubits.iter().copied());
+            if relevant_qubits.len() > MAX_PATCH_VALIDATION_QUBITS {
+                return Ok(false);
+            }
+            changed = true;
+        }
+    }
+
+    let mut source_ops = Vec::new();
+    let mut replacement_ops = Vec::new();
+    let matched_orders = block.matched_orders.iter().copied().collect::<HashSet<_>>();
+    for (order, view) in ops.iter().enumerate().take(span_end + 1).skip(span_start) {
+        if included_orders.contains(&order) {
+            let Some(operation) = operation_view_to_value(view) else {
+                return Ok(false);
+            };
+            source_ops.push(operation);
+        }
+
+        if order == block.first_order() {
+            replacement_ops.extend(replacement.iter().cloned());
+        }
+        if matched_orders.contains(&order) {
+            continue;
+        }
+        if included_orders.contains(&order) {
+            let Some(operation) = operation_view_to_value(view) else {
+                return Ok(false);
+            };
+            replacement_ops.push(operation);
+        }
+    }
+
+    let mut qubits = relevant_qubits.into_iter().collect::<Vec<_>>();
+    qubits.sort_by_key(|qubit| qubit.index());
+
+    let Ok(source_circuit) = Circuit::from_operations(qubits.clone(), source_ops, None, None)
+    else {
+        return Ok(false);
+    };
+    let Ok(mut replacement_circuit) = Circuit::from_operations(qubits, replacement_ops, None, None)
+    else {
+        return Ok(false);
+    };
+    if synthesis_phase != 0.0 {
+        replacement_circuit.set_global_phase(Parameter::from(synthesis_phase));
+    }
+
+    let Ok(source_matrix) = circuit_to_matrix(&source_circuit, None) else {
+        return Ok(false);
+    };
+    let Ok(replacement_matrix) = circuit_to_matrix(&replacement_circuit, None) else {
+        return Ok(false);
+    };
+    Ok(source_matrix.shape() == replacement_matrix.shape()
+        && source_matrix
+            .iter()
+            .zip(replacement_matrix.iter())
+            .all(|(source, replacement)| {
+                (*source - *replacement).norm() <= PATCH_VALIDATION_TOLERANCE
+            }))
+}
+
+fn operation_view_to_value(view: &OperationView<'_>) -> Option<ValueOperation> {
+    let Instruction::Standard(gate) = view.operation.instruction else {
+        return None;
+    };
+    let params = view
+        .params
+        .iter()
+        .map(|param| param.evaluate(&None))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if params.iter().any(|value| !value.is_finite()) || gate.matrix(&params).is_err() {
+        return None;
+    }
+    Some(ValueOperation {
+        instruction: ValueInstruction::from_instruction(Instruction::Standard(gate)),
+        qubits: view.operation.qubits.clone(),
+        params: params.into_iter().map(ParameterValue::Fixed).collect(),
+        label: view.operation.label.clone(),
+    })
 }
 
 #[cfg(test)]

@@ -42,6 +42,47 @@ pub struct TargetBasisLowerer {
     plans: LoweringPlans,
 }
 
+/// Canonical identity of a standard-gate target basis.
+///
+/// The signature is order- and duplicate-insensitive because target-basis
+/// lowering treats the configured instructions as a capability set. `GPhase`
+/// is omitted because it is implicit and has no effect on generated templates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetBasisSignature {
+    gates: Vec<u8>,
+}
+
+/// Cost of lowering a fixed standard-gate operation sequence to a target basis.
+///
+/// Global-phase operations are intentionally excluded: they have no physical
+/// gate cost and do not occupy a qubit wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetBasisCost {
+    pub two_qubit_ops: usize,
+    pub depth: usize,
+    pub total_ops: usize,
+    pub parameterized_ops: usize,
+}
+
+/// Reusable, exact target-basis cost evaluator.
+///
+/// The evaluator owns the same lowering plans used by [`TargetBasisLowerer`].
+/// It therefore measures the concrete output of the active rule library rather
+/// than maintaining a separate heuristic approximation for synthesis choices.
+#[derive(Debug, Clone)]
+pub struct TargetBasisCostModel {
+    signature: TargetBasisSignature,
+    lowerer: TargetBasisLowerer,
+}
+
+impl PartialEq for TargetBasisCostModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+    }
+}
+
+impl Eq for TargetBasisCostModel {}
+
 #[derive(Debug, Clone)]
 struct LoweringPlans {
     physical_keys: HashSet<KnowledgeInstructionKey>,
@@ -112,6 +153,97 @@ impl TargetBasisLowerer {
     /// Returns the configured target instruction basis in insertion order.
     pub fn target_basis(&self) -> &[Instruction] {
         &self.target_basis
+    }
+}
+
+impl TargetBasisSignature {
+    /// Builds a canonical signature from standard target gates.
+    pub fn from_standard_gates(gates: &[StandardGate]) -> Self {
+        let mut gates = gates
+            .iter()
+            .filter(|gate| **gate != StandardGate::GPhase)
+            .map(|gate| *gate as u8)
+            .collect::<Vec<_>>();
+        gates.sort_unstable();
+        gates.dedup();
+        Self { gates }
+    }
+}
+
+impl TargetBasisCostModel {
+    /// Builds an exact cost model for a non-empty standard-gate target basis.
+    pub fn new(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
+        let gates = target_basis
+            .iter()
+            .map(|instruction| match instruction {
+                Instruction::Standard(gate) => Ok(*gate),
+                _ => Err(CompilerError::InvalidInput(format!(
+                    "target-basis cost model requires standard instructions, got {instruction:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let lowerer = TargetBasisLowerer::new(target_basis)?;
+        Ok(Self {
+            signature: TargetBasisSignature::from_standard_gates(&gates),
+            lowerer,
+        })
+    }
+
+    /// Returns the canonical target identity used by synthesis caches.
+    pub const fn signature(&self) -> &TargetBasisSignature {
+        &self.signature
+    }
+
+    /// Lowers fixed standard-gate operations and returns the exact resulting
+    /// target-basis cost.
+    ///
+    /// The supplied operations must reference only `qubits`, carry fixed
+    /// finite parameters, and contain no classical control. These constraints
+    /// match the numeric two-qubit synthesis and resynthesis callers.
+    pub fn cost_of_fixed_operations(
+        &self,
+        qubits: Vec<Qubit>,
+        operations: Vec<ValueOperation>,
+    ) -> Result<TargetBasisCost, CompilerError> {
+        let source = Circuit::from_operations(qubits, operations, None, None)
+            .map_err(CompilerError::Circuit)?;
+        let lowered = self.lowerer.transform(&source, None)?.circuit;
+        let mut cost = TargetBasisCost::default();
+        let mut depths = HashMap::new();
+        for operation in lowered.operations() {
+            let Instruction::Standard(gate) = operation.instruction else {
+                return Err(CompilerError::InvariantViolation(
+                    "target-basis lowering emitted a non-standard operation while estimating cost"
+                        .to_string(),
+                ));
+            };
+            if gate == StandardGate::GPhase {
+                continue;
+            }
+            cost.total_ops += 1;
+            if !operation.params.is_empty() {
+                cost.parameterized_ops += 1;
+            }
+            if operation.qubits.len() == 2 {
+                cost.two_qubit_ops += 1;
+            }
+            if operation.qubits.is_empty() {
+                continue;
+            }
+            let next_depth = operation
+                .qubits
+                .iter()
+                .filter_map(|qubit| depths.get(qubit))
+                .max()
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            for qubit in &operation.qubits {
+                depths.insert(*qubit, next_depth);
+            }
+            cost.depth = cost.depth.max(next_depth);
+        }
+        Ok(cost)
     }
 }
 
