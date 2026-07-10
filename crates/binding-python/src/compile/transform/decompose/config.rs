@@ -11,7 +11,10 @@
 // that they have been altered from the originals.
 
 use crate::compile::resource::{PyResourceLimits, PyResourcePolicy};
-use cqlib_core::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
+use cqlib_core::circuit::StandardGate;
+use cqlib_core::compile::transform::decompose::unitary::{
+    TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis,
+};
 use cqlib_core::compile::transform::decompose::{McGateDecomposeConfig, UnitaryDecomposeConfig};
 use pyo3::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -30,6 +33,18 @@ pub struct PyTwoQubitUnitaryDecomposeBasis {
 
 #[pymethods]
 impl PyTwoQubitUnitaryDecomposeBasis {
+    pub(crate) const fn repr_value(&self) -> &'static str {
+        match self.inner {
+            TwoQubitUnitaryDecomposeBasis::PauliRotations => {
+                "TwoQubitUnitaryDecomposeBasis.pauli_rotations()"
+            }
+            TwoQubitUnitaryDecomposeBasis::Cx => "TwoQubitUnitaryDecomposeBasis.cx()",
+            TwoQubitUnitaryDecomposeBasis::Cy => "TwoQubitUnitaryDecomposeBasis.cy()",
+            TwoQubitUnitaryDecomposeBasis::Cz => "TwoQubitUnitaryDecomposeBasis.cz()",
+            TwoQubitUnitaryDecomposeBasis::Rzz => "TwoQubitUnitaryDecomposeBasis.rzz()",
+        }
+    }
+
     #[staticmethod]
     fn pauli_rotations() -> Self {
         Self {
@@ -66,15 +81,7 @@ impl PyTwoQubitUnitaryDecomposeBasis {
     }
 
     fn __repr__(&self) -> &'static str {
-        match self.inner {
-            TwoQubitUnitaryDecomposeBasis::PauliRotations => {
-                "TwoQubitUnitaryDecomposeBasis.pauli_rotations()"
-            }
-            TwoQubitUnitaryDecomposeBasis::Cx => "TwoQubitUnitaryDecomposeBasis.cx()",
-            TwoQubitUnitaryDecomposeBasis::Cy => "TwoQubitUnitaryDecomposeBasis.cy()",
-            TwoQubitUnitaryDecomposeBasis::Cz => "TwoQubitUnitaryDecomposeBasis.cz()",
-            TwoQubitUnitaryDecomposeBasis::Rzz => "TwoQubitUnitaryDecomposeBasis.rzz()",
-        }
+        self.repr_value()
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -102,9 +109,10 @@ impl PyTwoQubitUnitaryDecomposeBasis {
     module = "cqlib.compile.transform.decompose",
     from_py_object
 )]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PyUnitaryDecomposeConfig {
     pub(crate) inner: UnitaryDecomposeConfig,
+    two_qubit_basis: PyTwoQubitUnitaryDecomposeBasis,
 }
 
 #[pymethods]
@@ -115,22 +123,21 @@ impl PyUnitaryDecomposeConfig {
         two_qubit_basis: Option<PyTwoQubitUnitaryDecomposeBasis>,
         recurse_control_flow: bool,
     ) -> Self {
+        let two_qubit_basis = two_qubit_basis.unwrap_or(PyTwoQubitUnitaryDecomposeBasis {
+            inner: TwoQubitUnitaryDecomposeBasis::PauliRotations,
+        });
         Self {
             inner: UnitaryDecomposeConfig {
-                two_qubit_basis: two_qubit_basis
-                    .map_or(TwoQubitUnitaryDecomposeBasis::PauliRotations, |basis| {
-                        basis.inner
-                    }),
+                two_qubit_target: target_for_basis(two_qubit_basis.inner),
                 recurse_control_flow,
             },
+            two_qubit_basis,
         }
     }
 
     #[getter]
     fn two_qubit_basis(&self) -> PyTwoQubitUnitaryDecomposeBasis {
-        PyTwoQubitUnitaryDecomposeBasis {
-            inner: self.inner.two_qubit_basis,
-        }
+        self.two_qubit_basis
     }
 
     #[getter]
@@ -155,12 +162,30 @@ impl PyUnitaryDecomposeConfig {
     }
 
     fn __copy__(&self) -> Self {
-        *self
+        self.clone()
     }
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
-        *self
+        self.clone()
     }
+}
+
+pub(crate) fn target_for_basis(basis: TwoQubitUnitaryDecomposeBasis) -> TwoQubitSynthesisTarget {
+    let (native_1q, native_2q) = match basis {
+        TwoQubitUnitaryDecomposeBasis::PauliRotations => (
+            vec![StandardGate::U],
+            vec![StandardGate::RXX, StandardGate::RYY, StandardGate::RZZ],
+        ),
+        TwoQubitUnitaryDecomposeBasis::Cx => (vec![StandardGate::U], vec![StandardGate::CX]),
+        TwoQubitUnitaryDecomposeBasis::Cy => (vec![StandardGate::U], vec![StandardGate::CY]),
+        TwoQubitUnitaryDecomposeBasis::Cz => (vec![StandardGate::U], vec![StandardGate::CZ]),
+        TwoQubitUnitaryDecomposeBasis::Rzz => (
+            vec![StandardGate::U, StandardGate::H, StandardGate::RX],
+            vec![StandardGate::RZZ],
+        ),
+    };
+    TwoQubitSynthesisTarget::from_standard_gates(native_1q, native_2q, false)
+        .expect("legacy two-qubit basis must define a valid synthesis target")
 }
 
 /// Configuration for resource-aware multi-controlled-gate decomposition.

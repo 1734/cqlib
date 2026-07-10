@@ -15,6 +15,7 @@
 from . import decompose as decompose
 from . import layout as layout
 from . import routing as routing
+from . import resynthesis as resynthesis
 from .canonicalize import CanonicalizeConfig as CanonicalizeConfig
 from .canonicalize import CanonicalizeResult as CanonicalizeResult
 from .canonicalize import Canonicalizer as Canonicalizer

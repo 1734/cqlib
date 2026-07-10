@@ -1,0 +1,75 @@
+# This code is part of Cqlib.
+#
+# (C) Copyright China Telecom Quantum Group 2026
+#
+# This code is licensed under the Apache License, Version 2.0. You may
+# obtain a copy of this license in the LICENSE.txt file in the root directory
+# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
+
+"""Numeric two-qubit block resynthesis transforms."""
+
+from __future__ import annotations
+
+from cqlib.circuit import Circuit
+from cqlib.compile.commutation import CommutationConfig
+from .decompose import TwoQubitUnitaryDecomposeBasis
+from .result import TransformResult
+
+class TwoQubitBlockResynthesisConfig:
+    """Configuration for bounded numeric two-qubit block resynthesis."""
+
+    def __init__(
+        self,
+        *,
+        two_qubit_basis: TwoQubitUnitaryDecomposeBasis | None = None,
+        enhanced: bool = False,
+        max_block_ops: int | None = None,
+        max_crossed_ops: int | None = None,
+        max_scan_span: int | None = None,
+        skip_labeled_ops: bool = True,
+        recurse_control_flow: bool = True,
+        commutation: CommutationConfig | None = None,
+    ) -> None: ...
+    @property
+    def two_qubit_basis(self) -> TwoQubitUnitaryDecomposeBasis: ...
+    @property
+    def max_block_ops(self) -> int: ...
+    @property
+    def max_crossed_ops(self) -> int: ...
+    @property
+    def max_scan_span(self) -> int: ...
+    @property
+    def skip_labeled_ops(self) -> bool: ...
+    @property
+    def recurse_control_flow(self) -> bool: ...
+    @property
+    def commutation(self) -> CommutationConfig: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __copy__(self) -> TwoQubitBlockResynthesisConfig: ...
+    def __deepcopy__(
+        self, memo: dict[int, object]
+    ) -> TwoQubitBlockResynthesisConfig: ...
+
+class ResynthesizeTwoQubitBlocks:
+    """Reusable numeric two-qubit block resynthesis transformer."""
+
+    def __init__(
+        self, config: TwoQubitBlockResynthesisConfig | None = None
+    ) -> None: ...
+    @property
+    def config(self) -> TwoQubitBlockResynthesisConfig: ...
+    def run(self, circuit: Circuit) -> TransformResult: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __copy__(self) -> ResynthesizeTwoQubitBlocks: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> ResynthesizeTwoQubitBlocks: ...
+
+def resynthesize_two_qubit_blocks(
+    circuit: Circuit,
+    config: TwoQubitBlockResynthesisConfig | None = None,
+) -> TransformResult:
+    """Resynthesize strictly improving fixed numeric two-qubit blocks."""
+    ...
+
+__all__: list[str]

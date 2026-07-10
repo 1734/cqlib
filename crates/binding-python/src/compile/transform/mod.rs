@@ -16,6 +16,7 @@ mod canonicalize;
 pub mod decompose;
 pub mod layout;
 pub mod result;
+mod resynthesis;
 mod rewrite;
 pub mod routing;
 mod routing_basis;
@@ -26,6 +27,7 @@ use canonicalize::{
     PyCanonicalizeConfig, PyCanonicalizeResult, PyCanonicalizer, py_canonicalize_circuit,
 };
 pub(crate) use result::PyTransformResult;
+use resynthesis::register_resynthesis_module;
 use rewrite::{
     PyKnowledgeRewriteResult, PyKnowledgeRewriteStats, PyKnowledgeRewriter, PyRewriteConfig,
     PyRewriteMode, py_rewrite_circuit,
@@ -53,6 +55,7 @@ pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResul
     decompose::register_decompose_module(&m)?;
     layout::register_layout_module(&m)?;
     routing::register_routing_module(&m)?;
+    register_resynthesis_module(&m)?;
 
     parent.add_submodule(&m)?;
     parent

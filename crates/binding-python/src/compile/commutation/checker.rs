@@ -90,7 +90,7 @@ impl PyCommutation {
 )]
 #[derive(Clone, Debug)]
 pub struct PyCommutationConfig {
-    inner: CommutationConfig,
+    pub(crate) inner: CommutationConfig,
 }
 
 impl From<CommutationConfig> for PyCommutationConfig {
