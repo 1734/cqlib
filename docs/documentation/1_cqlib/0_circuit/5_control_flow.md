@@ -115,14 +115,9 @@ from cqlib.circuit import ClassicalExpr
 a = ClassicalExpr.bool_literal(True)
 b = ClassicalExpr.bool_literal(False)
 
-expr = (a & ~b) | b
-print(expr.simplified())
-```
-
-也可以使用方法形式构造同样的表达式：
-
-```python
-expr = a.and_(b.not_()).or_(b)
+expr = a | b
+simplified = expr.simplified() 
+print(simplified.is_bool_true()) # True
 ```
 
 ### 4. 比较

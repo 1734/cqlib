@@ -125,7 +125,7 @@ c = Circuit(2)
 c.rx(0, theta)
 c.cx(0, 1)
 
-print(c.id)              # 当前线路的经典句柄命名空间
+print(c.id)              # 当前线路的 CircuitId 句柄标识
 print(c.num_qubits)      # 2
 print(c.width)           # 2
 print(c.qubits)          # [Qubit(0), Qubit(1)]

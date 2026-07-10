@@ -44,10 +44,9 @@ pip install cqlib
 安装完成后，可以通过以下方式验证：
 
 ```python
-import cqlib
-print(cqlib.__version__)
+python -m pip show cqlib
 ```
-如果能够正确输出版本号，则说明安装成功。
+如果能够正确输出版本信息，则说明安装成功。
 
 ---
 
