@@ -543,7 +543,8 @@ proptest! {
         let basis = qcis_cz_basis();
         let device = Device::line("property-line", 5)
             .unwrap()
-            .with_native_gates(native_basis(&basis));
+            .with_native_gates(native_basis(&basis))
+            .unwrap();
         let config = CompileConfig {
             mode: CompileMode::Enhanced,
             target_basis: None,
@@ -571,7 +572,8 @@ fn compile_with_same_seed_is_deterministic() {
     let basis = qcis_cz_basis();
     let device = Device::ring("deterministic-ring", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
     let config = CompileConfig {
         mode: CompileMode::Enhanced,
         target_basis: None,
@@ -1320,7 +1322,8 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
         .with_native_gates(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = compile(
         &circuit,
@@ -1441,7 +1444,8 @@ fn compile_toffoli_routing_basis_prefers_cz_native_decomposition() {
             StandardGate::TDG,
             StandardGate::CZ,
             StandardGate::GPhase,
-        ]));
+        ]))
+        .unwrap();
     let topology = device.topology().clone();
 
     let result = compile(
@@ -1507,7 +1511,8 @@ fn compile_long_range_circuit_on_line_device_to_qcis_native_basis() {
     let basis = qcis_cz_basis();
     let device = Device::line("line-qcis", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 101, &basis);
 
@@ -1521,7 +1526,8 @@ fn compile_long_range_circuit_on_ring_device_to_qcis_native_basis() {
     let basis = qcis_cz_basis();
     let device = Device::ring("ring-qcis", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 102, &basis);
 
@@ -1543,7 +1549,8 @@ fn compile_dense_circuit_on_bidirectional_line_to_cz_native_basis() {
     ];
     let device = Device::bidirectional_line("bidir-line-cz", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 103, &basis);
 
@@ -1565,7 +1572,8 @@ fn compile_dense_circuit_on_star_device_to_cx_native_basis() {
     ];
     let device = Device::star("star-cx", 4, 0)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 104, &basis);
 
@@ -1587,7 +1595,8 @@ fn compile_ising_circuit_on_grid_device_to_ising_native_basis() {
     ];
     let device = Device::grid("grid-ising", 2, 3)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 105, &basis);
 
@@ -1604,7 +1613,8 @@ fn compile_enhanced_ghz3_routes_and_cleans_up() {
         .with_native_gates(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = compile(
         &circuit,

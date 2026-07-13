@@ -12,6 +12,9 @@
 
 use super::*;
 use crate::circuit::gate::standard_gate::StandardGate;
+use crate::circuit::{
+    ClassicalExpr, ClassicalType, MCGate, Operation, ParameterValue, Qubit, UnitaryGate,
+};
 
 #[test]
 fn test_instruction_prop() {
@@ -37,7 +40,8 @@ fn test_qubit_prop() {
         .with_t1(50.0)
         .with_t2(30.0)
         .with_frequency(5.0)
-        .with_native_instruction(instr_prop);
+        .with_native_instruction(instr_prop)
+        .unwrap();
 
     assert_eq!(prop.readout_error(), 0.05);
     assert_eq!(prop.t1(), Some(50.0));
@@ -52,9 +56,145 @@ fn test_edge_prop() {
     let instr = Instruction::Standard(StandardGate::CX);
     let instr_prop = InstructionProp::new(instr, 0.02).with_length(200.0);
 
-    let prop = EdgeProp::new().with_native_instruction(instr_prop);
+    let prop = EdgeProp::new().with_native_instruction(instr_prop).unwrap();
     assert_eq!(prop.native_instructions().len(), 1);
     assert_eq!(prop.native_instructions()[0].error_rate(), 0.02);
+}
+
+#[test]
+fn device_native_gates_accept_only_standard_gates_with_at_most_two_qubits() {
+    let mut device = Device::line("native-validation", 2).unwrap();
+    device
+        .set_native_gates(vec![
+            Instruction::Standard(StandardGate::GPhase),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    assert_eq!(device.native_gates().len(), 3);
+    assert_eq!(
+        device
+            .set_native_gates(vec![Instruction::Standard(StandardGate::CCX)])
+            .unwrap_err(),
+        DeviceError::InvalidNativeInstructionArity {
+            instruction: "CCX".to_string(),
+            expected: 0..=2,
+            actual: 3,
+        }
+    );
+    assert_eq!(
+        device
+            .set_native_gates(vec![Instruction::Delay])
+            .unwrap_err(),
+        DeviceError::NonStandardNativeInstruction {
+            instruction: "delay".to_string(),
+        }
+    );
+    assert!(matches!(
+        Device::line("invalid-builder", 2)
+            .unwrap()
+            .with_native_gates(vec![Instruction::Delay]),
+        Err(DeviceError::NonStandardNativeInstruction { .. })
+    ));
+}
+
+#[test]
+fn set_native_gates_preserves_existing_defaults_when_validation_fails() {
+    let mut device = Device::line("atomic-native-validation", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+
+    let error = device
+        .set_native_gates(vec![
+            Instruction::Standard(StandardGate::X),
+            Instruction::Delay,
+        ])
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DeviceError::NonStandardNativeInstruction { .. }
+    ));
+    assert!(matches!(
+        device.native_gates(),
+        [Instruction::Standard(StandardGate::H)]
+    ));
+}
+
+#[test]
+fn qubit_native_instructions_require_single_qubit_standard_gates() {
+    let mut prop = QubitProp::new(0.01);
+    prop.set_native_instruction(InstructionProp::new(
+        Instruction::Standard(StandardGate::H),
+        0.001,
+    ))
+    .unwrap();
+
+    assert!(matches!(
+        prop.set_native_instruction(InstructionProp::new(
+            Instruction::Standard(StandardGate::GPhase),
+            0.0,
+        )),
+        Err(DeviceError::InvalidNativeInstructionArity {
+            expected,
+            actual: 0,
+            ..
+        }) if expected == (1..=1)
+    ));
+    assert!(matches!(
+        QubitProp::new(0.01).with_native_instruction(InstructionProp::new(
+            Instruction::Standard(StandardGate::CX),
+            0.01,
+        )),
+        Err(DeviceError::InvalidNativeInstructionArity {
+            expected,
+            actual: 2,
+            ..
+        }) if expected == (1..=1)
+    ));
+    assert!(matches!(
+        QubitProp::new(0.01).with_native_instruction(InstructionProp::new(
+            Instruction::Standard(StandardGate::CCX),
+            0.01,
+        )),
+        Err(DeviceError::InvalidNativeInstructionArity {
+            expected,
+            actual: 3,
+            ..
+        }) if expected == (1..=1)
+    ));
+    assert!(matches!(
+        QubitProp::new(0.01).with_native_instruction(InstructionProp::new(Instruction::Delay, 0.0)),
+        Err(DeviceError::NonStandardNativeInstruction { .. })
+    ));
+    assert_eq!(prop.native_instructions().len(), 1);
+}
+
+#[test]
+fn edge_native_instructions_require_two_qubit_standard_gates() {
+    let mut prop = EdgeProp::new();
+    prop.set_native_instruction(InstructionProp::new(
+        Instruction::Standard(StandardGate::CX),
+        0.01,
+    ))
+    .unwrap();
+
+    for gate in [StandardGate::GPhase, StandardGate::H, StandardGate::CCX] {
+        assert!(matches!(
+            prop.set_native_instruction(InstructionProp::new(Instruction::Standard(gate), 0.01,)),
+            Err(DeviceError::InvalidNativeInstructionArity {
+                expected,
+                ..
+            }) if expected == (2..=2)
+        ));
+    }
+    assert!(matches!(
+        EdgeProp::new().with_native_instruction(InstructionProp::new(Instruction::Delay, 0.0)),
+        Err(DeviceError::NonStandardNativeInstruction { .. })
+    ));
+    assert_eq!(prop.native_instructions().len(), 1);
 }
 
 #[test]
@@ -311,17 +451,27 @@ fn single_qubit_error_uses_native_instruction_then_default() {
     let topology = Topology::new(vec![q0, q1, q2], vec![]).unwrap();
     let mut device = Device::new("test-device", HashSet::from([q0, q1, q2]), topology)
         .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::X),
+        ])
+        .unwrap()
         .with_default_single_qubit_error(0.01)
         .with_invalid_qubits(HashSet::from([q2]))
         .unwrap();
     device
         .add_qubit_properties(
             q0,
-            QubitProp::new(0.02).with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::H),
-                0.001,
-            )),
+            QubitProp::new(0.02)
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::H),
+                    0.001,
+                ))
+                .unwrap(),
         )
+        .unwrap();
+    device
+        .add_qubit_properties(q1, QubitProp::new(0.03))
         .unwrap();
 
     assert_eq!(
@@ -330,11 +480,15 @@ fn single_qubit_error_uses_native_instruction_then_default() {
     );
     assert_eq!(
         device.single_qubit_error(q0, &Instruction::Standard(StandardGate::X)),
-        Some(0.01)
+        None
     );
     assert_eq!(
         device.single_qubit_error(q1, &Instruction::Standard(StandardGate::H)),
         Some(0.01)
+    );
+    assert_eq!(
+        device.single_qubit_error(q1, &Instruction::Standard(StandardGate::Y)),
+        None
     );
     assert_eq!(
         device.single_qubit_error(q2, &Instruction::Standard(StandardGate::H)),
@@ -365,6 +519,11 @@ fn two_qubit_and_edge_errors_respect_direction_and_usability() {
     .unwrap();
     let mut device = Device::new("test-device", HashSet::from([q0, q1, q2]), topology)
         .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::CX),
+            Instruction::Standard(StandardGate::SWAP),
+        ])
+        .unwrap()
         .with_default_two_qubit_error(0.07);
     device
         .add_edge_properties(
@@ -375,12 +534,15 @@ fn two_qubit_and_edge_errors_respect_direction_and_usability() {
                     Instruction::Standard(StandardGate::CZ),
                     0.03,
                 ))
+                .unwrap()
                 .with_native_instruction(InstructionProp::new(
                     Instruction::Standard(StandardGate::CX),
                     0.02,
-                )),
+                ))
+                .unwrap(),
         )
         .unwrap();
+    device.add_edge_properties(q1, q0, EdgeProp::new()).unwrap();
 
     assert_eq!(
         device.two_qubit_error(q0, q1, &Instruction::Standard(StandardGate::CX)),
@@ -388,11 +550,15 @@ fn two_qubit_and_edge_errors_respect_direction_and_usability() {
     );
     assert_eq!(
         device.two_qubit_error(q0, q1, &Instruction::Standard(StandardGate::SWAP)),
-        Some(0.07)
+        None
     );
     assert_eq!(
         device.two_qubit_error(q1, q0, &Instruction::Standard(StandardGate::CX)),
         Some(0.07)
+    );
+    assert_eq!(
+        device.two_qubit_error(q1, q0, &Instruction::Standard(StandardGate::CZ)),
+        None
     );
     assert_eq!(
         device.two_qubit_error(q0, q2, &Instruction::Standard(StandardGate::CX)),
@@ -407,4 +573,364 @@ fn two_qubit_and_edge_errors_respect_direction_and_usability() {
         None
     );
     assert_eq!(device.edge_error(q1, q2), None);
+}
+
+#[test]
+fn local_native_instructions_do_not_synchronize_device_defaults() {
+    let q0 = PhysicalQubit::new(0);
+    let q1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![q0, q1], vec![(q0, q1, "q0-q1".to_string())]).unwrap();
+    let mut device = Device::new("test-device", HashSet::from([q0, q1]), topology)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap()
+        .with_default_single_qubit_error(0.01)
+        .with_default_two_qubit_error(0.02);
+
+    device
+        .add_edge_properties(
+            q0,
+            q1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.003,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        device.native_gates(),
+        [Instruction::Standard(StandardGate::H)]
+    ));
+    assert_eq!(
+        device.two_qubit_error(q0, q1, &Instruction::Standard(StandardGate::CX)),
+        Some(0.003)
+    );
+
+    device
+        .set_native_gates(vec![Instruction::Standard(StandardGate::X)])
+        .unwrap();
+
+    assert_eq!(
+        device.two_qubit_error(q0, q1, &Instruction::Standard(StandardGate::CX)),
+        Some(0.003)
+    );
+    assert_eq!(
+        device.single_qubit_error(q0, &Instruction::Standard(StandardGate::H)),
+        None
+    );
+    assert_eq!(
+        device.single_qubit_error(q0, &Instruction::Standard(StandardGate::X)),
+        Some(0.01)
+    );
+}
+
+#[test]
+fn supports_native_instruction_uses_capabilities_without_calibration() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p1, p0, "p1-p0".to_string())]).unwrap();
+    let mut device = Device::new("directed", HashSet::from([p0, p1]), topology)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    assert!(device.supports_native_instruction(&Instruction::Standard(StandardGate::H), &[p0]));
+    assert!(
+        device.supports_native_instruction(&Instruction::Standard(StandardGate::CX), &[p1, p0])
+    );
+    assert!(
+        !device.supports_native_instruction(&Instruction::Standard(StandardGate::CX), &[p0, p1])
+    );
+    assert!(!device.supports_native_instruction(&Instruction::Standard(StandardGate::GPhase), &[]));
+    assert!(
+        !device
+            .supports_native_instruction(&Instruction::Standard(StandardGate::CCX), &[p0, p1, p0])
+    );
+    assert!(
+        !device.supports_native_instruction(&Instruction::Directive(Directive::Measure), &[p0])
+    );
+    assert!(!device.supports_native_instruction(&Instruction::Directive(Directive::Reset), &[p1]));
+    assert!(!device.supports_native_instruction(&Instruction::Delay, &[p0]));
+
+    device
+        .add_edge_properties(
+            p1,
+            p0,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CZ),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+
+    assert!(
+        !device.supports_native_instruction(&Instruction::Standard(StandardGate::CX), &[p1, p0])
+    );
+    assert!(
+        device.supports_native_instruction(&Instruction::Standard(StandardGate::CZ), &[p1, p0])
+    );
+}
+
+#[test]
+fn gphase_requires_an_explicit_device_default_capability() {
+    let mut device = Device::line("gphase", 1).unwrap();
+    let gphase = Instruction::Standard(StandardGate::GPhase);
+
+    assert!(!device.supports_native_instruction(&gphase, &[]));
+    device.set_native_gates(vec![gphase.clone()]).unwrap();
+    assert!(device.supports_native_instruction(&gphase, &[]));
+    assert!(!device.supports_native_instruction(&gphase, &[PhysicalQubit::new(0)]));
+}
+
+#[test]
+fn validate_circuit_reports_missing_directed_coupling() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p1, p0, "p1-p0".to_string())]).unwrap();
+    let device = Device::new("directed", HashSet::from([p0, p1]), topology)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let error = device.validate_circuit(&circuit).unwrap_err();
+
+    assert_eq!(
+        error,
+        DeviceValidationError::MissingDirectedCoupling {
+            device: "directed".to_string(),
+            instruction: "CX".to_string(),
+            control: p0,
+            target: p1,
+        }
+    );
+    let message = error.to_string();
+    assert!(message.contains("directed"));
+    assert!(message.contains("CX"));
+    assert!(message.contains("P0"));
+    assert!(message.contains("P1"));
+
+    let mut supported = Circuit::new(2);
+    supported.cx(Qubit::new(1), Qubit::new(0)).unwrap();
+    assert!(device.validate_circuit(&supported).is_ok());
+}
+
+#[test]
+fn validate_circuit_reports_unsupported_instruction_on_existing_edge() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p0, p1, "p0-p1".to_string())]).unwrap();
+    let mut device = Device::new("local-cz", HashSet::from([p0, p1]), topology)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CZ),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    assert_eq!(
+        device.validate_circuit(&circuit).unwrap_err(),
+        DeviceValidationError::UnsupportedInstruction {
+            device: "local-cz".to_string(),
+            instruction: "CX".to_string(),
+            qargs: vec![p0, p1],
+        }
+    );
+}
+
+#[test]
+fn edge_error_is_calibration_not_a_capability_predicate() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p0, p1, "p0-p1".to_string())]).unwrap();
+    let device = Device::new("calibration-only", HashSet::from([p0, p1]), topology)
+        .unwrap()
+        .with_default_two_qubit_error(0.02);
+
+    assert_eq!(device.edge_error(p0, p1), Some(0.02));
+    assert!(
+        !device.supports_native_instruction(&Instruction::Standard(StandardGate::CX), &[p0, p1])
+    );
+    assert_eq!(
+        device.two_qubit_error(p0, p1, &Instruction::Standard(StandardGate::CX)),
+        None
+    );
+}
+
+#[test]
+fn validate_circuit_rejects_unusable_qubits_and_recurses_control_flow() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p1, p0, "p1-p0".to_string())]).unwrap();
+    let device = Device::new("directed", HashSet::from([p0, p1]), topology)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let mut controlled = Circuit::new(2);
+    let measured = controlled.measure(Qubit::new(0)).unwrap();
+    controlled
+        .if_(measured.expr().to_bool().unwrap(), |body| {
+            body.cx(Qubit::new(0), Qubit::new(1))?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        device.validate_circuit(&controlled),
+        Err(DeviceValidationError::MissingDirectedCoupling { control, target, .. })
+            if control == p0 && target == p1
+    ));
+
+    let control = &controlled.operations()[1].instruction;
+    assert!(matches!(control, Instruction::ClassicalControl(_)));
+    assert!(!device.supports_native_instruction(control, &[p0, p1]));
+
+    let offline = device.with_invalid_qubits(HashSet::from([p0])).unwrap();
+    let mut measurement = Circuit::new(1);
+    measurement.measure(Qubit::new(0)).unwrap();
+    assert_eq!(
+        offline.validate_circuit(&measurement).unwrap_err(),
+        DeviceValidationError::UnusablePhysicalQubit {
+            device: "directed".to_string(),
+            qubit: p0,
+        }
+    );
+}
+
+#[test]
+fn runtime_operations_are_validator_policy_not_atomic_capabilities() {
+    let p0 = PhysicalQubit::new(0);
+    let topology = Topology::new(vec![p0], vec![]).unwrap();
+    let device = Device::new("runtime", HashSet::from([p0]), topology).unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit.measure(Qubit::new(0)).unwrap();
+    circuit.reset(Qubit::new(0)).unwrap();
+    circuit
+        .delay(Qubit::new(0), ParameterValue::from(20.0))
+        .unwrap();
+
+    for operation in circuit.operations() {
+        assert!(!device.supports_native_instruction(&operation.instruction, &[p0]));
+    }
+    assert!(device.validate_circuit(&circuit).is_ok());
+}
+
+#[test]
+fn validate_circuit_recurses_while_for_and_switch_bodies() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p1, p0, "p1-p0".to_string())]).unwrap();
+    let device = Device::new("directed", HashSet::from([p0, p1]), topology)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+
+    let mut while_circuit = Circuit::new(2);
+    while_circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.cx(Qubit::new(0), Qubit::new(1))
+        })
+        .unwrap();
+    assert!(matches!(
+        device.validate_circuit(&while_circuit),
+        Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+
+    let mut for_circuit = Circuit::new(2);
+    let loop_var = for_circuit.var(ClassicalType::uint(2).unwrap());
+    for_circuit
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(2, 0).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            |body, _| body.cx(Qubit::new(0), Qubit::new(1)),
+        )
+        .unwrap();
+    assert!(matches!(
+        device.validate_circuit(&for_circuit),
+        Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+
+    let mut switch_circuit = Circuit::new(2);
+    switch_circuit
+        .switch(ClassicalExpr::uint_literal(2, 0).unwrap(), |switch| {
+            switch.value(0, |body| body.cx(Qubit::new(0), Qubit::new(1)))?;
+            switch.default(|_| Ok(()))?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        device.validate_circuit(&switch_circuit),
+        Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+}
+
+#[test]
+fn validate_circuit_reports_undecomposed_standard_gate() {
+    let qubits = [
+        PhysicalQubit::new(0),
+        PhysicalQubit::new(1),
+        PhysicalQubit::new(2),
+    ];
+    let topology = Topology::new(qubits.to_vec(), vec![]).unwrap();
+    let device = Device::new("three", HashSet::from(qubits), topology).unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit
+        .ccx(Qubit::new(0), Qubit::new(1), Qubit::new(2))
+        .unwrap();
+
+    assert!(matches!(
+        device.validate_circuit(&circuit),
+        Err(DeviceValidationError::UndecomposedInstruction { instruction, .. })
+            if instruction == "CCX"
+    ));
+}
+
+#[test]
+fn validate_operation_rejects_undecomposed_composite_gates() {
+    let p0 = PhysicalQubit::new(0);
+    let topology = Topology::new(vec![p0], vec![]).unwrap();
+    let device = Device::new("one", HashSet::from([p0]), topology).unwrap();
+    let mut inner = Circuit::new(1);
+    inner.x(Qubit::new(0)).unwrap();
+    let circuit_gate = inner.to_gate("inner").unwrap();
+    let instructions = [
+        Instruction::McGate(Box::new(MCGate::new(1, StandardGate::X))),
+        Instruction::UnitaryGate(Box::new(UnitaryGate::new("opaque", 1, 0))),
+        circuit_gate,
+    ];
+
+    for instruction in instructions {
+        let operation = Operation {
+            instruction,
+            qubits: smallvec::smallvec![Qubit::new(0)],
+            params: smallvec::SmallVec::new(),
+            label: None,
+        };
+        assert!(matches!(
+            device.validate_operation(&operation),
+            Err(DeviceValidationError::UndecomposedInstruction { .. })
+        ));
+    }
 }

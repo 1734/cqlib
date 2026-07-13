@@ -27,7 +27,114 @@ pub enum DeviceError {
     QubitNotInTopology(PhysicalQubit),
     EdgeNotInTopology(PhysicalQubit, PhysicalQubit),
     InvalidTopology(TopologyError),
+    /// A non-standard instruction was configured as an atomic native capability.
+    NonStandardNativeInstruction {
+        /// Human-readable instruction identity.
+        instruction: String,
+    },
+    /// A standard gate's arity cannot be represented at the target location.
+    InvalidNativeInstructionArity {
+        /// Human-readable instruction identity.
+        instruction: String,
+        /// Inclusive arity range accepted by the writer.
+        expected: std::ops::RangeInclusive<usize>,
+        /// Number of qubits used by the standard gate.
+        actual: usize,
+    },
 }
+
+/// Errors raised when a physical circuit does not satisfy device capabilities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceValidationError {
+    /// An operation references a physical qubit that is absent or offline.
+    UnusablePhysicalQubit {
+        /// Device name used for diagnostics.
+        device: String,
+        /// Physical qubit that is absent or offline.
+        qubit: PhysicalQubit,
+    },
+    /// A two-qubit instruction has no coupling in the requested direction.
+    MissingDirectedCoupling {
+        /// Device name used for diagnostics.
+        device: String,
+        /// Human-readable instruction identity.
+        instruction: String,
+        /// Requested control-side physical qubit.
+        control: PhysicalQubit,
+        /// Requested target-side physical qubit.
+        target: PhysicalQubit,
+    },
+    /// The device does not support an instruction on the exact ordered qargs.
+    UnsupportedInstruction {
+        /// Device name used for diagnostics.
+        device: String,
+        /// Human-readable instruction identity.
+        instruction: String,
+        /// Ordered physical arguments requested by the operation.
+        qargs: Vec<PhysicalQubit>,
+    },
+    /// A gate-like instruction remains above the device-native abstraction level.
+    UndecomposedInstruction {
+        /// Device name used for diagnostics.
+        device: String,
+        /// Human-readable instruction identity.
+        instruction: String,
+        /// Ordered physical arguments requested by the operation.
+        qargs: Vec<PhysicalQubit>,
+    },
+}
+
+impl fmt::Display for DeviceValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnusablePhysicalQubit { device, qubit } => write!(
+                f,
+                "device '{device}' cannot execute an operation on unusable physical qubit {qubit}"
+            ),
+            Self::UnsupportedInstruction {
+                device,
+                instruction,
+                qargs,
+            } => {
+                let qargs = qargs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "device '{device}' does not support instruction {instruction} on ordered physical qargs [{qargs}]"
+                )
+            }
+            Self::MissingDirectedCoupling {
+                device,
+                instruction,
+                control,
+                target,
+            } => write!(
+                f,
+                "device '{device}' has no directed coupling {control} -> {target} required by instruction {instruction}"
+            ),
+            Self::UndecomposedInstruction {
+                device,
+                instruction,
+                qargs,
+            } => {
+                let qargs = qargs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "device '{device}' cannot validate undecomposed instruction {instruction} on ordered physical qargs [{qargs}]"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DeviceValidationError {}
 
 impl fmt::Display for DeviceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -54,6 +161,25 @@ impl fmt::Display for DeviceError {
             }
             Self::InvalidTopology(error) => {
                 write!(f, "Invalid device topology: {error}")
+            }
+            Self::NonStandardNativeInstruction { instruction } => write!(
+                f,
+                "instruction {instruction} cannot be stored as a native capability: native instructions must be standard gates"
+            ),
+            Self::InvalidNativeInstructionArity {
+                instruction,
+                expected,
+                actual,
+            } => {
+                let expected = if expected.start() == expected.end() {
+                    expected.start().to_string()
+                } else {
+                    format!("{}..={}", expected.start(), expected.end())
+                };
+                write!(
+                    f,
+                    "instruction {instruction} cannot be stored as a native capability: expected {expected} qubits, got {actual}"
+                )
             }
         }
     }

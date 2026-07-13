@@ -88,20 +88,24 @@ fn vf2_perfect_layout_uses_fidelity_objective_to_choose_candidate() {
         .add_edge_properties(
             p0,
             p1,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.09,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.09,
+                ))
+                .unwrap(),
         )
         .unwrap();
     device
         .add_edge_properties(
             p1,
             p2,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.01,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
         )
         .unwrap();
     let physical = build_physical_layout_graph(&device).unwrap();

@@ -937,7 +937,8 @@ fn routed_swaps_are_lowered_to_device_native_basis() {
         .with_native_gates(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
@@ -974,7 +975,8 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
             Instruction::Standard(StandardGate::RZ),
             Instruction::Standard(StandardGate::X2P),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,

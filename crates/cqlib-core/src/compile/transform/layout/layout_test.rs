@@ -206,10 +206,12 @@ fn objective_auto_uses_fidelity_data_when_available() {
         .add_edge_properties(
             p0,
             p1,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.02,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.02,
+                ))
+                .unwrap(),
         )
         .unwrap();
 

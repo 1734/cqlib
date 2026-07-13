@@ -168,20 +168,24 @@ fn sabre_layout_reports_fidelity_scoring() {
         .add_edge_properties(
             p0,
             p1,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.08,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.08,
+                ))
+                .unwrap(),
         )
         .unwrap();
     device
         .add_edge_properties(
             p1,
             p2,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.02,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.02,
+                ))
+                .unwrap(),
         )
         .unwrap();
     let physical = build_physical_layout_graph(&device).unwrap();

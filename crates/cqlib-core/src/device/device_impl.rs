@@ -17,11 +17,39 @@
 //! encapsulate all the physical constraints and fidelity data necessary for noise-aware compilation,
 //! mapping, routing, and circuit scheduling.
 
-use crate::circuit::Instruction;
+use crate::circuit::{
+    Circuit, ClassicalControlOp, Directive, Instruction, Operation, StandardGate,
+};
 use crate::device::topology::Topology;
-use crate::device::{DeviceError, PhysicalQubit};
+use crate::device::{DeviceError, DeviceValidationError, PhysicalQubit};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::RangeInclusive;
 use time::OffsetDateTime;
+
+/// Checks that an instruction can be represented at a native-capability location.
+///
+/// The current device model resolves only atomic standard gates and represents
+/// physical placement only for individual qubits and directed two-qubit edges.
+fn validate_native_gate_arity(
+    instruction: &Instruction,
+    expected: RangeInclusive<usize>,
+) -> Result<(), DeviceError> {
+    let Instruction::Standard(gate) = instruction else {
+        return Err(DeviceError::NonStandardNativeInstruction {
+            instruction: instruction.to_string(),
+        });
+    };
+    let actual = gate.num_qubits();
+    if expected.contains(&actual) {
+        Ok(())
+    } else {
+        Err(DeviceError::InvalidNativeInstructionArity {
+            instruction: instruction.to_string(),
+            expected,
+            actual,
+        })
+    }
+}
 
 /// Represents the physical properties and execution characteristics of a quantum instruction (gate)
 /// when applied to specific qubit(s).
@@ -114,6 +142,10 @@ pub struct QubitProp {
     /// Qubit frequency in GHz.
     frequency: Option<f64>,
     /// Native instructions supported on this qubit.
+    ///
+    /// An empty list inherits matching one-qubit instructions from the device
+    /// defaults. A non-empty list completely overrides those defaults for this
+    /// qubit.
     native_instructions: Vec<InstructionProp>,
 }
 
@@ -178,13 +210,21 @@ impl QubitProp {
         self.frequency = Some(frequency);
     }
 
-    /// Adds a native instruction to this qubit's supported instructions.
-    pub fn with_native_instruction(mut self, prop: InstructionProp) -> Self {
-        self.native_instructions.push(prop);
-        self
+    /// Adds a single-qubit standard gate to this qubit's native capabilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] if `prop` does not describe a single-qubit
+    /// standard gate.
+    pub fn with_native_instruction(mut self, prop: InstructionProp) -> Result<Self, DeviceError> {
+        self.set_native_instruction(prop)?;
+        Ok(self)
     }
-    pub fn set_native_instruction(&mut self, prop: InstructionProp) {
+    /// Appends a single-qubit standard gate, preserving the list on error.
+    pub fn set_native_instruction(&mut self, prop: InstructionProp) -> Result<(), DeviceError> {
+        validate_native_gate_arity(prop.instruction(), 1..=1)?;
         self.native_instructions.push(prop);
+        Ok(())
     }
 
     /// Gets the readout error rate.
@@ -230,8 +270,22 @@ impl QubitProp {
 /// error rates and execution times.
 #[derive(Debug, Clone)]
 pub struct EdgeProp {
-    /// Native instructions supported on this edge (typically 2-qubit gates).
+    /// Native instructions supported on this directed edge (typically 2-qubit gates).
+    ///
+    /// An empty list inherits matching two-qubit instructions from the device
+    /// defaults. A non-empty list completely overrides those defaults for this
+    /// ordered edge and does not grant support in the reverse direction.
     native_instructions: Vec<InstructionProp>,
+}
+
+/// Result of resolving one instruction against a local override and device defaults.
+enum NativeInstructionSupport<'a> {
+    /// The instruction is explicitly supported and has local calibration.
+    Explicit(&'a InstructionProp),
+    /// The instruction is inherited from the device-wide defaults.
+    Inherited,
+    /// Neither the local override nor the defaults support the instruction.
+    Unsupported,
 }
 
 impl EdgeProp {
@@ -242,14 +296,22 @@ impl EdgeProp {
         }
     }
 
-    /// Adds a native instruction to this edge.
-    pub fn with_native_instruction(mut self, prop: InstructionProp) -> Self {
-        self.native_instructions.push(prop);
-        self
+    /// Adds a two-qubit standard gate to this edge's native capabilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] if `prop` does not describe a two-qubit
+    /// standard gate.
+    pub fn with_native_instruction(mut self, prop: InstructionProp) -> Result<Self, DeviceError> {
+        self.set_native_instruction(prop)?;
+        Ok(self)
     }
 
-    pub fn set_native_instruction(&mut self, prop: InstructionProp) {
+    /// Appends a two-qubit standard gate, preserving the list on error.
+    pub fn set_native_instruction(&mut self, prop: InstructionProp) -> Result<(), DeviceError> {
+        validate_native_gate_arity(prop.instruction(), 2..=2)?;
         self.native_instructions.push(prop);
+        Ok(())
     }
 
     /// Gets a slice of the native instructions supported on this edge.
@@ -312,7 +374,11 @@ pub struct Device {
     invalid_qubits: BTreeSet<PhysicalQubit>,
     /// Connectivity topology.
     topology: Topology,
-    /// Device-wide native gates (fallback when per-qubit gates not specified).
+    /// Device-wide default native gates.
+    ///
+    /// Defaults apply by instruction arity when a qubit or directed edge has
+    /// no non-empty local native-instruction override. Local capabilities are
+    /// not synchronized into this list.
     native_gates: Vec<Instruction>,
 
     /// System calibration timestamp.
@@ -526,14 +592,34 @@ impl Device {
         Ok(())
     }
 
-    /// Sets the device-wide native gates.
-    pub fn with_native_gates(mut self, gates: Vec<Instruction>) -> Self {
-        self.native_gates = gates;
-        self
+    /// Sets the device-wide default native gates.
+    ///
+    /// This does not add, remove, or otherwise synchronize native instructions
+    /// stored on individual qubits or directed edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] if any entry is not a standard gate or acts on
+    /// more than two qubits.
+    pub fn with_native_gates(mut self, gates: Vec<Instruction>) -> Result<Self, DeviceError> {
+        self.set_native_gates(gates)?;
+        Ok(self)
     }
 
-    pub fn set_native_gates(&mut self, gates: Vec<Instruction>) {
+    /// Replaces the device-wide native defaults after validating the full list.
+    ///
+    /// The existing defaults are preserved when any entry is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] if any entry is not a standard gate or acts on
+    /// more than two qubits.
+    pub fn set_native_gates(&mut self, gates: Vec<Instruction>) -> Result<(), DeviceError> {
+        for gate in &gates {
+            validate_native_gate_arity(gate, 0..=2)?;
+        }
         self.native_gates = gates;
+        Ok(())
     }
 
     /// Sets the system calibration timestamp.
@@ -631,6 +717,10 @@ impl Device {
         Ok(())
     }
 
+    /// Compares instruction identities supported by the current device model.
+    ///
+    /// Device-native capabilities are currently limited to standard gates;
+    /// composite and runtime instructions are handled by circuit validation.
     fn instruction_matches(stored: &Instruction, requested: &Instruction) -> bool {
         match (stored, requested) {
             (Instruction::Standard(stored), Instruction::Standard(requested)) => {
@@ -640,14 +730,35 @@ impl Device {
         }
     }
 
-    fn native_instruction_error(
-        native_instructions: &[InstructionProp],
+    /// Resolves the shared local-override/default-inheritance capability contract.
+    ///
+    /// A non-empty local list is authoritative. An absent or empty local list
+    /// inherits the device defaults. Calibration consumers retain the explicit
+    /// property through the result instead of repeating capability resolution.
+    fn resolve_native_instruction<'a>(
+        &'a self,
+        local: Option<&'a [InstructionProp]>,
         instruction: &Instruction,
-    ) -> Option<f64> {
-        native_instructions
+    ) -> NativeInstructionSupport<'a> {
+        if let Some(local) = local.filter(|instructions| !instructions.is_empty()) {
+            return local
+                .iter()
+                .find(|prop| Self::instruction_matches(prop.instruction(), instruction))
+                .map_or(
+                    NativeInstructionSupport::Unsupported,
+                    NativeInstructionSupport::Explicit,
+                );
+        }
+
+        if self
+            .native_gates
             .iter()
-            .find(|prop| Self::instruction_matches(prop.instruction(), instruction))
-            .map(InstructionProp::error_rate)
+            .any(|stored| Self::instruction_matches(stored, instruction))
+        {
+            NativeInstructionSupport::Inherited
+        } else {
+            NativeInstructionSupport::Unsupported
+        }
     }
 
     /// Gets the name of the device.
@@ -704,11 +815,193 @@ impl Device {
         self.edge_properties.get(&(control, target))
     }
 
+    /// Returns whether a native hardware instruction can execute on the exact
+    /// ordered physical qargs.
+    ///
+    /// This query evaluates capability only; calibration error rates and
+    /// durations do not affect the result. Standard one- and two-qubit gates
+    /// follow the device default/local-override contract, and two-qubit qargs
+    /// are directional. Structured control flow, runtime operations, and
+    /// composite gates are not atomic device capabilities; validate them with
+    /// [`Self::validate_operation`] or [`Self::validate_circuit`] instead.
+    pub fn supports_native_instruction(
+        &self,
+        instruction: &Instruction,
+        qargs: &[PhysicalQubit],
+    ) -> bool {
+        if qargs.iter().any(|qubit| !self.is_usable_qubit(*qubit)) {
+            return false;
+        }
+
+        match instruction {
+            Instruction::Standard(StandardGate::GPhase) if qargs.is_empty() => !matches!(
+                self.resolve_native_instruction(None, instruction),
+                NativeInstructionSupport::Unsupported
+            ),
+            Instruction::Standard(gate) if gate.num_qubits() == qargs.len() => match qargs {
+                [qubit] => !matches!(
+                    self.resolve_native_instruction(
+                        self.qubit_properties
+                            .get(qubit)
+                            .map(QubitProp::native_instructions),
+                        instruction,
+                    ),
+                    NativeInstructionSupport::Unsupported
+                ),
+                [control, target]
+                    if self.topology.supports_directed_coupling(*control, *target) =>
+                {
+                    !matches!(
+                        self.resolve_native_instruction(
+                            self.edge_properties(*control, *target)
+                                .map(EdgeProp::native_instructions),
+                            instruction,
+                        ),
+                        NativeInstructionSupport::Unsupported
+                    )
+                }
+                _ => false,
+            },
+            Instruction::Standard(_)
+            | Instruction::McGate(_)
+            | Instruction::UnitaryGate(_)
+            | Instruction::CircuitGate(_)
+            | Instruction::Directive(_)
+            | Instruction::ClassicalData(_)
+            | Instruction::ClassicalControl(_)
+            | Instruction::Delay => false,
+        }
+    }
+
+    /// Validates one operation interpreted in the physical-qubit ID space.
+    ///
+    /// Structured control-flow bodies are checked recursively. This method is
+    /// read-only and never performs layout, routing, lowering, or direction
+    /// correction.
+    pub fn validate_operation(&self, operation: &Operation) -> Result<(), DeviceValidationError> {
+        let qargs = operation
+            .qubits
+            .iter()
+            .copied()
+            .map(PhysicalQubit::from_qubit)
+            .collect::<Vec<_>>();
+        // Diagnose unusable qargs before the coarser capability query so
+        // callers receive the concrete physical-qubit failure.
+        if let Some(qubit) = qargs
+            .iter()
+            .copied()
+            .find(|qubit| !self.is_usable_qubit(*qubit))
+        {
+            return Err(DeviceValidationError::UnusablePhysicalQubit {
+                device: self.name.clone(),
+                qubit,
+            });
+        }
+        match &operation.instruction {
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    self.validate_operations(op.then_body().operations())?;
+                    if let Some(body) = op.else_body() {
+                        self.validate_operations(body.operations())?;
+                    }
+                }
+                ClassicalControlOp::While(op) => {
+                    self.validate_operations(op.body().operations())?
+                }
+                ClassicalControlOp::For(op) => self.validate_operations(op.body().operations())?,
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        self.validate_operations(case.body().operations())?;
+                    }
+                    if let Some(body) = op.default() {
+                        self.validate_operations(body.operations())?;
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            Instruction::Directive(Directive::Measure | Directive::Reset) if qargs.len() == 1 => {}
+            Instruction::Directive(Directive::Barrier) => {}
+            Instruction::ClassicalData(op) => match op {
+                crate::circuit::ClassicalDataOp::Store { .. } if qargs.is_empty() => {}
+                crate::circuit::ClassicalDataOp::MeasureBit { .. } if qargs.len() == 1 => {}
+                crate::circuit::ClassicalDataOp::MeasureBits { .. } if !qargs.is_empty() => {}
+                _ => return Err(self.unsupported_instruction(&operation.instruction, qargs)),
+            },
+            Instruction::Delay if qargs.len() == 1 => {}
+            Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                return Err(DeviceValidationError::UndecomposedInstruction {
+                    device: self.name.clone(),
+                    instruction: operation.instruction.to_string(),
+                    qargs,
+                });
+            }
+            Instruction::Standard(gate) if gate.num_qubits() > 2 => {
+                return Err(DeviceValidationError::UndecomposedInstruction {
+                    device: self.name.clone(),
+                    instruction: operation.instruction.to_string(),
+                    qargs,
+                });
+            }
+            Instruction::Standard(gate) if gate.num_qubits() == 2 => {
+                let [control, target] = qargs.as_slice() else {
+                    return Err(self.unsupported_instruction(&operation.instruction, qargs));
+                };
+                if !self.topology.supports_directed_coupling(*control, *target) {
+                    return Err(DeviceValidationError::MissingDirectedCoupling {
+                        device: self.name.clone(),
+                        instruction: operation.instruction.to_string(),
+                        control: *control,
+                        target: *target,
+                    });
+                }
+                if !self.supports_native_instruction(&operation.instruction, &qargs) {
+                    return Err(self.unsupported_instruction(&operation.instruction, qargs));
+                }
+            }
+            Instruction::Standard(_)
+                if self.supports_native_instruction(&operation.instruction, &qargs) => {}
+            _ => return Err(self.unsupported_instruction(&operation.instruction, qargs)),
+        }
+        Ok(())
+    }
+
+    /// Validates a circuit interpreted in the physical-qubit ID space.
+    ///
+    /// Validation stops at the first unsupported operation. The circuit is not
+    /// modified and must already have completed logical-to-physical mapping and
+    /// hardware lowering.
+    pub fn validate_circuit(&self, circuit: &Circuit) -> Result<(), DeviceValidationError> {
+        self.validate_operations(circuit.operations())
+    }
+
+    fn validate_operations(&self, operations: &[Operation]) -> Result<(), DeviceValidationError> {
+        // Preserve source order and stop at the first failure so diagnostics
+        // are deterministic for top-level and nested control-flow bodies.
+        for operation in operations {
+            self.validate_operation(operation)?;
+        }
+        Ok(())
+    }
+
+    /// Builds the common diagnostic for a well-formed but unsupported atomic instruction.
+    fn unsupported_instruction(
+        &self,
+        instruction: &Instruction,
+        qargs: Vec<PhysicalQubit>,
+    ) -> DeviceValidationError {
+        DeviceValidationError::UnsupportedInstruction {
+            device: self.name.clone(),
+            instruction: instruction.to_string(),
+            qargs,
+        }
+    }
+
     /// Gets the error rate for `instruction` on a single physical qubit.
     ///
-    /// Returns `None` if the qubit is not usable. If the qubit has no matching
-    /// instruction-specific calibration, falls back to the default single-qubit
-    /// error rate.
+    /// Returns `None` if the qubit is not usable or does not support the
+    /// instruction. A non-empty local native-instruction list is a complete
+    /// capability override; otherwise device-wide one-qubit defaults apply.
+    /// The default error rate is used only for an inherited supported gate.
     pub fn single_qubit_error(
         &self,
         qubit: PhysicalQubit,
@@ -718,19 +1011,28 @@ impl Device {
             return None;
         }
 
-        self.qubit_properties
-            .get(&qubit)
-            .and_then(|props| {
-                Self::native_instruction_error(props.native_instructions(), instruction)
-            })
-            .or(self.default_single_qubit_error)
+        if !matches!(instruction, Instruction::Standard(gate) if gate.num_qubits() == 1) {
+            return None;
+        }
+        match self.resolve_native_instruction(
+            self.qubit_properties
+                .get(&qubit)
+                .map(QubitProp::native_instructions),
+            instruction,
+        ) {
+            NativeInstructionSupport::Explicit(prop) => Some(prop.error_rate()),
+            NativeInstructionSupport::Inherited => self.default_single_qubit_error,
+            NativeInstructionSupport::Unsupported => None,
+        }
     }
 
     /// Gets the error rate for `instruction` on a directed coupling.
     ///
-    /// Returns `None` if either endpoint is not usable or the directed coupling
-    /// does not exist. If the edge has no matching instruction-specific
-    /// calibration, falls back to the default two-qubit error rate.
+    /// Returns `None` if either endpoint is not usable, the exact directed
+    /// coupling does not exist, or that edge does not support the instruction.
+    /// A non-empty local native-instruction list is a complete capability
+    /// override; otherwise device-wide two-qubit defaults apply. The default
+    /// error rate is used only for an inherited supported gate.
     pub fn two_qubit_error(
         &self,
         control: PhysicalQubit,
@@ -744,17 +1046,30 @@ impl Device {
             return None;
         }
 
-        self.edge_properties(control, target)
-            .and_then(|props| {
-                Self::native_instruction_error(props.native_instructions(), instruction)
-            })
-            .or(self.default_two_qubit_error)
+        if !matches!(instruction, Instruction::Standard(gate) if gate.num_qubits() == 2) {
+            return None;
+        }
+        match self.resolve_native_instruction(
+            self.edge_properties(control, target)
+                .map(EdgeProp::native_instructions),
+            instruction,
+        ) {
+            NativeInstructionSupport::Explicit(prop) => Some(prop.error_rate()),
+            NativeInstructionSupport::Inherited => self.default_two_qubit_error,
+            NativeInstructionSupport::Unsupported => None,
+        }
     }
 
     /// Gets a direction-specific coupling error suitable for routing costs.
     ///
     /// Returns the best available native two-qubit instruction error on the
     /// edge, or the default two-qubit error if no per-edge calibration exists.
+    ///
+    /// This instruction-agnostic calibration query does not prove that any
+    /// two-qubit instruction is supported, even when it returns `Some`. It
+    /// must not be used as a capability predicate. Use
+    /// [`Self::supports_native_instruction`] or [`Self::two_qubit_error`] when
+    /// a concrete instruction capability matters.
     pub fn edge_error(&self, control: PhysicalQubit, target: PhysicalQubit) -> Option<f64> {
         if !self.is_usable_qubit(control)
             || !self.is_usable_qubit(target)

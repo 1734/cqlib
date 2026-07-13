@@ -379,6 +379,7 @@ pub fn two_qubit_device(native_gates: Vec<Instruction>) -> Device {
     Device::line("test-device", 2)
         .unwrap()
         .with_native_gates(native_gates)
+        .unwrap()
 }
 
 /// Asserts every two-qubit operation is supported by a topology edge.
