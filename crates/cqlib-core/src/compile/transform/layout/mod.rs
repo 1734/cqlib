@@ -52,6 +52,7 @@ mod greedy;
 mod objective;
 mod result;
 mod sabre;
+mod scoring;
 mod trivial;
 mod vf2;
 mod vf2_engine;
@@ -102,6 +103,9 @@ fn is_perfect_layout(
 
 #[cfg(test)]
 mod greedy_test;
+
+#[cfg(test)]
+mod gate_aware_test;
 
 #[cfg(test)]
 mod layout_test;

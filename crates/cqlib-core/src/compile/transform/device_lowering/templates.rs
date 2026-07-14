@@ -92,14 +92,11 @@ pub(super) fn candidates(state: &DeviceGateState) -> SmallVec<[DirectionTemplate
         crate::compile::knowledge::KnowledgeInstructionKey::Standard(StandardGate::RZX) => {
             DirectionTemplate::Rzx
         }
-        crate::compile::knowledge::KnowledgeInstructionKey::Standard(
-            gate @ (StandardGate::CZ
-            | StandardGate::SWAP
-            | StandardGate::RXX
-            | StandardGate::RYY
-            | StandardGate::RZZ
-            | StandardGate::FSIM),
-        ) => DirectionTemplate::Symmetric(gate),
+        crate::compile::knowledge::KnowledgeInstructionKey::Standard(gate)
+            if gate.is_invariant_under_operand_swap() =>
+        {
+            DirectionTemplate::Symmetric(gate)
+        }
         _ => return SmallVec::new(),
     };
     smallvec![template]

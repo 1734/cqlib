@@ -1160,7 +1160,7 @@ impl Circuit {
 
     /// Appends an XY gate.
     ///
-    /// Rotation between the $|01\rangle$ and $|10\rangle$ subspace.
+    /// Applies a pi rotation about the axis at angle `theta` in the single-qubit XY plane.
     pub fn xy(
         &mut self,
         qubit: Qubit,
@@ -1175,7 +1175,7 @@ impl Circuit {
         )
     }
 
-    /// Appends a $\sqrt{XY}$ gate (positive phase).
+    /// Appends a positive half-pi rotation in the single-qubit XY plane.
     pub fn xy2p(
         &mut self,
         qubit: Qubit,
@@ -1190,7 +1190,7 @@ impl Circuit {
         )
     }
 
-    /// Appends a $\sqrt{XY}^\dagger$ gate (negative phase).
+    /// Appends a negative half-pi rotation in the single-qubit XY plane.
     pub fn xy2m(
         &mut self,
         qubit: Qubit,

@@ -156,6 +156,11 @@ fn greedy_layout_uses_fidelity_objective_for_ties() {
                     Instruction::Standard(StandardGate::CX),
                     0.09,
                 ))
+                .unwrap()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CZ),
+                    0.001,
+                ))
                 .unwrap(),
         )
         .unwrap();
