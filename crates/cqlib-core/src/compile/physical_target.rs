@@ -64,6 +64,7 @@ pub struct PhysicalLayoutGraph {
     physical_qubits: Vec<PhysicalQubit>,
     physical_index: BTreeMap<PhysicalQubit, usize>,
     adjacency: Vec<Vec<usize>>,
+    connected_components: Vec<Vec<PhysicalQubit>>,
     distances: DistanceTable,
     directed_couplings: BTreeSet<DirectedQubitPair>,
     readout_errors: BTreeMap<PhysicalQubit, f64>,
@@ -91,6 +92,7 @@ impl PhysicalLayoutGraph {
         let usable: BTreeSet<_> = physical_qubits.iter().copied().collect();
         let physical_index = build_physical_index(&physical_qubits);
         let adjacency = build_undirected_adjacency(device.topology(), &physical_qubits, &usable);
+        let connected_components = build_connected_components(&physical_qubits, &adjacency);
         let distances =
             DistanceTable::from_adjacency(&physical_qubits, &physical_index, &adjacency);
         let directed_couplings = collect_directed_couplings(device.topology(), &usable);
@@ -102,6 +104,7 @@ impl PhysicalLayoutGraph {
             physical_qubits,
             physical_index,
             adjacency,
+            connected_components,
             distances,
             directed_couplings,
             readout_errors,
@@ -116,6 +119,14 @@ impl PhysicalLayoutGraph {
     /// Returns usable physical qubits in deterministic order.
     pub fn physical_qubits(&self) -> &[PhysicalQubit] {
         &self.physical_qubits
+    }
+
+    /// Returns usable undirected connected components in deterministic order.
+    ///
+    /// Components are ordered by their smallest physical-qubit id, and members
+    /// within each component are ordered by physical-qubit id.
+    pub(crate) fn connected_components(&self) -> &[Vec<PhysicalQubit>] {
+        &self.connected_components
     }
 
     /// Returns all-pairs undirected shortest-path distances over usable qubits.
@@ -371,6 +382,38 @@ fn build_undirected_adjacency(
     }
 
     adjacency
+}
+
+fn build_connected_components(
+    physical_qubits: &[PhysicalQubit],
+    adjacency: &[Vec<usize>],
+) -> Vec<Vec<PhysicalQubit>> {
+    let mut visited = vec![false; physical_qubits.len()];
+    let mut components = Vec::new();
+
+    for start in 0..physical_qubits.len() {
+        if visited[start] {
+            continue;
+        }
+
+        let mut queue = VecDeque::from([start]);
+        let mut component = Vec::new();
+        visited[start] = true;
+        while let Some(index) = queue.pop_front() {
+            component.push(physical_qubits[index]);
+            for &neighbor in &adjacency[index] {
+                if !visited[neighbor] {
+                    visited[neighbor] = true;
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        component.sort_unstable();
+        components.push(component);
+    }
+
+    components.sort_unstable_by_key(|component| component[0]);
+    components
 }
 
 fn collect_readout_errors(

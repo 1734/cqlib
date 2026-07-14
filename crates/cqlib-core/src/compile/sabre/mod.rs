@@ -103,8 +103,9 @@ mod routing;
 pub(crate) use dag::SabreDag;
 pub use heuristic::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
 pub(crate) use routing::{
-    RoutingTarget, TrialQuality, compare_trial_quality, normalize_initial_layout_for_target,
-    route_trial, route_trial_unchecked, trial_seeds, validate_reachable_interactions_for_target,
+    InteractionReachability, RoutingTarget, TrialQuality, compare_trial_quality,
+    interaction_reachability_for_target, normalize_initial_layout_for_target,
+    route_trial_unchecked, trial_seeds,
 };
 pub use routing::{SabreRoutingDiagnostics, SabreRoutingResult, sabre_route};
 pub use routing::{normalize_initial_layout, validate_config, validate_reachable_interactions};

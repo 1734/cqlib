@@ -42,6 +42,7 @@ impl Layer {
         distances: &impl Fn(usize, usize) -> Result<f64, CompilerError>,
     ) -> Result<(), CompilerError> {
         self.ensure_node_capacity(node);
+        self.ensure_active_entries_available(node, qubits)?;
         if let Some(previous) = self.nodes[node.index()].replace(qubits) {
             self.total_score -= distances(previous[0], previous[1])?;
             self.remove_active_entry(node, previous);
@@ -146,15 +147,17 @@ impl Layer {
             .filter_map(|index| self.nodes[index].map(|qubits| (NodeIndex::new(index), qubits)))
     }
 
-    pub(crate) fn total_score(&self) -> f64 {
-        self.total_score
-    }
-
-    pub(crate) fn swap_delta_score(
+    /// Returns the layer's mean distance after applying a candidate SWAP.
+    ///
+    /// Empty lookahead layers contribute zero by definition.
+    pub(crate) fn mean_score_after_swap(
         &self,
         swap: [usize; 2],
         distances: &impl Fn(usize, usize) -> Result<f64, CompilerError>,
     ) -> Result<f64, CompilerError> {
+        if self.occupied_node_indices.is_empty() {
+            return Ok(0.0);
+        }
         let mut delta = 0.0;
         for node in self.swap_affected_nodes(swap).into_iter().flatten() {
             let before = self.nodes[node.index()].ok_or_else(|| {
@@ -174,7 +177,7 @@ impl Layer {
             });
             delta += distances(after[0], after[1])? - distances(before[0], before[1])?;
         }
-        Ok(delta)
+        Ok((self.total_score + delta) / self.occupied_node_indices.len() as f64)
     }
 
     fn ensure_node_capacity(&mut self, node: NodeIndex) {
@@ -201,6 +204,25 @@ impl Layer {
         self.active[right] = Some((node, left));
     }
 
+    fn ensure_active_entries_available(
+        &self,
+        node: NodeIndex,
+        [left, right]: [usize; 2],
+    ) -> Result<(), CompilerError> {
+        for physical in [left, right] {
+            if let Some((active, _)) = self.active.get(physical).copied().flatten()
+                && active != node
+            {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "sabre layer nodes {} and {} share physical endpoint {physical}",
+                    active.index(),
+                    node.index()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn remove_active_entry(&mut self, node: NodeIndex, [left, right]: [usize; 2]) {
         if self.active[left].is_some_and(|entry| entry.0 == node) {
             self.active[left] = None;
@@ -216,5 +238,59 @@ impl Layer {
             .map(|entry| entry.0)
             .filter(|node| Some(*node) != first);
         [first, second]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_distance(left: usize, right: usize) -> Result<f64, CompilerError> {
+        Ok(left.abs_diff(right) as f64)
+    }
+
+    #[test]
+    fn mean_score_after_swap_normalizes_total_and_delta_together() {
+        let mut layer = Layer::new(2, 5);
+        layer
+            .insert(NodeIndex::new(0), [0, 4], &line_distance)
+            .unwrap();
+        layer
+            .insert(NodeIndex::new(1), [1, 3], &line_distance)
+            .unwrap();
+
+        // After SWAP(0, 1), both interaction distances are 3. The sum is 6,
+        // while the per-layer mean required by the heuristic is 3.
+        assert_eq!(
+            layer.mean_score_after_swap([0, 1], &line_distance).unwrap(),
+            3.0
+        );
+    }
+
+    #[test]
+    fn empty_layer_mean_is_zero() {
+        let layer = Layer::new(0, 2);
+        assert_eq!(
+            layer.mean_score_after_swap([0, 1], &line_distance).unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn inserting_shared_active_endpoint_is_an_invariant_error() {
+        let mut layer = Layer::new(2, 3);
+        layer
+            .insert(NodeIndex::new(0), [0, 1], &line_distance)
+            .unwrap();
+
+        let error = layer
+            .insert(NodeIndex::new(1), [1, 2], &line_distance)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CompilerError::InvariantViolation(message)
+                if message.contains("share physical endpoint 1")
+        ));
     }
 }

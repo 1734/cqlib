@@ -74,9 +74,10 @@ pub use canonicalize::{
 pub use device_lowering::DeviceLowerer;
 pub use layout::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, LayoutDiagnostics, LayoutObjective,
-    LayoutResult, LayoutScore, Vf2EdgeRequirement, Vf2LayoutConfig, analyze_circuit_for_layout,
-    greedy_layout, greedy_layout_prepared, sabre_layout, sabre_layout_prepared, trivial_layout,
-    trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
+    LayoutResult, LayoutScore, PreparedSabreCircuit, Vf2EdgeRequirement, Vf2LayoutConfig,
+    analyze_circuit_for_layout, greedy_layout, greedy_layout_prepared, prepare_sabre_circuit,
+    sabre_layout, sabre_layout_prepared, trivial_layout, trivial_layout_prepared,
+    vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
 pub use resynthesis::{
     ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,

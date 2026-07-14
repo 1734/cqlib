@@ -16,14 +16,16 @@
 //!
 //! ```text
 //! score = decay(swap)
-//!       * (basic_weight * front_layer_distance
-//!          + sum_i lookahead_weights[i] * lookahead_layer_i_distance)
+//!       * (basic_weight * mean(front_layer_distance)
+//!          + sum_i lookahead_weights[i] * mean(lookahead_layer_i_distance))
 //! ```
 //!
 //! Lower scores are preferred. The front layer contains currently executable
 //! two-qubit DAG nodes once the layout makes their operands adjacent. Lookahead
 //! layers bias the local decision toward interactions that become relevant
-//! soon after the current front layer is routed.
+//! soon after the current front layer is routed. Each layer is normalized by
+//! its own node count, so configured weights are not implicitly multiplied by
+//! layer width. An empty lookahead layer contributes zero.
 //!
 //! Decay is optional. When enabled, physical qubits recently used in heuristic
 //! SWAPs receive a slightly larger multiplier, discouraging repeated movement
@@ -87,9 +89,9 @@ pub struct SabreConfig {
 /// optional decay multiplier.  Lower scores are preferred.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SabreHeuristicConfig {
-    /// Weight of the current front-layer distance score.
+    /// Weight of the current front-layer mean distance.
     pub basic_weight: f64,
-    /// Per-lookahead-layer distance weights.
+    /// Weights of each lookahead layer's mean distance.
     pub lookahead_weights: Vec<f64>,
     /// Amount added to a physical qubit's decay multiplier after using it in a
     /// heuristic SWAP.  `None` disables decay.

@@ -513,12 +513,6 @@ impl RoutingTarget {
         })
     }
 
-    fn distance(&self, left: PhysicalQubit, right: PhysicalQubit) -> Result<f64, CompilerError> {
-        let left_index = self.physical_index(left)?;
-        let right_index = self.physical_index(right)?;
-        self.distance_by_index(left_index, right_index)
-    }
-
     fn physical_index(&self, physical: PhysicalQubit) -> Result<usize, CompilerError> {
         self.physical_index.get(&physical).copied().ok_or_else(|| {
             CompilerError::InvalidInput(format!(
@@ -1007,6 +1001,11 @@ impl RoutingState {
         target: &RoutingTarget,
         heuristic: &SabreHeuristicConfig,
     ) -> Result<SwapChoice, CompilerError> {
+        if self.front_layer.is_empty() {
+            return Err(CompilerError::InvariantViolation(
+                "sabre cannot select a SWAP for an empty front layer".to_string(),
+            ));
+        }
         let mut candidates = Vec::new();
         for active_index in self
             .front_layer
@@ -1037,38 +1036,25 @@ impl RoutingState {
             });
         }
 
-        // SABRE score = weighted front-layer distance + weighted lookahead
-        // distance, with optional multiplicative decay on recently swapped
-        // physical qubits.
+        // SABRE score = weighted per-layer mean distance, with optional
+        // multiplicative decay on recently swapped physical qubits.
         let distance = |left, right| target.distance_by_index(left, right);
-        let mut absolute = heuristic.basic_weight * self.front_layer.total_score();
-        for (layer, weight) in self
-            .lookahead_layers
-            .iter()
-            .zip(heuristic.lookahead_weights.iter().copied())
-        {
-            absolute += weight * layer.total_score();
-        }
-
         let mut best_score = f64::INFINITY;
         let mut best_swaps = Vec::new();
         for candidate in candidates {
-            let mut score = absolute
-                + heuristic.basic_weight
-                    * self
-                        .front_layer
-                        .swap_delta_score(candidate.indices, &distance)?;
-            for (layer, weight) in self
-                .lookahead_layers
-                .iter()
-                .zip(heuristic.lookahead_weights.iter().copied())
-            {
-                score += weight * layer.swap_delta_score(candidate.indices, &distance)?;
-            }
-            if heuristic.decay_increment.is_some() {
-                let decay = self.decay[candidate.indices[0]].max(self.decay[candidate.indices[1]]);
-                score *= decay;
-            }
+            let decay = if heuristic.decay_increment.is_some() {
+                self.decay[candidate.indices[0]].max(self.decay[candidate.indices[1]])
+            } else {
+                1.0
+            };
+            let score = heuristic_score_after_swap(
+                &self.front_layer,
+                &self.lookahead_layers,
+                heuristic,
+                candidate.indices,
+                &distance,
+                decay,
+            )?;
 
             if score - best_score < -heuristic.best_epsilon {
                 best_score = score;
@@ -1154,6 +1140,24 @@ impl RoutingState {
         }
         Ok(routed)
     }
+}
+
+fn heuristic_score_after_swap(
+    front_layer: &Layer,
+    lookahead_layers: &[Layer],
+    heuristic: &SabreHeuristicConfig,
+    swap: [usize; 2],
+    distances: &impl Fn(usize, usize) -> Result<f64, CompilerError>,
+    decay: f64,
+) -> Result<f64, CompilerError> {
+    let mut score = heuristic.basic_weight * front_layer.mean_score_after_swap(swap, distances)?;
+    for (layer, weight) in lookahead_layers
+        .iter()
+        .zip(heuristic.lookahead_weights.iter().copied())
+    {
+        score += weight * layer.mean_score_after_swap(swap, distances)?;
+    }
+    Ok(score * decay)
 }
 
 #[derive(Debug, Default)]
@@ -1424,40 +1428,88 @@ pub(crate) fn validate_reachable_interactions_for_target(
     target: &RoutingTarget,
     layout: &Layout,
 ) -> Result<(), CompilerError> {
+    match interaction_reachability_for_target(sabre, target, layout)? {
+        InteractionReachability::Reachable => Ok(()),
+        InteractionReachability::Unreachable { logical, physical } => {
+            Err(CompilerError::InvalidInput(format!(
+                "logical interaction {}-{} maps to disconnected physical qubits {} and {} in the usable topology",
+                logical[0], logical[1], physical[0], physical[1]
+            )))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InteractionReachability {
+    Reachable,
+    Unreachable {
+        logical: [LogicalQubit; 2],
+        physical: [PhysicalQubit; 2],
+    },
+}
+
+pub(crate) fn interaction_reachability_for_target(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    layout: &Layout,
+) -> Result<InteractionReachability, CompilerError> {
     for node in sabre.graph.node_weights() {
         match &node.kind {
             SabreNodeKind::TwoQ(pair) => {
                 let left = physical_for(layout, pair[0])?;
                 let right = physical_for(layout, pair[1])?;
-                target.distance(left, right)?;
+                let left_index = target.physical_index(left)?;
+                let right_index = target.physical_index(right)?;
+                if target.distances[left_index][right_index].is_none() {
+                    return Ok(InteractionReachability::Unreachable {
+                        logical: *pair,
+                        physical: [left, right],
+                    });
+                }
             }
             SabreNodeKind::ControlFlow(SabreControlFlow::If {
                 then_body,
                 else_body,
                 ..
             }) => {
-                validate_reachable_interactions_for_target(then_body, target, layout)?;
+                let reachable = interaction_reachability_for_target(then_body, target, layout)?;
+                if reachable != InteractionReachability::Reachable {
+                    return Ok(reachable);
+                }
                 if let Some(else_body) = else_body {
-                    validate_reachable_interactions_for_target(else_body, target, layout)?;
+                    let reachable = interaction_reachability_for_target(else_body, target, layout)?;
+                    if reachable != InteractionReachability::Reachable {
+                        return Ok(reachable);
+                    }
                 }
             }
             SabreNodeKind::ControlFlow(
                 SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
             ) => {
-                validate_reachable_interactions_for_target(body, target, layout)?;
+                let reachable = interaction_reachability_for_target(body, target, layout)?;
+                if reachable != InteractionReachability::Reachable {
+                    return Ok(reachable);
+                }
             }
             SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
                 for case in cases {
-                    validate_reachable_interactions_for_target(&case.body, target, layout)?;
+                    let reachable =
+                        interaction_reachability_for_target(&case.body, target, layout)?;
+                    if reachable != InteractionReachability::Reachable {
+                        return Ok(reachable);
+                    }
                 }
                 if let Some(default) = default {
-                    validate_reachable_interactions_for_target(default, target, layout)?;
+                    let reachable = interaction_reachability_for_target(default, target, layout)?;
+                    if reachable != InteractionReachability::Reachable {
+                        return Ok(reachable);
+                    }
                 }
             }
             SabreNodeKind::Synchronize => {}
         }
     }
-    Ok(())
+    Ok(InteractionReachability::Reachable)
 }
 
 fn swap_operation(swap: [PhysicalQubit; 2]) -> Operation {
@@ -1600,4 +1652,47 @@ fn operation_count(operations: &[Operation]) -> usize {
             }
         })
         .sum()
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::*;
+
+    fn line_distance(left: usize, right: usize) -> Result<f64, CompilerError> {
+        Ok(left.abs_diff(right) as f64)
+    }
+
+    #[test]
+    fn heuristic_normalizes_each_layer_before_weighting_and_decay() {
+        let mut front = Layer::new(2, 5);
+        front
+            .insert(NodeIndex::new(0), [0, 4], &line_distance)
+            .unwrap();
+        front
+            .insert(NodeIndex::new(1), [1, 3], &line_distance)
+            .unwrap();
+        let mut lookahead = Layer::new(1, 5);
+        lookahead
+            .insert(NodeIndex::new(0), [0, 2], &line_distance)
+            .unwrap();
+        let empty = Layer::new(0, 5);
+        let heuristic = SabreHeuristicConfig {
+            basic_weight: 1.0,
+            lookahead_weights: vec![0.5, 20.0],
+            ..SabreHeuristicConfig::default()
+        };
+
+        let score = heuristic_score_after_swap(
+            &front,
+            &[lookahead, empty],
+            &heuristic,
+            [0, 1],
+            &line_distance,
+            1.2,
+        )
+        .unwrap();
+
+        // front mean = (3 + 3) / 2 = 3; lookahead mean = 1; empty = 0.
+        assert!((score - 4.2).abs() < 1e-12);
+    }
 }
