@@ -11,7 +11,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{CompileConfig, CompileMode, compile};
+use super::{CompileConfig, CompileMode, CompileTarget, DeviceCompileTarget, compile};
 use crate::circuit::{
     Circuit, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit, StandardGate,
 };
@@ -33,11 +33,8 @@ fn compile_normal(circuit: &Circuit) -> super::CompileResult {
         circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Logical,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap()
@@ -110,16 +107,13 @@ fn compile_to_basis(circuit: &Circuit, basis: Vec<StandardGate>) -> super::Compi
         circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(
+            target: CompileTarget::Basis(
                 basis
                     .into_iter()
                     .map(Instruction::Standard)
                     .collect::<Vec<_>>(),
             ),
-            device: None,
-            initial_layout: None,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap()
@@ -143,15 +137,17 @@ fn compile_on_device_checked(
     allowed: &[StandardGate],
 ) -> super::CompileResult {
     let topology = device.topology().clone();
+    let validation_device = device.clone();
     let result = compile(
         circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(seed),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(seed),
         },
     )
     .unwrap();
@@ -165,6 +161,7 @@ fn compile_on_device_checked(
     );
     assert_only_standard_gates(&result.circuit, allowed);
     assert_two_qubit_operations_supported_by_topology(&result.circuit, &topology);
+    validation_device.validate_circuit(&result.circuit).unwrap();
     assert!(result.circuit.qubits().len() <= topology.num_qubits());
     result
 }
@@ -458,14 +455,11 @@ fn compile_bell_to_h_cz_basis() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(vec![
+            target: CompileTarget::Basis(vec![
                 Instruction::Standard(StandardGate::H),
                 Instruction::Standard(StandardGate::CZ),
             ]),
-            device: None,
-            initial_layout: None,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap();
@@ -546,13 +540,14 @@ proptest! {
             .with_native_gates(native_basis(&basis))
             .unwrap();
         let config = CompileConfig {
-            mode: CompileMode::Enhanced,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
-            resource_policy: ResourcePolicy::default(),
-            seed: Some(2026),
-        };
+                         mode: CompileMode::Enhanced,
+                         target: CompileTarget::Device(DeviceCompileTarget {
+                            device,
+                             initial_layout: None,
+                             seed: Some(2026),
+                         }),
+                         resource_policy: ResourcePolicy::default(),
+                     };
 
         let first = compile(&circuit, config.clone()).unwrap();
         let second = compile(&circuit, config).unwrap();
@@ -576,11 +571,12 @@ fn compile_with_same_seed_is_deterministic() {
         .unwrap();
     let config = CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(1234),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(1234),
     };
 
     let first = compile(&circuit, config.clone()).unwrap();
@@ -605,11 +601,15 @@ fn compile_with_same_seed_and_initial_layout_is_deterministic() {
     let layout = Layout::from_pairs(&[(0, 2), (1, 0)], 3).unwrap();
     let config = CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(Device::line("initial-layout-line", 3).unwrap()),
-        initial_layout: Some(layout),
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("initial-layout-line", 3)
+                .unwrap()
+                .with_native_gates(native_basis(&[StandardGate::H, StandardGate::CX]))
+                .unwrap(),
+            initial_layout: Some(layout),
+            seed: Some(99),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(99),
     };
 
     let first = compile(&circuit, config.clone()).unwrap();
@@ -638,14 +638,11 @@ fn compile_qft3_reports_unsupported_h_cz_target_basis() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(vec![
+            target: CompileTarget::Basis(vec![
                 Instruction::Standard(StandardGate::H),
                 Instruction::Standard(StandardGate::CZ),
             ]),
-            device: None,
-            initial_layout: None,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap_err();
@@ -688,11 +685,8 @@ fn compile_merges_consecutive_same_axis_rotations() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Enhanced,
-            target_basis: None,
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Logical,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap();
@@ -805,11 +799,21 @@ fn compile_routes_parameterized_circuit_and_preserves_semantics() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(Device::line("param-line", 3).unwrap()),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device: Device::line("param-line", 3)
+                    .unwrap()
+                    .with_native_gates(native_basis(&[
+                        StandardGate::H,
+                        StandardGate::RX,
+                        StandardGate::RZ,
+                        StandardGate::RZZ,
+                        StandardGate::CX,
+                    ]))
+                    .unwrap(),
+                initial_layout: None,
+                seed: Some(9),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(9),
         },
     )
     .unwrap();
@@ -1329,11 +1333,12 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(42),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(42),
         },
     )
     .unwrap();
@@ -1344,7 +1349,7 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
             .iter()
             .any(|step| step.name == "route.sabre" && !step.skipped)
     );
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
     assert_compiled_matrix_equivalent(&result.circuit, &circuit);
     for op in result.circuit.operations() {
         assert!(matches!(
@@ -1357,17 +1362,21 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
 #[test]
 fn compile_ghz5_routes_on_line_device() {
     let circuit = ghz_circuit(5);
-    let device = Device::line("test-device", 5).unwrap();
+    let device = Device::line("test-device", 5)
+        .unwrap()
+        .with_native_gates(native_basis(&[StandardGate::H, StandardGate::CX]))
+        .unwrap();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(17),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(17),
         },
     )
     .unwrap();
@@ -1397,18 +1406,27 @@ fn compile_toffoli_on_4q_line_device_decomposes_ccx_before_routing() {
         )
         .unwrap();
     circuit.h(Qubit::new(3)).unwrap();
-    let device = Device::line("test-device", 4).unwrap();
+    let device = Device::line("test-device", 4)
+        .unwrap()
+        .with_native_gates(native_basis(&[
+            StandardGate::H,
+            StandardGate::T,
+            StandardGate::TDG,
+            StandardGate::CX,
+        ]))
+        .unwrap();
     let topology = device.topology().clone();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(17),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(17),
         },
     )
     .unwrap();
@@ -1452,11 +1470,12 @@ fn compile_toffoli_routing_basis_prefers_cz_native_decomposition() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(19),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(19),
         },
     )
     .unwrap();
@@ -1477,17 +1496,25 @@ fn compile_routing_basis_preserves_existing_two_qubit_standard_gates() {
     circuit.rzz(q0, q1, 0.37).unwrap();
     circuit.crz(q0, q1, 0.19).unwrap();
     circuit.fsim(q0, q1, 0.11, -0.23).unwrap();
-    let device = Device::line("two-qubit-line", 2).unwrap();
+    let device = Device::line("two-qubit-line", 2)
+        .unwrap()
+        .with_native_gates(native_basis(&[
+            StandardGate::RZZ,
+            StandardGate::CRZ,
+            StandardGate::FSIM,
+        ]))
+        .unwrap();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(23),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(23),
         },
     )
     .unwrap();
@@ -1516,7 +1543,7 @@ fn compile_long_range_circuit_on_line_device_to_qcis_native_basis() {
 
     let result = compile_on_device_checked(&circuit, device, 101, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
     assert!(result.circuit.qubits().len() <= 4);
 }
 
@@ -1531,7 +1558,7 @@ fn compile_long_range_circuit_on_ring_device_to_qcis_native_basis() {
 
     let result = compile_on_device_checked(&circuit, device, 102, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
 }
 
 #[test]
@@ -1554,7 +1581,7 @@ fn compile_dense_circuit_on_bidirectional_line_to_cz_native_basis() {
 
     let result = compile_on_device_checked(&circuit, device, 103, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
 }
 
 #[test]
@@ -1577,7 +1604,7 @@ fn compile_dense_circuit_on_star_device_to_cx_native_basis() {
 
     let result = compile_on_device_checked(&circuit, device, 104, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
 }
 
 #[test]
@@ -1600,7 +1627,7 @@ fn compile_ising_circuit_on_grid_device_to_ising_native_basis() {
 
     let result = compile_on_device_checked(&circuit, device, 105, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
 }
 
 // ── Enhanced mode ──
@@ -1620,11 +1647,12 @@ fn compile_enhanced_ghz3_routes_and_cleans_up() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Enhanced,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(42),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(42),
         },
     )
     .unwrap();
@@ -1665,11 +1693,8 @@ fn compile_reports_error_for_unsupported_target_basis() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(vec![Instruction::Standard(StandardGate::CZ)]),
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Basis(vec![Instruction::Standard(StandardGate::CZ)]),
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap_err();
@@ -1687,11 +1712,12 @@ fn compile_rejects_circuit_wider_than_device() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: None,
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap_err();
@@ -1734,11 +1760,8 @@ measure q[1] -> c[1];
         &c,
         CompileConfig {
             mode: CompileMode::Enhanced,
-            target_basis: Some(native_basis(&basis)),
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Basis(native_basis(&basis)),
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap();

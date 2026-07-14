@@ -20,8 +20,10 @@ use crate::circuit::{
 use crate::compile::resource::ResourcePolicy;
 use crate::compile::transform::CircuitAnalysis;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
-use crate::compile::{CompileConfig, CompileMode, CompilerError, compile};
-use crate::device::{Device, Layout};
+use crate::compile::{
+    CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget, compile,
+};
+use crate::device::{Device, EdgeProp, InstructionProp, Layout, PhysicalQubit};
 use crate::util::test_utils::{
     assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, step_changed,
     two_qubit_device,
@@ -34,11 +36,8 @@ use std::f64::consts::PI;
 fn compile_config(mode: CompileMode) -> CompileConfig {
     CompileConfig {
         mode,
-        target_basis: None,
-        device: None,
-        initial_layout: None,
+        target: CompileTarget::Logical,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     }
 }
 
@@ -58,6 +57,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         steps: Vec::new(),
         target_basis: Some(target_basis),
         two_qubit_target,
+        device_metadata: None,
     }
 }
 
@@ -179,11 +179,15 @@ fn normal_workflow_reports_staged_order() {
             "route.sabre",
             "translate.target_basis",
             "canonicalize.output",
+            "lower.device_instructions",
+            "validate.device",
         ]
     );
     assert!(result.steps[10].skipped);
     assert!(result.steps[11].skipped);
     assert!(result.steps[12].skipped);
+    assert!(result.steps[14].skipped);
+    assert!(result.steps[15].skipped);
 }
 
 #[test]
@@ -222,6 +226,8 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "translate.target_basis",
             "optimize.target_cleanup",
             "canonicalize.output",
+            "lower.device_instructions",
+            "validate.device",
         ]
     );
     assert!(enhanced.steps[10].skipped);
@@ -281,7 +287,7 @@ fn workflow_uses_cx_kak_for_cx_target() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::CX),
         ]),
@@ -316,7 +322,7 @@ fn workflow_runs_two_qubit_resynthesis_after_decomposition() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::CX),
         ]),
@@ -344,7 +350,7 @@ fn workflow_uses_cz_kak_for_cz_target() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::CZ),
         ]),
@@ -376,7 +382,7 @@ fn workflow_uses_cy_kak_for_cy_target() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::CY),
         ]),
@@ -409,7 +415,7 @@ fn workflow_uses_rzz_kak_for_rzz_only_entangler_target() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::RX),
@@ -446,7 +452,7 @@ fn workflow_keeps_pauli_kak_for_full_ising_target() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::RXX),
             Instruction::Standard(StandardGate::RYY),
@@ -481,7 +487,7 @@ fn workflow_keeps_pauli_kak_for_partial_ising_target() {
         .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
         .unwrap();
     let config = CompileConfig {
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::U),
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::RX),
@@ -619,11 +625,20 @@ fn workflow_routes_parameterized_circuit_when_device_present() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(Device::line("workflow-param-line", 3).unwrap()),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("workflow-param-line", 3)
+                .unwrap()
+                .with_native_gates(vec![
+                    Instruction::Standard(StandardGate::H),
+                    Instruction::Standard(StandardGate::RX),
+                    Instruction::Standard(StandardGate::RZ),
+                    Instruction::Standard(StandardGate::CX),
+                ])
+                .unwrap(),
+            initial_layout: None,
+            seed: Some(11),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(11),
     })
     .run(&circuit)
     .unwrap();
@@ -653,11 +668,15 @@ fn workflow_routes_from_supplied_initial_layout() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(Device::line("layout-line", 3).unwrap()),
-        initial_layout: Some(layout),
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("layout-line", 3)
+                .unwrap()
+                .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+                .unwrap(),
+            initial_layout: Some(layout),
+            seed: Some(17),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(17),
     })
     .run(&circuit)
     .unwrap();
@@ -682,26 +701,335 @@ fn workflow_routes_from_supplied_initial_layout() {
 }
 
 #[test]
-fn workflow_rejects_initial_layout_without_device() {
-    let mut circuit = Circuit::new(1);
+fn device_workflow_legalizes_reverse_cx_to_directed_native_gates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-cx",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(7),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn device_workflow_legalizes_swap_through_reverse_cx_templates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.swap(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-swap",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(11),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn device_workflow_selects_lowest_cost_native_swap_realization() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.swap(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-swap-cz",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+        Instruction::Standard(StandardGate::CZ),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(13),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    let gates = standard_ops(&result.circuit);
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| matches!(gate, StandardGate::CX | StandardGate::CZ))
+            .count(),
+        3
+    );
+    assert_eq!(gates.len(), 5);
+}
+
+#[test]
+fn device_workflow_reports_reversed_native_gate_as_changed() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cz(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-cz",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CZ)])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(17),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    assert!(step_changed(&result, "lower.device_instructions"));
+    assert_eq!(result.circuit.operations()[0].qubits.as_slice(), &[q1, q0]);
+}
+
+#[test]
+fn device_workflow_legalizes_global_cx_against_local_cz_override() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::line("local-cz", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CZ),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(19),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
+    );
+}
+
+#[test]
+fn device_workflow_uses_local_native_capabilities_without_global_defaults() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::line("local-only", 2).unwrap();
+    for qubit in [p0, p1] {
+        device
+            .add_qubit_properties(
+                qubit,
+                crate::device::QubitProp::new(0.01)
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::H),
+                        0.01,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(2);
     circuit.h(Qubit::new(0)).unwrap();
-    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(23),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    assert!(!step_changed(&result, "lower.device_instructions"));
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn device_workflow_reports_structured_failure_when_no_native_plan_exists() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    let device = Device::line_from_qubits(
+        "no-reverse-cx-plan",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: None,
-        initial_layout: Some(layout),
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: Some(layout),
+            seed: Some(29),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
 
+    let CompilerError::DeviceLoweringFailed(failure) = err else {
+        panic!("expected a device instruction lowering failure");
+    };
     assert!(matches!(
-        err,
-        CompilerError::InvalidInput(reason) if reason.contains("initial layout requires a target device")
+        failure.instruction,
+        Instruction::Standard(StandardGate::CX)
     ));
+    assert_eq!(
+        failure.qargs,
+        vec![PhysicalQubit::new(0), PhysicalQubit::new(1)]
+    );
+    assert!(!failure.attempted_candidates.is_empty());
+    assert!(
+        failure
+            .attempted_candidates
+            .iter()
+            .any(|attempt| attempt.template == "direction_reverse_CX")
+    );
+}
+
+#[test]
+fn device_workflow_legalizes_control_flow_bodies_and_returns_layout_metadata() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    let measured = circuit.measure(q0).unwrap();
+    circuit
+        .if_(measured.expr().to_bool().unwrap(), |body| {
+            body.cx(q0, q1)?;
+            Ok(())
+        })
+        .unwrap();
+    let device = Device::line_from_qubits(
+        "controlled-reverse-cx",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout.clone()),
+            seed: Some(31),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    assert!(step_changed(&result, "lower.device_instructions"));
+    let metadata = result.device_metadata.expect("device compilation metadata");
+    assert_eq!(metadata.initial_layout, layout);
+    assert_eq!(metadata.final_layout, layout);
 }
 
 #[test]
@@ -715,7 +1043,7 @@ fn workflow_target_translation_keeps_parameterized_semantics() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::RZ),
             Instruction::Standard(StandardGate::X2P),
             Instruction::Standard(StandardGate::X2M),
@@ -724,10 +1052,7 @@ fn workflow_target_translation_keeps_parameterized_semantics() {
             Instruction::Standard(StandardGate::CZ),
             Instruction::Standard(StandardGate::GPhase),
         ]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
@@ -769,14 +1094,11 @@ fn target_basis_translation_runs_after_definition_decomposition() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
         ]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
@@ -798,14 +1120,11 @@ fn explicit_target_basis_runs_lowering() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
         ]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
@@ -818,6 +1137,18 @@ fn explicit_target_basis_runs_lowering() {
     assert_eq!(result.circuit.operations()[0].qubits.as_slice(), &[q1]);
     assert_eq!(result.circuit.operations()[1].qubits.as_slice(), &[q0, q1]);
     assert_eq!(result.circuit.operations()[2].qubits.as_slice(), &[q1]);
+    assert!(
+        result
+            .steps
+            .iter()
+            .any(|step| step.name == "lower.device_instructions" && step.skipped)
+    );
+    assert!(
+        result
+            .steps
+            .iter()
+            .any(|step| step.name == "validate.device" && step.skipped)
+    );
 }
 
 #[test]
@@ -828,11 +1159,8 @@ fn target_basis_failure_is_reported() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![Instruction::Standard(StandardGate::CZ)]),
-        device: None,
-        initial_layout: None,
+        target: CompileTarget::Basis(vec![Instruction::Standard(StandardGate::CZ)]),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -847,14 +1175,11 @@ fn mc_gate_target_basis_is_rejected_by_workflow_contract() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![Instruction::McGate(Box::new(MCGate::new(
+        target: CompileTarget::Basis(vec![Instruction::McGate(Box::new(MCGate::new(
             1,
             StandardGate::X,
         )))]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -863,7 +1188,7 @@ fn mc_gate_target_basis_is_rejected_by_workflow_contract() {
 }
 
 #[test]
-fn device_native_gates_are_used_as_target_basis() {
+fn device_native_gates_are_legalized_against_ordered_capabilities() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
@@ -875,23 +1200,24 @@ fn device_native_gates_are_used_as_target_basis() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
 
-    assert_eq!(
-        standard_ops(&result.circuit),
-        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
-    );
+    assert!(step_changed(&result, "lower.device_instructions"));
+    device.validate_circuit(&result.circuit).unwrap();
+    assert!(standard_ops(&result.circuit).contains(&StandardGate::CZ));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CX));
 }
 
 #[test]
-fn device_workflow_routes_circuit_before_target_translation() {
+fn device_workflow_routes_circuit_before_native_legalization() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let q2 = Qubit::new(2);
@@ -899,21 +1225,30 @@ fn device_workflow_routes_circuit_before_target_translation() {
     circuit.cx(q0, q1).unwrap();
     circuit.cx(q1, q2).unwrap();
     circuit.cx(q0, q2).unwrap();
-    let device = Device::line("test-device", 3).unwrap();
+    let device = Device::line("test-device", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
 
     assert!(step_changed(&result, "route.sabre"));
-    assert!(standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+    device.validate_circuit(&result.circuit).unwrap();
     assert!(
         result
             .steps
@@ -942,17 +1277,18 @@ fn routed_swaps_are_lowered_to_device_native_basis() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
 
     assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
     assert!(
         standard_ops(&result.circuit)
             .iter()
@@ -980,11 +1316,12 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
@@ -997,7 +1334,7 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
     assert!(!routing_basis_step.skipped);
     assert!(!routing_basis_step.changed);
     assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(step_changed(&result, "lower.device_instructions"));
     assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
         gate,
         StandardGate::RZ | StandardGate::X2P | StandardGate::CZ
@@ -1014,15 +1351,22 @@ fn enhanced_device_workflow_runs_post_routing_cleanup() {
     circuit.cx(q0, q1).unwrap();
     circuit.cx(q1, q2).unwrap();
     circuit.cx(q0, q2).unwrap();
-    let device = Device::line("test-device", 3).unwrap();
+    let device = Device::line("test-device", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
@@ -1047,18 +1391,34 @@ fn device_capacity_blocks_clean_ancilla_allocation_but_allows_no_aux_fallback() 
             None,
         )
         .unwrap();
-    let device = Device::line("test-device", 4).unwrap();
+    let device = Device::line("test-device", 4)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::S),
+            Instruction::Standard(StandardGate::SDG),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+            Instruction::Standard(StandardGate::X),
+            Instruction::Standard(StandardGate::Z),
+            Instruction::Standard(StandardGate::RX),
+            Instruction::Standard(StandardGate::RY),
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy {
             max_pre_layout_clean_ancillas: 2,
             allow_dirty_borrowing: false,
         },
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
@@ -1076,11 +1436,12 @@ fn device_capacity_rejects_source_circuit_that_is_too_wide() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -1107,11 +1468,12 @@ fn device_capacity_rejects_too_wide_source_before_mc_decomposition() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();

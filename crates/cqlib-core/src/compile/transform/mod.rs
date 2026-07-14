@@ -40,6 +40,8 @@
 //!   semantic optimization or hardware lowering.
 //! - [`decompose`] expands circuit-backed definitions, synthesizes
 //!   matrix-backed unitaries, and lowers multi-controlled gates.
+//! - [`device_lowering`] maps routed physical gates to exact ordered device
+//!   instructions, including direction and local capability overrides.
 //! - [`rewrite`] applies compiler knowledge rules for conservative
 //!   optimization or explicit target-basis lowering.
 //! - [`layout`] selects an initial logical-to-physical mapping for a device but
@@ -55,6 +57,7 @@
 pub mod analysis;
 pub mod canonicalize;
 pub mod decompose;
+pub mod device_lowering;
 pub mod layout;
 pub mod rebuild;
 pub mod resynthesis;
@@ -68,6 +71,7 @@ pub use analysis::CircuitAnalysis;
 pub use canonicalize::{
     CanonicalizeConfig, CanonicalizeResult, Canonicalizer, canonicalize_circuit,
 };
+pub use device_lowering::DeviceLowerer;
 pub use layout::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, LayoutDiagnostics, LayoutObjective,
     LayoutResult, LayoutScore, Vf2EdgeRequirement, Vf2LayoutConfig, analyze_circuit_for_layout,

@@ -23,7 +23,9 @@
 //! knowledge rewrite, decompose unitary and multi-controlled gates,
 //! canonicalize again, optimize the decomposed circuit, optionally lower to a
 //! routing-compatible basis, optionally route on a device, optionally translate
-//! to the resolved target basis, and canonicalize the output.
+//! to the resolved target basis, and canonicalize the output representation. A
+//! device workflow then lowers every gate to exact ordered native capabilities
+//! and validates the completed physical circuit before returning it.
 //!
 //! The enhanced workflow uses the same required correctness stages but raises
 //! rewrite budgets, uses stronger SABRE trial settings, performs a
@@ -36,8 +38,8 @@
 //! canonicalization gives later passes a stable representation, definition and
 //! high-level gate decomposition remove operations that routing cannot accept,
 //! routing runs before final target-basis cleanup because it may insert SWAPs,
-//! and the output canonicalizer removes representation noise introduced by
-//! previous stages.
+//! and output canonicalization removes representation noise before exact device
+//! lowering. Device validation is terminal: no circuit transform runs after it.
 
 use crate::circuit::{Circuit, Instruction};
 use crate::compile::CompilerError;
@@ -50,12 +52,15 @@ use crate::compile::transform::decompose::{
 };
 use crate::compile::transform::layout::build_physical_layout_graph;
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, KnowledgeRewriter, LayoutObjective, LowerToRoutingBasis,
-    ResynthesizeTwoQubitBlocks, RewriteConfig, TargetBasisLowerer, TransformResult, Transformer,
-    TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
+    Canonicalizer, CircuitAnalysis, DeviceLowerer, KnowledgeRewriter, LayoutObjective,
+    LowerToRoutingBasis, ResynthesizeTwoQubitBlocks, RewriteConfig, TargetBasisLowerer,
+    TransformResult, Transformer, TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
 };
 
-use super::{CompileConfig, CompileMode, CompileResult};
+use super::{
+    CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
+    DeviceCompileTarget,
+};
 
 /// Per-step execution record produced by a workflow run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +84,7 @@ struct WorkflowState {
     steps: Vec<WorkflowStepReport>,
     target_basis: Option<Vec<Instruction>>,
     two_qubit_target: TwoQubitSynthesisTarget,
+    device_metadata: Option<DeviceCompilationMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +124,7 @@ impl CompilerWorkflow {
             steps: Vec::new(),
             target_basis: resolved_target,
             two_qubit_target,
+            device_metadata: None,
         };
 
         self.record_pre_init(&mut state);
@@ -129,12 +136,15 @@ impl CompilerWorkflow {
         self.lower_physical(&mut state)?;
         self.lower_target(&mut state)?;
         self.lower_output(&mut state)?;
+        self.lower_device_instructions(&mut state)?;
+        self.validate_device(&mut state)?;
 
         Ok(CompileResult {
             circuit: state.current,
             changed: state.changed,
             mode: self.config.mode,
             steps: state.steps,
+            device_metadata: state.device_metadata,
         })
     }
 
@@ -238,6 +248,46 @@ impl CompilerWorkflow {
         )
     }
 
+    fn lower_device_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        let Some(target) = self.device_target() else {
+            record_skipped(
+                state,
+                "translation",
+                "lower.device_instructions",
+                "no target device configured",
+            );
+            return Ok(());
+        };
+        let lowerer = DeviceLowerer::new(&target.device);
+        apply_circuit_transform(
+            state,
+            "translation",
+            "lower.device_instructions",
+            |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
+        )
+    }
+
+    fn validate_device(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        let Some(target) = self.device_target() else {
+            record_skipped(
+                state,
+                "validation",
+                "validate.device",
+                "no target device configured",
+            );
+            return Ok(());
+        };
+        target.device.validate_circuit(&state.current)?;
+        state.steps.push(WorkflowStepReport {
+            stage: "validation",
+            name: "validate.device",
+            changed: false,
+            skipped: false,
+            reason: None,
+        });
+        Ok(())
+    }
+
     /// Builds the rewrite configuration for a workflow phase.
     ///
     /// Rewrite phases use the production optimizer. Enhanced mode only
@@ -333,7 +383,7 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
-        if self.config.device.is_none() {
+        if self.device_target().is_none() {
             record_skipped(
                 state,
                 "optimization",
@@ -367,7 +417,7 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
-        if self.config.device.is_none() {
+        if self.device_target().is_none() {
             record_skipped(
                 state,
                 "translation",
@@ -377,19 +427,11 @@ impl CompilerWorkflow {
             return Ok(());
         }
 
-        let preferred_basis = self.config.target_basis.clone().or_else(|| {
-            self.config
-                .device
-                .as_ref()
-                .map(|device| device.native_gates().to_vec())
-        });
         apply_circuit_transform(
             state,
             "translation",
             "decompose.routing_basis",
-            |circuit, analysis| {
-                LowerToRoutingBasis::new(preferred_basis).transform(circuit, Some(analysis))
-            },
+            |circuit, analysis| LowerToRoutingBasis::new(None).transform(circuit, Some(analysis)),
         )
     }
 
@@ -403,10 +445,8 @@ impl CompilerWorkflow {
     fn resource_limits(&self) -> ResourceLimits {
         ResourceLimits {
             max_total_qubits: self
-                .config
-                .device
-                .as_ref()
-                .map(|device| device.num_usable_qubits()),
+                .device_target()
+                .map(|target| target.device.num_usable_qubits()),
         }
     }
 
@@ -446,12 +486,7 @@ impl CompilerWorkflow {
     /// the same SABRE router and trial settings. Without a supplied layout, the
     /// workflow derives a layout objective from the configured target device.
     fn apply_layout_and_routing(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let Some(device) = self.config.device.as_ref() else {
-            if self.config.initial_layout.is_some() {
-                return Err(CompilerError::InvalidInput(
-                    "initial layout requires a target device".to_string(),
-                ));
-            }
+        let Some(target) = self.device_target() else {
             record_skipped(
                 state,
                 "routing",
@@ -461,13 +496,18 @@ impl CompilerWorkflow {
             return Ok(());
         };
 
-        let config = sabre_config_for_mode(self.config.mode, self.config.seed);
+        let device = &target.device;
+        let config = sabre_config_for_mode(self.config.mode, target.seed);
         let (route_changed, swap_count, trials_evaluated, supplied_layout) =
-            if let Some(initial_layout) = self.config.initial_layout.as_ref() {
+            if let Some(initial_layout) = target.initial_layout.as_ref() {
                 let routed = route_with_layout(&state.current, device, initial_layout, &config)?;
                 let route_changed = routed.changed(&state.current);
                 let swap_count = routed.swap_count();
                 let trials_evaluated = routed.diagnostics().trials_evaluated;
+                state.device_metadata = Some(DeviceCompilationMetadata {
+                    initial_layout: routed.initial_layout().clone(),
+                    final_layout: routed.final_layout().clone(),
+                });
                 state.current = routed.into_circuit();
                 (route_changed, swap_count, trials_evaluated, true)
             } else {
@@ -486,6 +526,10 @@ impl CompilerWorkflow {
                 let route_changed = routed.changed(&state.current);
                 let swap_count = routed.swap_count();
                 let trials_evaluated = routed.diagnostics().trials_evaluated;
+                state.device_metadata = Some(DeviceCompilationMetadata {
+                    initial_layout: routed.initial_layout().clone(),
+                    final_layout: routed.final_layout().clone(),
+                });
                 state.current = routed.into_routed().into_circuit();
                 (route_changed, swap_count, trials_evaluated, false)
             };
@@ -514,7 +558,7 @@ impl CompilerWorkflow {
     }
 
     fn apply_post_routing_cleanup(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        if self.config.device.is_none() {
+        if self.device_target().is_none() {
             record_skipped(
                 state,
                 "optimization",
@@ -556,46 +600,27 @@ impl CompilerWorkflow {
         )
     }
 
-    /// Resolves the target instruction basis from explicit config or device data.
-    ///
-    /// Explicit basis configuration wins over device native gates. If no
-    /// explicit basis is supplied, a device may still provide native-gate
-    /// constraints for the final lowering stage.
+    /// Resolves an explicit basis target. Device capabilities are local and
+    /// ordered, so they are handled by the exact device-lowering stage.
     fn resolve_target_basis(&self) -> Result<Option<Vec<Instruction>>, CompilerError> {
-        if let Some(target_basis) = &self.config.target_basis {
+        if let CompileTarget::Basis(target_basis) = &self.config.target {
             validate_workflow_target_basis_config(target_basis)?;
             return Ok(Some(target_basis.to_vec()));
         }
-
-        let Some(device) = &self.config.device else {
-            return Ok(None);
-        };
-        let target_basis = device.native_gates();
-        if target_basis.is_empty() {
-            return Ok(None);
-        }
-
-        validate_workflow_target_basis_config(target_basis)?;
-        Ok(Some(target_basis.to_vec()))
+        Ok(None)
     }
 
     fn record_pre_init(&self, state: &mut WorkflowState) {
-        let reason = if let Some(basis) = &state.target_basis {
-            if self.config.target_basis.is_some() {
-                Some(format!(
-                    "resolved explicit target basis with {} instructions",
-                    basis.len()
-                ))
-            } else {
-                Some(format!(
-                    "resolved device native target basis with {} instructions",
-                    basis.len()
-                ))
+        let reason = match (&self.config.target, &state.target_basis) {
+            (CompileTarget::Basis(_), Some(basis)) => Some(format!(
+                "resolved explicit target basis with {} instructions",
+                basis.len()
+            )),
+            (CompileTarget::Device(_), _) => {
+                Some("resolved device target with ordered native capabilities".to_string())
             }
-        } else if self.config.device.is_some() {
-            Some("target device has no native gates; basis lowering disabled".to_string())
-        } else {
-            Some("no target constraints configured".to_string())
+            (CompileTarget::Logical, _) => Some("no target constraints configured".to_string()),
+            (CompileTarget::Basis(_), None) => None,
         };
 
         state.steps.push(WorkflowStepReport {
@@ -605,6 +630,13 @@ impl CompilerWorkflow {
             skipped: false,
             reason,
         });
+    }
+
+    fn device_target(&self) -> Option<&DeviceCompileTarget> {
+        match &self.config.target {
+            CompileTarget::Device(target) => Some(target),
+            CompileTarget::Logical | CompileTarget::Basis(_) => None,
+        }
     }
 }
 

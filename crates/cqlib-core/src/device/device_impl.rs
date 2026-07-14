@@ -900,21 +900,23 @@ impl Device {
         match &operation.instruction {
             Instruction::ClassicalControl(control) => match control {
                 ClassicalControlOp::If(op) => {
-                    self.validate_operations(op.then_body().operations())?;
+                    self.validate_control_body(op.then_body().operations())?;
                     if let Some(body) = op.else_body() {
-                        self.validate_operations(body.operations())?;
+                        self.validate_control_body(body.operations())?;
                     }
                 }
                 ClassicalControlOp::While(op) => {
-                    self.validate_operations(op.body().operations())?
+                    self.validate_control_body(op.body().operations())?
                 }
-                ClassicalControlOp::For(op) => self.validate_operations(op.body().operations())?,
+                ClassicalControlOp::For(op) => {
+                    self.validate_control_body(op.body().operations())?
+                }
                 ClassicalControlOp::Switch(op) => {
                     for case in op.cases() {
-                        self.validate_operations(case.body().operations())?;
+                        self.validate_control_body(case.body().operations())?;
                     }
                     if let Some(body) = op.default() {
-                        self.validate_operations(body.operations())?;
+                        self.validate_control_body(body.operations())?;
                     }
                 }
                 ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
@@ -981,6 +983,27 @@ impl Device {
             self.validate_operation(operation)?;
         }
         Ok(())
+    }
+
+    /// Validates one canonical control-flow body.
+    ///
+    /// Until control bodies carry their own phase metadata, canonicalization
+    /// represents a body-local global phase as one leading zero-qubit GPhase
+    /// marker. It is semantic IR metadata rather than a hardware instruction,
+    /// so it does not require a device capability. No other GPhase position is
+    /// granted this exception.
+    fn validate_control_body(&self, operations: &[Operation]) -> Result<(), DeviceValidationError> {
+        let operations = if operations.first().is_some_and(|operation| {
+            matches!(
+                operation.instruction,
+                Instruction::Standard(StandardGate::GPhase)
+            ) && operation.qubits.is_empty()
+        }) {
+            &operations[1..]
+        } else {
+            operations
+        };
+        self.validate_operations(operations)
     }
 
     /// Builds the common diagnostic for a well-formed but unsupported atomic instruction.
