@@ -29,7 +29,7 @@ cqlib.device 是 Cqlib 中用于描述量子后端硬件能力、噪声特性与
 
 以下示例演示了 device 模块的完整工作流，涵盖拓扑定义、设备创建、标定注入、布局映射、噪声配置和结果管理。
 
-`python
+```python
 from cqlib.circuit import Instruction, StandardGate
 from cqlib.device import (
     Device, EdgeProp, ExecutionResult, InstructionProp, Layout,
@@ -94,7 +94,7 @@ skey = OperationKey.new_single(StandardGate.X, 0)
 qubit_noises = noise.get_single_qubit_errors(skey)
 if qubit_noises:
     print("X 门噪声通道数:", len(qubit_noises))
-`
+```
 
 **说明**：
 

@@ -8,7 +8,7 @@ cqlib.device 的执行结果模块提供测量结果封装、任务状态追踪�
 
 Outcome 使用小端序（little-endian）比特顺序：字符串最右侧对应 Qubit 0，最左侧对应 Qubit N-1。
 
-`python
+```python
 from cqlib.device import Outcome
 
 # 从比特字符串创建（小端序：最右 = Qubit 0）
@@ -24,7 +24,7 @@ print("o == o2:", o == o2)  # True
 # 从索引列表构造（指定哪些位置的比特为 1）
 o3 = Outcome.from_indices(width=3, indices=[0, 2])
 print("索引构造:", o3.to_bitstring(3))  # "101"
-`
+```
 
 **说明**：
 - 字符串只能包含 '0' 和 '1'，包含其他字符会抛出 ValueError
@@ -45,7 +45,7 @@ Status 表示量子任务的执行阶段，支持以下五种状态：
 | Failed | Status.failed(msg, code) | 是 |
 | Cancelled | Status.cancelled() | 是 |
 
-`python
+```python
 from cqlib.device import Status
 
 q = Status.queued()
@@ -57,7 +57,7 @@ print("queued:", q.kind, "终态?", q.is_terminal())
 print("completed:", c.kind, "成功?", c.is_success())
 print("failed:", f.kind, f.error_msg, f.error_code)
 print("cancelled:", x.kind, "终态?", x.is_terminal())
-`
+```
 
 **说明**：
 - Status.kind 是属性（不是方法），返回字符串，如 "completed"、"failed"
@@ -69,7 +69,7 @@ print("cancelled:", x.kind, "终态?", x.is_terminal())
 
 ## ExecutionResult：完整执行结果
 
-`python
+```python
 from cqlib.device import ExecutionResult
 
 result = ExecutionResult("q-task-001", [0, 1], 1000, 2, "Tianyan-176-2")
@@ -88,13 +88,13 @@ print("测量次数:", result.shots)
 print("计数结果:", result.counts)
 print("概率分布:", result.probabilities)
 print("后端名称:", result.backend)
-`
+```
 
 ### 从计数直接构造
 
 如果已有测量结果，可使用 rom_counts 一步完成创建和填充：
 
-`python
+```python
 from cqlib.device import ExecutionResult
 
 result = ExecutionResult.from_counts(
@@ -105,13 +105,13 @@ result = ExecutionResult.from_counts(
 )
 print("状态:", result.status.kind)        # completed（已自动完成）
 print("概率分布:", result.probabilities)  # {"00": 0.5, "11": 0.5}
-`
+```
 
 ---
 
 ## 异常流程处理
 
-`python
+```python
 from cqlib.device import ExecutionResult
 
 # 失败场景
@@ -125,13 +125,13 @@ print("错误码:", f.status.error_code)           # 408
 c = ExecutionResult("task-cancel", [0], 10, 1, None)
 c.cancel()
 print("取消状态:", c.status.kind)               # cancelled
-`
+```
 
 ---
 
 ## 输入校验
 
-`python
+```python
 from cqlib.device import ExecutionResult
 
 r = ExecutionResult("bad", [0], 10, 1, None)
@@ -139,7 +139,7 @@ try:
     r.finish({"2": 1})  # "2" 不是有效的二进制字符串
 except ValueError as e:
     print("无效计数:", e)
-`
+```
 
 ---
 

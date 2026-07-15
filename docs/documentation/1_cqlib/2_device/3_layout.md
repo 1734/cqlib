@@ -16,7 +16,7 @@ Layout 管理逻辑比特到物理比特的双向映射，是编译路由阶段�
 
 Layout 支持多种构造方式：
 
-`python
+```python
 from cqlib.device import Layout
 
 # 方式一：自动顺序映射
@@ -31,7 +31,7 @@ print("空闲物理比特数:", layout.num_vacant_physical)  # 1
 # (逻辑, 物理) 对明确指定映射关系，其余物理比特保持空闲
 layout2 = Layout.from_pairs([(0, 2), (1, 0)], physical_count=4)
 print("from_pairs 空闲数:", layout2.num_vacant_physical)  # 2
-`
+```
 
 **注意**：
 - Layout.__init__ 的 init_map 参数要求 dict[Qubit, Qubit] 类型，直接传入 {0: 11} 会因类型不匹配抛出 TypeError
@@ -42,7 +42,7 @@ print("from_pairs 空闲数:", layout2.num_vacant_physical)  # 2
 
 ## 查询映射
 
-`python
+```python
 from cqlib.device import Layout
 
 layout = Layout.from_pairs([(0, 11), (1, 10)], physical_count=13)
@@ -64,7 +64,7 @@ print("物理 12 是否空闲:", layout.is_physical_vacant(12))  # True
 # 获取完整映射字典
 print("逻辑→物理映射:", layout.l2p_map)
 print("物理→逻辑映射:", layout.p2l_map)
-`
+```
 
 **说明**：
 - get_physical(logical_id) 对未绑定的逻辑比特返回 None
@@ -75,7 +75,7 @@ print("物理→逻辑映射:", layout.p2l_map)
 
 ## 更新映射
 
-`python
+```python
 from cqlib.device import Layout
 
 # 初始映射：逻辑 0→物理 11，逻辑 1→物理 12
@@ -96,7 +96,7 @@ layout3 = Layout.from_pairs([(0, 11), (1, 12)], physical_count=13)
 layout3.swap_physical(11, 12)
 print("SWAP 后物理 11→逻辑:", layout3.get_logical(11))  # Qubit(1)
 print("SWAP 后物理 12→逻辑:", layout3.get_logical(12))  # Qubit(0)
-`
+```
 
 **边界条件**：
 - ind(logical, physical)：如果 physical 已被占用，或 logical 已绑定，抛出 ValueError
@@ -107,7 +107,7 @@ print("SWAP 后物理 12→逻辑:", layout3.get_logical(12))  # Qubit(0)
 
 ## 健壮性保障
 
-`python
+```python
 from cqlib.device import Layout
 
 layout = Layout.from_pairs([(0, 11), (1, 12)], physical_count=13)
@@ -127,7 +127,7 @@ try:
     print("SWAP 操作成功")
     print("物理 11→逻辑:", layout.get_logical(11))
     print("物理 12→逻辑:", layout.get_logical(12))
-`
+```
 
 ---
 

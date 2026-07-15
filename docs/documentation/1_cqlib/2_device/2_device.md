@@ -19,7 +19,7 @@ Cqlib 采用**"全局默认 + 局部覆盖"**的标定策略：查询参数时�
 
 ## 构建设备基准
 
-`python
+```python
 from cqlib.circuit import StandardGate
 from cqlib.device import Device, Topology
 
@@ -33,7 +33,7 @@ device.default_two_qubit_error = 0.01
 
 print("设备名:", device.name)
 print("寄存器比特数:", len(device.qubits))
-`
+```
 
 **说明**：全局默认值仅用于后续回退查询。如果某个比特没有设置局部值，调用 get_t1(q) 时会返回 default_t1。
 
@@ -41,7 +41,7 @@ print("寄存器比特数:", len(device.qubits))
 
 Device 提供了快速构造常见拓扑结构的工厂方法，省去手动创建 Topology 的步骤：
 
-`python
+```python
 from cqlib.device import Device
 
 d1 = Device.line("line_dev", num_qubits=5)                    # 单向线型
@@ -57,13 +57,13 @@ print("环形:", d3.num_usable_qubits)
 print("星形:", d4.num_usable_qubits)
 print("网格:", d5.num_usable_qubits)
 print("自定义:", d6.num_usable_qubits)
-`
+```
 
 ---
 
 ## 注入局部标定数据
 
-`python
+```python
 from cqlib.circuit import Instruction, StandardGate
 from cqlib.device import Device, EdgeProp, InstructionProp, QubitProp, Topology
 
@@ -102,7 +102,7 @@ edge.add_native_instruction(cx_prop)
 device.add_edge_properties(0, 1, edge)
 
 print("比特 0 局部属性已注入")
-`
+```
 
 **注意**：
 - InstructionProp 构造器的第一个参数必须是 Instruction 对象，使用 Instruction.from_standard_gate(StandardGate.X) 创建。不允许直接传入 StandardGate.X
@@ -113,7 +113,7 @@ print("比特 0 局部属性已注入")
 
 ## 参数查询与回退机制
 
-`python
+```python
 from cqlib.circuit import Instruction, StandardGate
 from cqlib.device import Device, Topology
 
@@ -138,7 +138,7 @@ print("比特 0 的 X 门误差（回退默认）:", device.single_qubit_error(0
 # 查询读出误差（全局默认）
 device.default_readout_error = 0.05
 print("比特 0 的读出误差（回退默认）:", device.get_readout_error(0))
-`
+```
 
 **回退链说明**：
 - get_t1(q)：优先返回 QubitProp(q).t1，未设置则返回 device.default_t1
@@ -150,7 +150,7 @@ print("比特 0 的读出误差（回退默认）:", device.get_readout_error(0)
 
 ## 无效比特管理
 
-`python
+```python
 from cqlib.device import Device, Topology
 
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
@@ -162,13 +162,13 @@ device.invalid_qubits = [2]   # 注意：使用列表，不是集合
 print("可用比特数:", device.num_usable_qubits)  # 2
 print("可用比特列表:", device.usable_qubits)     # [Qubit(0), Qubit(1)]
 print("比特 2 是否可用:", device.is_usable_qubit(2))  # False
-`
+```
 
 ---
 
 ## 健壮性校验
 
-`python
+```python
 from cqlib.device import Device, QubitProp, Topology
 
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
@@ -183,7 +183,7 @@ try:
     device.add_edge_properties(0, 9, EdgeProp())
 except ValueError as e:
     print("添加不存在的边属性:", e)
-`
+```
 
 ---
 

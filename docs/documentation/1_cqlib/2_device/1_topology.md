@@ -12,7 +12,7 @@ Cqlib 的 Topology 采用**有向图**模型。这意味着 (0, 1, "CX") 并不�
 
 每条边必须使用 (control, target, name) 三元组：
 
-`python
+```python
 from cqlib.device import Topology
 
 topo = Topology(
@@ -26,7 +26,7 @@ topo = Topology(
 print("比特总数:", topo.num_qubits)
 print("耦合总数:", topo.num_couplings)
 print("节点列表:", topo.qubits)
-`
+```
 
 **注意**：构造器的 couplings 参数要求 (control, target, name) 三元组，不支持二元组写法。
 
@@ -34,13 +34,13 @@ print("节点列表:", topo.qubits)
 
 Topology 目前提供 line 工厂，用于快速创建线型拓扑：
 
-`python
+```python
 from cqlib.device import Topology
 
 # 线型: 0 → 1 → 2 → 3（单向链）
 line_topo = Topology.line([0, 1, 2, 3])
 print("线型耦合数:", line_topo.num_couplings)
-`
+```
 
 **说明**：
 - Topology 上仅有 line 工厂方法，没有 ring/star/grid/bidirectional_line
@@ -48,20 +48,20 @@ print("线型耦合数:", line_topo.num_couplings)
 
 ### 3. 手动添加双向耦合
 
-`python
+```python
 from cqlib.device import Topology
 
 # 表示 0 和 1 互为控制/目标位（双向耦合）
 topo = Topology([0, 1], [(0, 1, "CX"), (1, 0, "CX")])
 print("支持 0→1:", topo.supports_directed_coupling(0, 1))   # True
 print("支持 1→0:", topo.supports_directed_coupling(1, 0))   # True
-`
+```
 
 ---
 
 ## 拓扑查询与分析
 
-`python
+```python
 from cqlib.device import Topology
 
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
@@ -87,7 +87,7 @@ print("比特 1 的入度:", topo.in_degree(1))                    # 1
 # 无向边列表（undirected_edges 是方法，需加括号调用）
 edges = topo.undirected_edges()
 print("无向边列表:", edges)
-`
+```
 
 **说明**：
 - successors(q) 返回从 q 出发通过有向边可直接到达的比特列表
@@ -101,7 +101,7 @@ eighbors_undirected(q) 合并两个方向，重复节点只出现一次
 
 ## 动态修改拓扑
 
-`python
+```python
 from cqlib.device import Topology
 
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
@@ -122,7 +122,7 @@ print("移除后耦合数:", topo.num_couplings)  # 2（移除了耦合 (3,4)）
 topo.remove_qubits([4])
 print("移除后比特数:", topo.num_qubits)     # 4
 print("移除后耦合数:", topo.num_couplings)  # 2（移除了耦合 (3,4)）
-`
+```
 
 **边界条件**：
 - dd_qubits([...])：添加已有比特会抛出 ValueError

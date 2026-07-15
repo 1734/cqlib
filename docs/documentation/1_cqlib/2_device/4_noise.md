@@ -17,7 +17,7 @@ SingleQubitNoise 提供多种静态工厂方法创建不同类型的噪声信道
 | mplitude_damping(gamma) | 振幅阻尼 | T1 能量弛豫模型 |
 | phase_damping(lambda_) | 相位阻尼 | T2 纯退相干模型 |
 
-`python
+```python
 from cqlib.device import SingleQubitNoise
 
 sq = SingleQubitNoise.depolarizing(0.01)
@@ -34,7 +34,7 @@ print("Kraus 矩阵形状:", kraus[0].shape)    # (2, 2)
 # 有效性校验
 print("去极化噪声有效:", sq.is_valid())       # True
 print("振幅阻尼有效:", amp.is_valid())        # True
-`
+```
 
 **注意**：
 - SingleQubitNoise 没有 .kind 属性。要区分噪声类型，需自行通过构造方法跟踪
@@ -44,7 +44,7 @@ print("振幅阻尼有效:", amp.is_valid())        # True
 
 ## 双比特噪声
 
-`python
+```python
 from cqlib.device import SingleQubitNoise, TwoQubitNoise
 from cqlib.qis import Pauli
 
@@ -62,7 +62,7 @@ print("独立噪声 Kraus 形状:", ind.to_kraus()[0].shape)
 # 关联 Pauli 噪声
 corr = TwoQubitNoise.correlated_pauli(Pauli.x(), Pauli.x(), p=0.01)
 print("关联 Pauli Kraus 形状:", corr.to_kraus()[0].shape)
-`
+```
 
 **Pauli 构造函数说明**（均为静态方法，返回 Pauli 对象）：
 
@@ -79,14 +79,14 @@ print("关联 Pauli Kraus 形状:", corr.to_kraus()[0].shape)
 
 ReadoutError 描述测量过程中的判别错误：
 
-`python
+```python
 from cqlib.device import ReadoutError
 
 ro = ReadoutError(p_0_given_1=0.02, p_1_given_0=0.01)
 print("P(测到 0 | 制备为 1):", ro.p_0_given_1)  # 0.02
 print("P(测到 1 | 制备为 0):", ro.p_1_given_0)  # 0.01
 print("读出误差是否有效:", ro.is_valid())          # True
-`
+```
 
 ---
 
@@ -94,7 +94,7 @@ print("读出误差是否有效:", ro.is_valid())          # True
 
 NoiseModel 聚合所有噪声源，支持按比特/门类型进行增删查：
 
-`python
+```python
 from cqlib.circuit import StandardGate
 from cqlib.device import NoiseModel, OperationKey, ReadoutError, SingleQubitNoise, TwoQubitNoise
 
@@ -118,7 +118,7 @@ print("X 门噪声通道数:", len(errs))
 tkey = OperationKey.new_double(StandardGate.CX, 0, 1)
 errs2 = nm.get_two_qubit_errors(tkey)
 print("CX 门噪声通道数:", len(errs2))
-`
+```
 
 **说明**：
 - dd_single_qubit_error(gate, qubit, noise) 的 gate 参数传入 StandardGate 枚举值（如 StandardGate.X），而非 Instruction 对象
@@ -133,7 +133,7 @@ ew_double(gate, q0, q1) 使用 StandardGate
 
 NoiseModel.add_*() 和噪声构造器会在参数不合法时抛出 ValueError：
 
-`python
+```python
 from cqlib.circuit import StandardGate
 from cqlib.device import NoiseModel, SingleQubitNoise, TwoQubitNoise
 
@@ -150,7 +150,7 @@ try:
     nm.add_two_qubit_error(StandardGate.CX, 0, 0, TwoQubitNoise.depolarizing(0.01))
 except ValueError as e:
     print("无效配置被拦截:", e)
-`
+```
 
 ---
 
@@ -158,7 +158,7 @@ except ValueError as e:
 
 在实际使用中，Device 提供门误差率查询接口，而 NoiseModel 提供详细的信道模型。两者可以配合使用：
 
-`python
+```python
 from cqlib.circuit import Instruction, StandardGate
 from cqlib.device import Device, NoiseModel, OperationKey, SingleQubitNoise, Topology
 
@@ -177,7 +177,7 @@ print("设备报告的 H 门误差:", device.single_qubit_error(0, h_inst))
 skey = OperationKey.new_single(StandardGate.H, 0)
 channels = noise.get_single_qubit_errors(skey)
 print("噪声通道数:", len(channels))
-`
+```
 
 ---
 
