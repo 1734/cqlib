@@ -272,6 +272,7 @@ pub use compiler::{
 pub use error::{CompilerError, SabreRoutingFailure};
 pub use sabre::{
     SabreConfig, SabreHeuristicConfig, SabreRoutingDiagnostics, SabreRoutingResult,
-    normalize_initial_layout, sabre_route, validate_config, validate_reachable_interactions,
+    SabreVf2PrepassConfig, normalize_initial_layout, sabre_route, validate_config,
+    validate_reachable_interactions,
 };
 pub use workflow::{CompilerWorkflow, WorkflowStepReport};

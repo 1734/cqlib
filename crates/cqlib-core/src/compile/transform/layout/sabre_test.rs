@@ -171,7 +171,7 @@ fn exact_component_packing_handles_four_three_three_into_six_four() {
         &SabreConfig::deterministic_seeded(7),
     );
 
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]
@@ -450,6 +450,61 @@ fn sabre_layout_rejects_zero_layout_scoring_trials() {
 
     assert!(
         matches!(error, CompilerError::InvalidInput(message) if message.contains("layout_scoring_trials"))
+    );
+}
+
+#[test]
+fn sabre_layout_rejects_zero_vf2_prepass_limits() {
+    let device = Device::line("line", 3).unwrap();
+    let circuit = Circuit::new(2);
+    for (candidate_limit, call_limit, expected) in
+        [(0, 10, "candidate_limit"), (10, 0, "call_limit")]
+    {
+        let mut config = SabreConfig::deterministic_seeded(7);
+        config.vf2_prepass = Some(crate::compile::sabre::SabreVf2PrepassConfig {
+            candidate_limit,
+            call_limit,
+        });
+        let error = sabre_layout(
+            &circuit,
+            &device,
+            &LayoutObjective::topology_only(),
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CompilerError::InvalidInput(message) if message.contains(expected))
+        );
+    }
+}
+
+#[test]
+fn bounded_vf2_exhaustion_is_diagnostic_not_layout_infeasibility() {
+    let device = Device::line("line", 4).unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    let mut config = SabreConfig::deterministic_seeded(7);
+    config.vf2_prepass = Some(crate::compile::sabre::SabreVf2PrepassConfig {
+        candidate_limit: 10,
+        call_limit: 1,
+    });
+
+    let result = sabre_layout(
+        &circuit,
+        &device,
+        &LayoutObjective::topology_only(),
+        &config,
+    )
+    .unwrap();
+
+    assert!(
+        result
+            .diagnostics
+            .notes
+            .iter()
+            .any(|note| note.contains("exhausted its call budget"))
     );
 }
 

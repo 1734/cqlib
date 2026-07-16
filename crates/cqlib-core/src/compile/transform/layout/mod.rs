@@ -63,6 +63,7 @@ pub use crate::compile::physical_target::{
 pub use analysis::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, analyze_circuit_for_layout,
 };
+pub(crate) use greedy::{GreedyCandidateOutcome, greedy_layout_candidate_prepared};
 pub use greedy::{greedy_layout, greedy_layout_prepared};
 pub use objective::{LayoutObjective, LayoutScore};
 pub use result::{LayoutDiagnostics, LayoutResult};
@@ -74,6 +75,7 @@ pub use trivial::{trivial_layout, trivial_layout_prepared};
 pub use vf2::{
     Vf2EdgeRequirement, Vf2LayoutConfig, vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
+pub(crate) use vf2::{Vf2PreparedOutcome, try_vf2_perfect_layout_prepared};
 
 /// Returns whether a layout realizes all positive-weight interactions directly.
 ///

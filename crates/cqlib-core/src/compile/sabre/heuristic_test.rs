@@ -19,6 +19,7 @@ fn deterministic_seeded_config_uses_compact_reproducible_settings() {
 
     assert_eq!(config.layout_trials, 2);
     assert_eq!(config.layout_assignment_budget, 100_000);
+    assert_eq!(config.vf2_prepass.unwrap().call_limit, 100_000);
     assert_eq!(config.refinement_iterations, 1);
     assert_eq!(config.layout_scoring_trials, 1);
     assert_eq!(config.routing_trials, 1);

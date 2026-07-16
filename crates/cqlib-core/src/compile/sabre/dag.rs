@@ -326,7 +326,15 @@ impl WorkloadBuilder {
             pair.iter()
                 .filter_map(|logical| state.wire_frontier.get(logical).copied()),
         );
-        let node = self.add_node(SabreNodeKind::TwoQ(pair), parents);
+        let node = self.graph.add_node(SabreNode {
+            operations: Vec::new(),
+            kind: SabreNodeKind::TwoQ(pair),
+        });
+        for parent in parents {
+            if parent != node && self.graph.find_edge(parent, node).is_none() {
+                self.graph.add_edge(parent, node, ());
+            }
+        }
         state.wire_frontier.insert(pair[0], node);
         state.wire_frontier.insert(pair[1], node);
     }

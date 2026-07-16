@@ -107,12 +107,16 @@ mod layer;
 mod routing;
 
 pub(crate) use dag::SabreDag;
-pub use heuristic::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
+pub use heuristic::{
+    SabreConfig, SabreHeuristicConfig, SabreTrialObjective, SabreVf2PrepassConfig,
+};
 pub(crate) use routing::{
-    ComponentAssignmentSearch, InteractionReachability, RequirementReachabilityFailure,
-    RoutingTarget, TrialQuality, compare_trial_quality, interaction_reachability_for_target,
-    movement_component_assignment, normalize_initial_layout_for_target, route_trial_unchecked,
-    trial_heuristic_profile, trial_seeds, trial_swap_limit,
+    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata,
+    RequirementReachabilityFailure, RoutingTarget, TrialQuality, abstract_trial_quality,
+    compare_trial_quality, finalize_trial_quality, interaction_reachability_for_target,
+    movement_component_assignment, normalize_initial_layout_for_target,
+    route_unscored_trial_with_metadata, sabre_route_prepared, trial_heuristic_profile, trial_seeds,
+    trial_swap_limit, validate_native_trial_operations,
 };
 pub use routing::{SabreRoutingDiagnostics, SabreRoutingResult, sabre_route};
 pub use routing::{normalize_initial_layout, validate_config, validate_reachable_interactions};

@@ -82,6 +82,37 @@ fn robust_error_and_duration_keys_accumulate_every_component() {
 }
 
 #[test]
+fn mixed_metric_availability_is_structurally_inconsistent() {
+    let calibrated = NativePlanCost {
+        native_two_qubit_ops: 1,
+        native_total_ops: 2,
+        error: MetricAvailability::Available(RobustErrorKey {
+            unavailable_count: 0,
+            imputed_count: 0,
+            log_error: 0.25,
+        }),
+        duration: MetricAvailability::Available(RobustDurationKey {
+            unavailable_count: 0,
+            imputed_count: 0,
+            duration_work: 10.0,
+        }),
+    };
+    let unavailable = NativePlanCost {
+        native_two_qubit_ops: 3,
+        native_total_ops: 5,
+        error: MetricAvailability::Disabled,
+        duration: MetricAvailability::Disabled,
+    };
+
+    let combined = calibrated.combine(unavailable);
+
+    assert_eq!(combined.native_two_qubit_ops, 4);
+    assert_eq!(combined.native_total_ops, 7);
+    assert_eq!(combined.error, MetricAvailability::Inconsistent);
+    assert_eq!(combined.duration, MetricAvailability::Inconsistent);
+}
+
+#[test]
 fn estimator_imputes_missing_calibration_from_the_same_gate() {
     let p0 = PhysicalQubit::new(0);
     let p1 = PhysicalQubit::new(1);
@@ -101,12 +132,16 @@ fn estimator_imputes_missing_calibration_from_the_same_gate() {
     let known = DeviceGateState::standard(StandardGate::H, smallvec![p0]);
     let missing = DeviceGateState::standard(StandardGate::H, smallvec![p1]);
     let catalog = NativePlanCatalog::build(&device, [known, missing.clone()]).unwrap();
-    let estimator = CalibrationEstimator::from_catalog(&catalog);
+    let estimator = CalibrationEstimator::from_device(&device, &[p0, p1]);
 
     let cost = estimator.cost(catalog.summary(&missing).unwrap());
-    let error = cost.error.expect("observed H error enables error scoring");
+    let error = cost
+        .error
+        .value()
+        .expect("observed H error enables error scoring");
     let duration = cost
         .duration
+        .value()
         .expect("observed H duration enables duration scoring");
 
     assert_eq!(error.unavailable_count, 0);
@@ -137,14 +172,12 @@ fn device_estimator_uses_calibration_outside_the_prepared_catalog_roots() {
     let missing = DeviceGateState::standard(StandardGate::H, smallvec![p1]);
     let catalog = NativePlanCatalog::build(&device, [missing.clone()]).unwrap();
 
-    let catalog_estimator = CalibrationEstimator::from_catalog(&catalog);
     let device_estimator = CalibrationEstimator::from_device(&device, &[p0, p1]);
     let summary = catalog.summary(&missing).unwrap();
 
-    assert_eq!(catalog_estimator.cost(summary).error, None);
     let cost = device_estimator.cost(summary);
-    assert_eq!(cost.error.unwrap().imputed_count, 1);
-    assert_eq!(cost.duration.unwrap().duration_work, 18.0);
+    assert_eq!(cost.error.value().unwrap().imputed_count, 1);
+    assert_eq!(cost.duration.value().unwrap().duration_work, 18.0);
 }
 
 #[test]
@@ -156,12 +189,12 @@ fn estimator_disables_a_metric_when_the_device_has_no_samples() {
         .unwrap();
     let root = DeviceGateState::standard(StandardGate::H, smallvec![p0]);
     let catalog = NativePlanCatalog::build(&device, [root.clone()]).unwrap();
-    let estimator = CalibrationEstimator::from_catalog(&catalog);
+    let estimator = CalibrationEstimator::from_device(&device, &[p0]);
 
     let cost = estimator.cost(catalog.summary(&root).unwrap());
 
-    assert_eq!(cost.error, None);
-    assert_eq!(cost.duration, None);
+    assert_eq!(cost.error, MetricAvailability::Disabled);
+    assert_eq!(cost.duration, MetricAvailability::Disabled);
 }
 
 #[test]

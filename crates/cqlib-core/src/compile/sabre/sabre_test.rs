@@ -691,7 +691,13 @@ fn route_with_decay_is_reproducible_for_same_seed() {
 
 #[test]
 fn fixed_seed_is_independent_of_rayon_thread_count() {
-    let device = Device::line("line", 6).unwrap();
+    let device = Device::line("line", 6)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
     let layout = Layout::from_pairs(&[(0, 0), (1, 5), (2, 2), (3, 4)], 6).unwrap();
     let config = SabreConfig {
         routing_trials: 8,
@@ -725,10 +731,192 @@ fn fixed_seed_is_independent_of_rayon_thread_count() {
         four_threaded.final_layout.l2p_map()
     );
     assert_eq!(single_threaded.diagnostics, four_threaded.diagnostics);
+    assert_eq!(single_threaded.circuit, four_threaded.circuit);
+
+    // This corpus was captured from the committed device-aware SABRE before
+    // the equivalent sparse-storage/cache refactor. It guards operation order,
+    // selected trial, final layout, and quality rather than only reproducibility
+    // between two executions of the same implementation.
+    assert_eq!(single_threaded.swap_count, 7);
+    assert_eq!(single_threaded.diagnostics.selected_trial_index, 0);
+    assert_eq!(single_threaded.diagnostics.native_two_qubit_count, 27);
+    assert_eq!(single_threaded.diagnostics.native_two_qubit_depth, 18);
+    assert_eq!(single_threaded.diagnostics.native_operation_count, 63);
+    for (logical, physical) in [(0, 2), (1, 3), (2, 1), (3, 4)] {
+        assert_eq!(
+            single_threaded
+                .final_layout
+                .get_physical(LogicalQubit::new(logical)),
+            Some(PhysicalQubit::new(physical))
+        );
+    }
+    let operations = single_threaded
+        .circuit
+        .operations()
+        .iter()
+        .map(|operation| {
+            let Instruction::Standard(gate) = &operation.instruction else {
+                panic!("seed corpus contains non-standard operation")
+            };
+            (
+                *gate,
+                operation.qubits.iter().map(Qubit::id).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        format!("{:?}", single_threaded.circuit.operations()),
-        format!("{:?}", four_threaded.circuit.operations())
+        operations,
+        vec![
+            (StandardGate::SWAP, vec![0, 1]),
+            (StandardGate::SWAP, vec![3, 4]),
+            (StandardGate::CX, vec![2, 3]),
+            (StandardGate::SWAP, vec![4, 5]),
+            (StandardGate::SWAP, vec![1, 2]),
+            (StandardGate::SWAP, vec![3, 4]),
+            (StandardGate::CX, vec![2, 3]),
+            (StandardGate::SWAP, vec![2, 3]),
+            (StandardGate::CX, vec![2, 1]),
+            (StandardGate::CX, vec![3, 4]),
+            (StandardGate::SWAP, vec![2, 3]),
+            (StandardGate::CX, vec![2, 1]),
+            (StandardGate::CX, vec![3, 4]),
+        ]
     );
+}
+
+#[test]
+fn every_trial_objective_is_structurally_deterministic_across_thread_counts() {
+    let device = Device::line("objective-corpus", 6)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 5), (2, 2), (3, 4)], 6).unwrap();
+    let mut circuit = Circuit::new(4);
+    for (left, right) in [(0, 1), (2, 3), (0, 3), (1, 2), (0, 2), (1, 3)] {
+        circuit.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+    }
+
+    for objective in [
+        SabreTrialObjective::SwapCount,
+        SabreTrialObjective::Depth,
+        SabreTrialObjective::DepthThenSwap,
+        SabreTrialObjective::NativeQualityWithinSwapBudget,
+    ] {
+        let config = SabreConfig {
+            routing_trials: 8,
+            trial_objective: objective,
+            seed: Some(43),
+            ..SabreConfig::deterministic_seeded(43)
+        };
+        let route = |threads| {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| sabre_route(&circuit, &device, &layout, &config))
+                .unwrap()
+        };
+
+        let single = route(1);
+        let parallel = route(4);
+        assert_eq!(single.circuit, parallel.circuit, "objective {objective:?}");
+        assert_eq!(single.initial_layout, parallel.initial_layout);
+        assert_eq!(single.final_layout, parallel.final_layout);
+        assert_eq!(single.swap_count, parallel.swap_count);
+        assert_eq!(single.diagnostics, parallel.diagnostics);
+
+        let lowered = DeviceLowerer::new(&device)
+            .transform(&single.circuit, None)
+            .unwrap()
+            .circuit;
+        device.validate_circuit(&lowered).unwrap();
+    }
+}
+
+#[test]
+fn seeded_grid_unary_and_control_flow_corpus_is_thread_deterministic() {
+    let verify = |circuit: &Circuit, device: &Device, layout: &Layout, config: &SabreConfig| {
+        let route = |threads| {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| sabre_route(circuit, device, layout, config))
+                .unwrap()
+        };
+        let single = route(1);
+        let parallel = route(4);
+
+        assert_eq!(single.swap_count, parallel.swap_count);
+        assert_eq!(
+            single.initial_layout.l2p_map(),
+            parallel.initial_layout.l2p_map()
+        );
+        assert_eq!(
+            single.final_layout.l2p_map(),
+            parallel.final_layout.l2p_map()
+        );
+        assert_eq!(single.diagnostics, parallel.diagnostics);
+        assert_eq!(single.circuit, parallel.circuit);
+        let lowered = DeviceLowerer::new(device)
+            .transform(&single.circuit, None)
+            .unwrap()
+            .circuit;
+        device.validate_circuit(&lowered).unwrap();
+    };
+
+    let grid = Device::grid("seeded-grid", 3, 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let grid_layout = Layout::from_pairs(&[(0, 0), (1, 8), (2, 2), (3, 6), (4, 4)], 9).unwrap();
+    let mut grid_circuit = Circuit::new(5);
+    for (left, right) in [(0, 1), (2, 3), (0, 4), (1, 3), (2, 4), (0, 2)] {
+        grid_circuit
+            .cx(Qubit::new(left), Qubit::new(right))
+            .unwrap();
+    }
+    let grid_config = SabreConfig {
+        routing_trials: 6,
+        seed: Some(37),
+        ..SabreConfig::deterministic_seeded(37)
+    };
+    verify(&grid_circuit, &grid, &grid_layout, &grid_config);
+
+    let mut local_unary = Device::line("seeded-local-unary", 3)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::SWAP)])
+        .unwrap();
+    local_unary
+        .add_qubit_properties(
+            PhysicalQubit::new(2),
+            QubitProp::new(0.0)
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::H),
+                    0.001,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let unary_layout = Layout::from_pairs(&[(0, 0)], 3).unwrap();
+    let mut unary_circuit = Circuit::new(1);
+    unary_circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.h(Qubit::new(0))
+        })
+        .unwrap();
+    let unary_config = SabreConfig {
+        routing_trials: 4,
+        seed: Some(41),
+        ..SabreConfig::deterministic_seeded(41)
+    };
+    verify(&unary_circuit, &local_unary, &unary_layout, &unary_config);
 }
 
 #[test]
@@ -1319,6 +1507,69 @@ fn fallback_triggers_when_attempt_limit_is_zero() {
     assert!(result.swap_count > 0);
     assert!(result.diagnostics.fallback_count > 0);
     assert_all_two_qubit_operations_are_adjacent_on_line(&result.circuit);
+    let lowered = DeviceLowerer::new(&device)
+        .transform(&result.circuit, None)
+        .unwrap()
+        .circuit;
+    device.validate_circuit(&lowered).unwrap();
+}
+
+#[test]
+fn fallback_emits_the_verified_order_of_a_directional_native_swap() {
+    let [p0, p1, p2] = [0, 1, 2].map(PhysicalQubit::new);
+    let topology = Topology::new(
+        vec![p0, p1, p2],
+        vec![
+            (p1, p0, "terminal".to_string()),
+            (p1, p2, "movement".to_string()),
+        ],
+    )
+    .unwrap();
+    let mut device =
+        Device::new("directional-swap", HashSet::from([p0, p1, p2]), topology).unwrap();
+    device
+        .add_edge_properties(
+            p1,
+            p0,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    device
+        .add_edge_properties(
+            p1,
+            p2,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::SWAP),
+                    0.02,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 2), (1, 0)], 3).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let config = SabreConfig {
+        heuristic: SabreHeuristicConfig {
+            attempt_limit: 0,
+            ..SabreConfig::deterministic_seeded(29).heuristic
+        },
+        ..SabreConfig::deterministic_seeded(29)
+    };
+
+    let result = sabre_route(&circuit, &device, &layout, &config).unwrap();
+
+    assert_eq!(result.diagnostics.fallback_count, 1);
+    assert_eq!(result.swap_count, 1);
+    assert_eq!(
+        result.circuit.operations()[0].qubits.as_slice(),
+        [p1.qubit(), p2.qubit()]
+    );
     let lowered = DeviceLowerer::new(&device)
         .transform(&result.circuit, None)
         .unwrap()

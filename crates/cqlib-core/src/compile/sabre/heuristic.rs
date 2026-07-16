@@ -63,6 +63,15 @@ pub enum SabreTrialObjective {
     DepthThenSwap,
 }
 
+/// Bounded VF2 prepass used to seed SABRE layout candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SabreVf2PrepassConfig {
+    /// Maximum number of complete perfect mappings scored by VF2.
+    pub candidate_limit: usize,
+    /// Maximum number of partial mapping extensions attempted by VF2.
+    pub call_limit: usize,
+}
+
 /// Configuration shared by SABRE layout refinement and routing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SabreConfig {
@@ -71,6 +80,9 @@ pub struct SabreConfig {
     /// Maximum component-assignment states explored before layout reports
     /// budget exhaustion. Exhaustion is distinct from proven infeasibility.
     pub layout_assignment_budget: usize,
+    /// Optional bounded VF2 prepass used to add a topology-perfect candidate.
+    /// `None` disables the prepass.
+    pub vf2_prepass: Option<SabreVf2PrepassConfig>,
     /// Number of forward/backward refinement iterations per layout trial.
     pub refinement_iterations: usize,
     /// Number of routing trials used to score each refined layout candidate.
@@ -129,6 +141,10 @@ impl Default for SabreConfig {
         Self {
             layout_trials: 10,
             layout_assignment_budget: 1_000_000,
+            vf2_prepass: Some(SabreVf2PrepassConfig {
+                candidate_limit: 10,
+                call_limit: 1_000_000,
+            }),
             refinement_iterations: 1,
             layout_scoring_trials: 1,
             routing_trials: 5,
@@ -150,6 +166,10 @@ impl SabreConfig {
         Self {
             layout_trials: 2,
             layout_assignment_budget: 100_000,
+            vf2_prepass: Some(SabreVf2PrepassConfig {
+                candidate_limit: 10,
+                call_limit: 100_000,
+            }),
             refinement_iterations: 1,
             layout_scoring_trials: 1,
             routing_trials: 1,

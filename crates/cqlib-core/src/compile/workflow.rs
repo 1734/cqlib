@@ -686,6 +686,9 @@ fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {
     if mode == CompileMode::Enhanced {
         config.layout_trials = 24;
         config.layout_assignment_budget = 5_000_000;
+        if let Some(vf2) = &mut config.vf2_prepass {
+            vf2.call_limit = 5_000_000;
+        }
         config.refinement_iterations = 2;
         config.layout_scoring_trials = 3;
         config.routing_trials = 12;

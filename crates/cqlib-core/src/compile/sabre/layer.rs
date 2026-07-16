@@ -176,14 +176,12 @@ impl Layer {
         executable(entry.requirement, entry.placement).then_some(node)
     }
 
-    pub(crate) fn active_indices_in_order<'a>(
-        &'a self,
-        order: &'a [usize],
-    ) -> impl Iterator<Item = usize> + 'a {
-        order
+    pub(crate) fn active_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.occupied_node_indices
             .iter()
             .copied()
-            .filter(|&index| self.active.get(index).is_some_and(Option::is_some))
+            .filter_map(|index| self.nodes[index])
+            .flat_map(|entry| entry.placement.endpoints())
     }
 
     pub(crate) fn iter_nodes(&self) -> impl Iterator<Item = NodeIndex> + '_ {

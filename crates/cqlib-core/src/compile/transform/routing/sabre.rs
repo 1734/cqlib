@@ -28,9 +28,12 @@
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
 use crate::compile::sabre::{
-    SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult, sabre_route,
+    SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult, sabre_route, sabre_route_prepared,
 };
-use crate::compile::transform::layout::{LayoutObjective, LayoutScore, sabre_layout};
+use crate::compile::transform::layout::{
+    LayoutDiagnostics, LayoutObjective, LayoutScore, prepare_sabre_circuit,
+    prepare_sabre_device_target, sabre_layout_prepared,
+};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 
 /// A physical circuit produced by routing, plus routing metadata.
@@ -113,6 +116,7 @@ impl RoutedCircuit {
 pub struct SabreRouteResult {
     routed: RoutedCircuit,
     layout_score: Option<LayoutScore>,
+    layout_diagnostics: LayoutDiagnostics,
 }
 
 impl SabreRouteResult {
@@ -129,6 +133,11 @@ impl SabreRouteResult {
     /// Score of the selected initial layout, when available.
     pub fn layout_score(&self) -> Option<&LayoutScore> {
         self.layout_score.as_ref()
+    }
+
+    /// Diagnostics produced while selecting the initial layout.
+    pub fn layout_diagnostics(&self) -> &LayoutDiagnostics {
+        &self.layout_diagnostics
     }
 
     // ── Transparent accessors for common routed fields ──
@@ -167,6 +176,7 @@ impl SabreRouteResult {
 struct SabreRoutingResultWithScore {
     routing: SabreRoutingResult,
     layout_score: Option<LayoutScore>,
+    layout_diagnostics: LayoutDiagnostics,
 }
 
 fn sabre_layout_and_route(
@@ -175,11 +185,21 @@ fn sabre_layout_and_route(
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
-    let layout_result = sabre_layout(circuit, device, objective, config)?;
-    let routed = sabre_route(circuit, device, &layout_result.layout, config)?;
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target = prepare_sabre_device_target(&prepared, device)?;
+    let layout_result = sabre_layout_prepared(&prepared, &prepared_target, objective, config)?;
+    let routed = sabre_route_prepared(
+        circuit,
+        prepared.routing_dag(),
+        prepared_target.routing_target(),
+        prepared_target.routing_metadata(),
+        &layout_result.layout,
+        config,
+    )?;
     Ok(SabreRoutingResultWithScore {
         routing: routed,
         layout_score: layout_result.score,
+        layout_diagnostics: layout_result.diagnostics,
     })
 }
 
@@ -251,6 +271,7 @@ pub fn route_sabre(
             diagnostics: result.routing.diagnostics,
         },
         layout_score: result.layout_score,
+        layout_diagnostics: result.layout_diagnostics,
     })
 }
 

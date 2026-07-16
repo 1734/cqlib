@@ -141,12 +141,7 @@ fn replacement_removes_stale_active_endpoints_and_score() {
         )
         .unwrap();
 
-    assert_eq!(
-        layer
-            .active_indices_in_order(&[0, 1, 2, 3])
-            .collect::<Vec<_>>(),
-        vec![1, 3]
-    );
+    assert_eq!(layer.active_indices().collect::<Vec<_>>(), vec![1, 3]);
     assert_eq!(
         layer
             .total_score_after_swap([0, 2], &line_distance)
@@ -207,12 +202,7 @@ fn remove_and_clear_restore_empty_layer_invariants() {
     layer.clear();
     assert!(layer.is_empty());
     assert!(layer.iter().next().is_none());
-    assert!(
-        layer
-            .active_indices_in_order(&[0, 1, 2, 3])
-            .next()
-            .is_none()
-    );
+    assert!(layer.active_indices().next().is_none());
 }
 
 #[test]
@@ -266,12 +256,7 @@ fn unary_placement_uses_one_active_endpoint_and_moves_independently() {
         )
         .unwrap();
 
-    assert_eq!(
-        layer
-            .active_indices_in_order(&[0, 1, 2, 3])
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
+    assert_eq!(layer.active_indices().collect::<Vec<_>>(), vec![1]);
     layer.apply_swap([1, 2], &line_distance).unwrap();
     assert_eq!(
         layer.iter().collect::<Vec<_>>(),

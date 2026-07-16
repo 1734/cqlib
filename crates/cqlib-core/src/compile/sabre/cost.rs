@@ -14,8 +14,6 @@
 //! Robust calibration and native-plan costs used by SABRE routing.
 
 use crate::circuit::{Instruction, StandardGate};
-#[cfg(test)]
-use crate::compile::device_planning::NativePlanCatalog;
 use crate::compile::device_planning::{NativePlanLeaf, NativePlanSummary};
 use crate::compile::knowledge::KnowledgeInstructionKey;
 use crate::device::{Device, PhysicalQubit};
@@ -78,11 +76,64 @@ impl RobustDurationKey {
 
 /// Native resource cost for one selected lowering plan.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) enum MetricAvailability<T> {
+    #[default]
+    Disabled,
+    Available(T),
+    Inconsistent,
+}
+
+impl<T: Copy> MetricAvailability<T> {
+    pub(crate) fn value(self) -> Option<T> {
+        match self {
+            Self::Available(value) => Some(value),
+            Self::Disabled | Self::Inconsistent => None,
+        }
+    }
+
+    pub(crate) fn is_inconsistent(self) -> bool {
+        matches!(self, Self::Inconsistent)
+    }
+
+    fn combine(self, other: Self, combine: impl FnOnce(T, T) -> T) -> Self {
+        match (self, other) {
+            (Self::Disabled, Self::Disabled) => Self::Disabled,
+            (Self::Available(left), Self::Available(right)) => {
+                Self::Available(combine(left, right))
+            }
+            (Self::Inconsistent, _)
+            | (_, Self::Inconsistent)
+            | (Self::Disabled, Self::Available(_))
+            | (Self::Available(_), Self::Disabled) => Self::Inconsistent,
+        }
+    }
+
+    pub(crate) fn compare_by(
+        self,
+        other: Self,
+        compare: impl FnOnce(T, T) -> std::cmp::Ordering,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        match (self, other) {
+            (Self::Available(left), Self::Available(right)) => compare(left, right),
+            (Self::Disabled, Self::Disabled) | (Self::Inconsistent, Self::Inconsistent) => {
+                Ordering::Equal
+            }
+            (Self::Available(_), Self::Disabled | Self::Inconsistent)
+            | (Self::Disabled, Self::Inconsistent) => Ordering::Less,
+            (Self::Disabled | Self::Inconsistent, Self::Available(_))
+            | (Self::Inconsistent, Self::Disabled) => Ordering::Greater,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct NativePlanCost {
     pub(crate) native_two_qubit_ops: u32,
     pub(crate) native_total_ops: u32,
-    pub(crate) error: Option<RobustErrorKey>,
-    pub(crate) duration: Option<RobustDurationKey>,
+    pub(crate) error: MetricAvailability<RobustErrorKey>,
+    pub(crate) duration: MetricAvailability<RobustDurationKey>,
 }
 
 impl NativePlanCost {
@@ -92,28 +143,10 @@ impl NativePlanCost {
                 .native_two_qubit_ops
                 .saturating_add(other.native_two_qubit_ops),
             native_total_ops: self.native_total_ops.saturating_add(other.native_total_ops),
-            error: match (self.error, other.error) {
-                (Some(left), Some(right)) => Some(left.combine(right)),
-                (None, None) => None,
-                _ => {
-                    debug_assert!(
-                        false,
-                        "mixed enabled and disabled error costs in one native aggregation"
-                    );
-                    None
-                }
-            },
-            duration: match (self.duration, other.duration) {
-                (Some(left), Some(right)) => Some(left.combine(right)),
-                (None, None) => None,
-                _ => {
-                    debug_assert!(
-                        false,
-                        "mixed enabled and disabled duration costs in one native aggregation"
-                    );
-                    None
-                }
-            },
+            error: self.error.combine(other.error, RobustErrorKey::combine),
+            duration: self
+                .duration
+                .combine(other.duration, RobustDurationKey::combine),
         }
     }
 }
@@ -170,10 +203,16 @@ impl CalibrationEstimator {
     /// every plan scored by this estimator.
     pub(crate) fn identity_cost(&self) -> NativePlanCost {
         NativePlanCost {
-            error: self.error_enabled.then_some(RobustErrorKey::default()),
-            duration: self
-                .duration_enabled
-                .then_some(RobustDurationKey::default()),
+            error: if self.error_enabled {
+                MetricAvailability::Available(RobustErrorKey::default())
+            } else {
+                MetricAvailability::Disabled
+            },
+            duration: if self.duration_enabled {
+                MetricAvailability::Available(RobustDurationKey::default())
+            } else {
+                MetricAvailability::Disabled
+            },
             ..NativePlanCost::default()
         }
     }
@@ -233,31 +272,6 @@ impl CalibrationEstimator {
                 for ordered in &directed_edges {
                     collect_device_calibration(device, &instruction, &key, ordered, &mut samples);
                 }
-            }
-        }
-
-        Self::from_samples(samples)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_catalog(catalog: &NativePlanCatalog) -> Self {
-        let mut samples = CalibrationSamples::default();
-        let mut observed_leaves = HashSet::new();
-
-        for (_, summary) in catalog.iter() {
-            for leaf in &summary.leaves {
-                let Some(key) = KnowledgeInstructionKey::from_instruction(&leaf.instruction) else {
-                    continue;
-                };
-                if !observed_leaves.insert((key.clone(), leaf.ordered_qargs.clone())) {
-                    continue;
-                }
-                samples.record(
-                    key,
-                    leaf.ordered_qargs.len(),
-                    leaf.error_rate,
-                    leaf.duration,
-                );
             }
         }
 
@@ -324,8 +338,16 @@ impl CalibrationEstimator {
         NativePlanCost {
             native_two_qubit_ops: summary.native_two_qubit_ops,
             native_total_ops: summary.native_total_ops,
-            error: self.error_enabled.then_some(error),
-            duration: self.duration_enabled.then_some(duration),
+            error: if self.error_enabled {
+                MetricAvailability::Available(error)
+            } else {
+                MetricAvailability::Disabled
+            },
+            duration: if self.duration_enabled {
+                MetricAvailability::Available(duration)
+            } else {
+                MetricAvailability::Disabled
+            },
         }
     }
 }

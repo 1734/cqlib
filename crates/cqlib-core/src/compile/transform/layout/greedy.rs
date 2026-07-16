@@ -27,7 +27,7 @@ use super::{
 };
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
-use crate::device::{Device, Layout};
+use crate::device::{Device, Layout, PhysicalQubit};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -88,6 +88,28 @@ pub fn greedy_layout_prepared(
     physical: &PhysicalLayoutGraph,
     objective: &LayoutObjective,
 ) -> Result<LayoutResult, CompilerError> {
+    match greedy_layout_candidate_prepared(analysis, physical, objective)? {
+        GreedyCandidateOutcome::Found(result) => Ok(result),
+        GreedyCandidateOutcome::Disconnected { left, right } => Err(CompilerError::InvalidInput(
+            format!("physical qubits {left} and {right} are disconnected in the usable topology"),
+        )),
+    }
+}
+
+/// Structured result used when greedy layout is an optional SABRE prepass.
+pub(crate) enum GreedyCandidateOutcome {
+    Found(LayoutResult),
+    Disconnected {
+        left: PhysicalQubit,
+        right: PhysicalQubit,
+    },
+}
+
+pub(crate) fn greedy_layout_candidate_prepared(
+    analysis: &CircuitLayoutAnalysis,
+    physical: &PhysicalLayoutGraph,
+    objective: &LayoutObjective,
+) -> Result<GreedyCandidateOutcome, CompilerError> {
     if analysis.logical_qubits.len() > physical.physical_qubits().len() {
         return Err(CompilerError::InvalidInput(format!(
             "greedy layout requires at least as many usable physical qubits as logical qubits; got {} logical qubits and {} usable physical qubits",
@@ -244,6 +266,20 @@ pub fn greedy_layout_prepared(
         ))
     })?;
 
+    if let Some((left, right)) = analysis
+        .interactions
+        .interactions()
+        .iter()
+        .filter_map(|interaction| {
+            Some((
+                layout.get_physical(interaction.left)?,
+                layout.get_physical(interaction.right)?,
+            ))
+        })
+        .find(|(left, right)| physical.distance(*left, *right).is_none())
+    {
+        return Ok(GreedyCandidateOutcome::Disconnected { left, right });
+    }
     let score = objective.score_layout(analysis, physical, &layout)?;
     let diagnostics = LayoutDiagnostics {
         is_perfect: is_perfect_layout(analysis, physical, &layout),
@@ -252,11 +288,11 @@ pub fn greedy_layout_prepared(
         notes: Vec::new(),
     };
 
-    Ok(LayoutResult {
+    Ok(GreedyCandidateOutcome::Found(LayoutResult {
         layout,
         score: Some(score),
         diagnostics,
-    })
+    }))
 }
 
 /// Chooses physical qubits for an interaction with both endpoints unmapped.
