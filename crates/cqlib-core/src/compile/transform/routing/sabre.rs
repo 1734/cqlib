@@ -222,16 +222,18 @@ pub fn route_with_layout(
 ///
 /// # Limitations
 ///
-/// This transform does not perform target-basis lowering, directed native-gate
-/// validation, or compiler workflow selection. Callers should run required
-/// decomposition and basis translation passes explicitly.
+/// This transform checks exact-qargs native-plan feasibility while routing, but
+/// it does not emit those native plans or perform target-basis lowering. It also
+/// does not select a compiler workflow. Callers should run required
+/// decomposition, device lowering, and basis translation passes explicitly.
 ///
 /// # Errors
 ///
 /// Returns [`CompilerError::InvalidInput`] for invalid SABRE configuration,
-/// insufficient usable physical qubits, unreachable interactions in the usable
-/// topology, or unsupported circuit operations such as undecomposed gates that
-/// touch more than two qubits.
+/// insufficient usable physical qubits, unreachable routing requirements, or
+/// unsupported circuit operations such as undecomposed gates that touch more
+/// than two qubits. Bounded layout-search and native-feasibility failures are
+/// returned as [`CompilerError::SabreRoutingFailed`].
 pub fn route_sabre(
     circuit: &Circuit,
     device: &Device,

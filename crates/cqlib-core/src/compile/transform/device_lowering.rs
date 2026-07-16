@@ -20,16 +20,15 @@
 //! device capabilities. A separate terminal device verifier remains the final
 //! workflow safety boundary.
 
-mod planner;
-mod templates;
-
-use self::planner::{DevicePlanner, PlanChoice, PlanTemplate};
 use crate::circuit::{
     Circuit, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue, Qubit,
     StandardGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
     ValueSwitchCase,
 };
 use crate::compile::CompilerError;
+use crate::compile::device_planning::{
+    DeviceGateState, DevicePlanner, DirectionTemplate, PlanChoice, PlanTemplate,
+};
 use crate::compile::knowledge::{
     ConcreteOperationView, KnowledgeInstructionKey, RuleLibrary, instantiate_target,
     rule_matches_operations,
@@ -39,48 +38,6 @@ use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
 use crate::device::{Device, PhysicalQubit};
 use smallvec::{SmallVec, smallvec};
 use std::collections::HashSet;
-
-/// A parameter-independent device-planning state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct DeviceGateState {
-    pub(super) instruction: KnowledgeInstructionKey,
-    pub(super) ordered_qargs: SmallVec<[PhysicalQubit; 2]>,
-}
-
-impl DeviceGateState {
-    pub(super) fn standard(
-        gate: StandardGate,
-        ordered_qargs: SmallVec<[PhysicalQubit; 2]>,
-    ) -> Self {
-        Self {
-            instruction: KnowledgeInstructionKey::Standard(gate),
-            ordered_qargs,
-        }
-    }
-
-    fn from_operation(operation: &LowerableOperation) -> Result<Self, CompilerError> {
-        let instruction = KnowledgeInstructionKey::from_instruction(&operation.instruction)
-            .ok_or_else(|| {
-                CompilerError::InvariantViolation(format!(
-                    "missing device-lowering key for {}",
-                    operation.instruction
-                ))
-            })?;
-        Ok(Self {
-            instruction,
-            ordered_qargs: operation
-                .qubits
-                .iter()
-                .copied()
-                .map(PhysicalQubit::from_qubit)
-                .collect(),
-        })
-    }
-
-    fn stable_sort_key(&self) -> String {
-        format!("{:?}:{:?}", self.instruction, self.ordered_qargs)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(super) struct LowerableOperation {
@@ -264,7 +221,19 @@ impl<'a> DeviceCircuitLowerer<'a> {
             return Ok(());
         }
 
-        let state = DeviceGateState::from_operation(&operation)?;
+        let ordered_qargs = operation
+            .qubits
+            .iter()
+            .copied()
+            .map(PhysicalQubit::from_qubit)
+            .collect();
+        let state = DeviceGateState::from_instruction(&operation.instruction, ordered_qargs)
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "missing device-lowering key for {}",
+                    operation.instruction
+                ))
+            })?;
         let Some(plan) = self.planner.plan_for(&state) else {
             return Err(CompilerError::DeviceLoweringFailed(
                 self.planner.failure_for(&state),
@@ -302,7 +271,9 @@ impl<'a> DeviceCircuitLowerer<'a> {
                         })?;
                         instantiate_rule(rule, &operation)?
                     }
-                    PlanTemplate::Direction(template) => template.instantiate(&operation),
+                    PlanTemplate::Direction(template) => {
+                        instantiate_direction_template(template, &operation)
+                    }
                 };
                 for replacement in replacements {
                     self.lower_gate_like(replacement, target)?;
@@ -490,6 +461,33 @@ fn instantiate_rule(
             label: None,
         })
         .collect())
+}
+
+fn instantiate_direction_template(
+    template: DirectionTemplate,
+    source: &LowerableOperation,
+) -> Vec<LowerableOperation> {
+    debug_assert_eq!(source.qubits.len(), 2);
+    let q0 = source.qubits[0];
+    let q1 = source.qubits[1];
+    let reversed = || LowerableOperation {
+        instruction: source.instruction.clone(),
+        qubits: smallvec![q1, q0],
+        params: source.params.clone(),
+        label: source.label.clone(),
+    };
+    match template {
+        DirectionTemplate::Cx | DirectionTemplate::Rzx => {
+            let h = |qubit| LowerableOperation {
+                instruction: Instruction::Standard(StandardGate::H),
+                qubits: smallvec![qubit],
+                params: SmallVec::new(),
+                label: None,
+            };
+            vec![h(q0), h(q1), reversed(), h(q0), h(q1)]
+        }
+        DirectionTemplate::Symmetric(_) => vec![reversed()],
+    }
 }
 
 fn parameter_value_to_parameter(param: &ParameterValue) -> Parameter {

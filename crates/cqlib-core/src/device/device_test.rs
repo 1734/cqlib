@@ -934,3 +934,27 @@ fn validate_operation_rejects_undecomposed_composite_gates() {
         ));
     }
 }
+
+#[test]
+fn native_instruction_properties_reject_invalid_calibration_values() {
+    let invalid_error = InstructionProp::new(Instruction::Standard(StandardGate::H), f64::NAN);
+    assert!(matches!(
+        QubitProp::new(0.0).with_native_instruction(invalid_error),
+        Err(DeviceError::InvalidNativeInstructionErrorRate { .. })
+    ));
+
+    let invalid_duration =
+        InstructionProp::new(Instruction::Standard(StandardGate::CX), 0.01).with_length(-1.0);
+    assert!(matches!(
+        EdgeProp::new().with_native_instruction(invalid_duration),
+        Err(DeviceError::InvalidNativeInstructionDuration { .. })
+    ));
+
+    assert!(
+        QubitProp::new(0.0)
+            .with_native_instruction(
+                InstructionProp::new(Instruction::Standard(StandardGate::H), 1.0).with_length(0.0),
+            )
+            .is_ok()
+    );
+}

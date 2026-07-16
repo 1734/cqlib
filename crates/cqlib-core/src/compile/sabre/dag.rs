@@ -21,13 +21,16 @@
 //! must be adjacent before it can be emitted. Dependencies are derived from a
 //! per-wire frontier: each new operation depends on the latest node touching
 //! any of its logical qubits, and then becomes the frontier for those qubits.
-//! This is enough for SABRE because layout routing only reasons about
-//! two-qubit interaction readiness.
+//! This lets SABRE reason about both interaction readiness and device-local
+//! unary capabilities without crossing explicit dependency boundaries.
 //!
-//! [`SabreNodeKind::Synchronize`] is used for zero- and one-qubit operations,
-//! delays, and directives. These operations do not create a routed two-qubit
-//! interaction, but they still preserve sequencing at the current dependency
-//! boundary. An empty-qubit barrier is a global synchronization boundary: it
+//! [`SabreNodeKind::Unary`] represents a one-logical-qubit requirement. It is a
+//! first-class routable node because device-local one-qubit capabilities may
+//! require moving the logical token before the operation can be lowered.
+//!
+//! [`SabreNodeKind::Synchronize`] is used for zero-qubit operations, delays,
+//! and directives. These operations preserve sequencing without adding a
+//! device-placement requirement. An empty-qubit barrier is a global synchronization boundary: it
 //! waits for every active wire and becomes a dependency of every subsequent
 //! operation. Other initial synchronize operations that touch no mapped
 //! frontier stay in [`SabreDag::initial`].
@@ -50,6 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone)]
 pub(crate) enum SabreNodeKind {
     Synchronize,
+    Unary(LogicalQubit),
     TwoQ([LogicalQubit; 2]),
     ControlFlow(SabreControlFlow),
 }
@@ -163,14 +167,16 @@ impl SabreDag {
                     }
                 },
                 Predecessors::Single(previous) => {
-                    // Synchronize operations share the same dependency boundary,
-                    // and consecutive two-qubit operations on the same active
-                    // wires remain routable once the first one is routed.
+                    // Only requirements with the same ordered logical operands
+                    // share one routable node. Synchronization boundaries and
+                    // unary/pair transitions remain explicit DAG nodes.
                     let fold_into_previous = !ordering_barrier
                         && match (&graph[previous].kind, &kind) {
-                            (_, SabreNodeKind::Synchronize) => true,
+                            (SabreNodeKind::Unary(previous), SabreNodeKind::Unary(current)) => {
+                                previous == current
+                            }
                             (SabreNodeKind::TwoQ(previous), SabreNodeKind::TwoQ(current)) => {
-                                previous == current || *previous == [current[1], current[0]]
+                                previous == current
                             }
                             _ => false,
                         };
@@ -493,9 +499,14 @@ fn kind_from_operation(operation: &Operation) -> Result<SabreNodeKind, CompilerE
                 Ok(SabreNodeKind::Synchronize)
             }
         },
-        Instruction::Directive(_) | Instruction::Delay => Ok(SabreNodeKind::Synchronize),
+        Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => {
+            Ok(SabreNodeKind::Synchronize)
+        }
         _ => match operation.qubits.len() {
-            0 | 1 => Ok(SabreNodeKind::Synchronize),
+            0 => Ok(SabreNodeKind::Synchronize),
+            1 => Ok(SabreNodeKind::Unary(LogicalQubit::from_qubit(
+                operation.qubits[0],
+            ))),
             2 => Ok(SabreNodeKind::TwoQ([
                 LogicalQubit::from_qubit(operation.qubits[0]),
                 LogicalQubit::from_qubit(operation.qubits[1]),
@@ -509,118 +520,5 @@ fn kind_from_operation(operation: &Operation) -> Result<SabreNodeKind, CompilerE
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::circuit::{Circuit, ClassicalExpr, Qubit};
-
-    fn interaction_nodes(dag: &SabreDag) -> Vec<NodeIndex> {
-        dag.graph
-            .node_indices()
-            .filter(|&node| matches!(dag.graph[node].kind, SabreNodeKind::TwoQ(_)))
-            .collect()
-    }
-
-    #[test]
-    fn refinement_orders_alternative_branches_that_share_a_wire() {
-        let mut circuit = Circuit::new(3);
-        circuit
-            .if_else(
-                ClassicalExpr::bool_literal(true),
-                |then_body| {
-                    then_body.cx(Qubit::new(0), Qubit::new(1))?;
-                    Ok(())
-                },
-                |else_body| {
-                    else_body.cx(Qubit::new(0), Qubit::new(2))?;
-                    Ok(())
-                },
-            )
-            .unwrap();
-
-        let dag = SabreDag::refinement_workload(circuit.operations()).unwrap();
-        let interactions = interaction_nodes(&dag);
-
-        assert_eq!(interactions.len(), 2);
-        assert!(
-            dag.graph
-                .find_edge(interactions[0], interactions[1])
-                .is_some(),
-            "stable branch order must serialize interactions sharing q0"
-        );
-    }
-
-    #[test]
-    fn refinement_keeps_disjoint_alternative_branches_parallel() {
-        let mut circuit = Circuit::new(4);
-        circuit
-            .if_else(
-                ClassicalExpr::bool_literal(true),
-                |then_body| {
-                    then_body.cx(Qubit::new(0), Qubit::new(1))?;
-                    Ok(())
-                },
-                |else_body| {
-                    else_body.cx(Qubit::new(2), Qubit::new(3))?;
-                    Ok(())
-                },
-            )
-            .unwrap();
-
-        let dag = SabreDag::refinement_workload(circuit.operations()).unwrap();
-        let interactions = interaction_nodes(&dag);
-
-        assert_eq!(interactions.len(), 2);
-        assert!(
-            dag.graph
-                .find_edge(interactions[0], interactions[1])
-                .is_none()
-        );
-        assert!(
-            dag.graph
-                .find_edge(interactions[1], interactions[0])
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn refinement_recursively_includes_nested_body_interactions() {
-        let mut circuit = Circuit::new(3);
-        circuit
-            .if_(ClassicalExpr::bool_literal(true), |body| {
-                body.if_(ClassicalExpr::bool_literal(true), |nested| {
-                    nested.cx(Qubit::new(0), Qubit::new(2))?;
-                    Ok(())
-                })?;
-                Ok(())
-            })
-            .unwrap();
-
-        let dag = SabreDag::refinement_workload(circuit.operations()).unwrap();
-        assert_eq!(interaction_nodes(&dag).len(), 1);
-    }
-
-    #[test]
-    fn refinement_preserves_explicit_wire_barrier_dependencies() {
-        let mut circuit = Circuit::new(4);
-        circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
-        circuit.barrier(vec![Qubit::new(0), Qubit::new(2)]).unwrap();
-        circuit.cx(Qubit::new(2), Qubit::new(3)).unwrap();
-
-        let dag = SabreDag::refinement_workload(circuit.operations()).unwrap();
-        let interactions = interaction_nodes(&dag);
-        let barrier = dag
-            .graph
-            .node_indices()
-            .find(|&node| {
-                matches!(dag.graph[node].kind, SabreNodeKind::Synchronize)
-                    && dag.graph.find_edge(interactions[0], node).is_some()
-                    && dag.graph.find_edge(node, interactions[1]).is_some()
-            })
-            .expect("wire barrier must synchronize the two interaction frontiers");
-
-        assert!(matches!(
-            dag.graph[barrier].kind,
-            SabreNodeKind::Synchronize
-        ));
-    }
-}
+#[path = "dag_test.rs"]
+mod dag_test;

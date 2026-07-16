@@ -15,23 +15,13 @@ use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Directive,
     Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
 };
-use crate::compile::CompilerError;
-use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit, Topology};
+use crate::compile::transform::{DeviceLowerer, Transformer};
+use crate::compile::{CompilerError, SabreRoutingFailure};
+use crate::device::{
+    Device, EdgeProp, InstructionProp, Layout, LogicalQubit, PhysicalQubit, QubitProp, Topology,
+};
+use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
-
-#[test]
-fn deterministic_seeded_config_uses_compact_reproducible_settings() {
-    let config = SabreConfig::deterministic_seeded(7);
-
-    assert_eq!(config.layout_trials, 2);
-    assert_eq!(config.refinement_iterations, 1);
-    assert_eq!(config.layout_scoring_trials, 1);
-    assert_eq!(config.routing_trials, 1);
-    assert_eq!(config.trial_objective, SabreTrialObjective::SwapThenDepth);
-    assert_eq!(config.seed, Some(7));
-    assert_eq!(config.heuristic.lookahead_weights, vec![0.5]);
-    assert_eq!(config.heuristic.attempt_limit, 20);
-}
 
 #[test]
 fn validate_config_reports_invalid_trial_counts() {
@@ -45,6 +35,22 @@ fn validate_config_reports_invalid_trial_counts() {
     assert!(
         matches!(error, CompilerError::InvalidInput(message) if message.contains("routing_trials"))
     );
+}
+
+#[test]
+fn validate_config_rejects_invalid_swap_regret_ratio() {
+    for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+        let config = SabreConfig {
+            swap_regret_ratio: invalid,
+            ..SabreConfig::deterministic_seeded(7)
+        };
+
+        assert!(matches!(
+            validate_config(&config),
+            Err(CompilerError::InvalidInput(message))
+                if message.contains("swap_regret_ratio")
+        ));
+    }
 }
 
 #[test]
@@ -69,6 +75,50 @@ fn normalize_initial_layout_public_api_uses_device_usable_qubits() {
 }
 
 #[test]
+fn unary_requirement_moves_to_a_locally_supported_physical_qubit() {
+    let mut device = Device::line("local-unary", 3)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::SWAP)])
+        .unwrap();
+    device
+        .add_qubit_properties(
+            PhysicalQubit::new(2),
+            QubitProp::new(0.0)
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::H),
+                    0.001,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0)], 3).unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let routed = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(11),
+    )
+    .unwrap();
+
+    assert_eq!(routed.swap_count, 2);
+    assert_eq!(
+        routed.final_layout.get_physical(LogicalQubit::new(0)),
+        Some(PhysicalQubit::new(2))
+    );
+    assert!(matches!(
+        routed
+            .circuit
+            .operations()
+            .last()
+            .map(|operation| &operation.instruction),
+        Some(Instruction::Standard(StandardGate::H))
+    ));
+}
+
+#[test]
 fn validate_reachable_interactions_public_api_reports_disconnected_pairs() {
     let p0 = PhysicalQubit::new(0);
     let p1 = PhysicalQubit::new(1);
@@ -82,8 +132,418 @@ fn validate_reachable_interactions_public_api_reports_disconnected_pairs() {
 
     assert!(matches!(
         error,
-        CompilerError::InvalidInput(message) if message.contains("disconnected")
+        CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutablePairTerminal { logical: [left, right] }
+        ) if left == LogicalQubit::new(0)
+            && right == LogicalQubit::new(1)
     ));
+}
+
+#[test]
+fn validate_reachable_interactions_reports_unreachable_unary_placement() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::line("local-unary-without-movement", 2).unwrap();
+    device
+        .add_qubit_properties(
+            p1,
+            QubitProp::new(0.0)
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::H),
+                    0.001,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0)], 2).unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let error = validate_reachable_interactions(&circuit, &device, &layout).unwrap_err();
+
+    assert!(matches!(
+        error,
+        CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachableUnaryPlacement { logical, physical }
+        ) if logical == LogicalQubit::new(0) && physical == p0
+    ));
+}
+
+#[test]
+fn adjacent_terminal_gate_does_not_require_a_lowerable_swap_edge() {
+    // A directed CX can execute on 0 -> 1, but without a native H the reverse
+    // CX needed by the usual SWAP decomposition is unavailable.
+    let device = Device::line("directed-cx", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let result = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap();
+
+    assert_eq!(result.swap_count, 0);
+}
+
+#[test]
+fn topology_connectivity_does_not_hide_missing_swap_lowering() {
+    let device = Device::line("directed-cx", 3)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let error = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::UnreachablePairPlacement { .. })
+    ));
+}
+
+#[test]
+fn folded_terminal_requires_every_gate_and_direction_to_be_lowerable() {
+    let device = Device::line("directed-cx", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(0)).unwrap();
+
+    let error = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::UnreachablePairPlacement { .. })
+    ));
+}
+
+#[test]
+fn predicted_native_counts_match_the_actual_device_lowerer() {
+    let device = Device::line("native-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.001)
+        .with_default_two_qubit_error(0.01);
+    let layout = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let routed = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap();
+    let lowered = DeviceLowerer::new(&device)
+        .transform(&routed.circuit, None)
+        .unwrap()
+        .circuit;
+    let actual_native_two_qubit = lowered
+        .operations()
+        .iter()
+        .filter(|operation| operation.qubits.len() == 2)
+        .count();
+
+    assert_eq!(
+        routed.diagnostics.native_two_qubit_count,
+        actual_native_two_qubit
+    );
+    assert_eq!(
+        routed.diagnostics.native_operation_count,
+        lowered.operations().len()
+    );
+    assert!(routed.diagnostics.predicted_log_error.is_some());
+    assert_eq!(routed.diagnostics.unavailable_error_count, 0);
+}
+
+#[test]
+fn predicted_makespan_schedules_parallel_native_leaves() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::line("timed-reverse-cx", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    for physical in [p0, p1] {
+        device
+            .add_qubit_properties(
+                physical,
+                QubitProp::new(0.0)
+                    .with_native_instruction(
+                        InstructionProp::new(Instruction::Standard(StandardGate::H), 0.001)
+                            .with_length(10.0),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(
+                    InstructionProp::new(Instruction::Standard(StandardGate::CX), 0.01)
+                        .with_length(100.0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(1), Qubit::new(0)).unwrap();
+
+    let result = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap();
+
+    assert_eq!(result.swap_count, 0);
+    // The two H gates before and after the directed CX run in parallel:
+    // max(H, H) + CX + max(H, H) = 10 + 100 + 10.
+    assert_eq!(result.diagnostics.predicted_makespan, Some(120.0));
+    let lowered = DeviceLowerer::new(&device)
+        .transform(&result.circuit, None)
+        .unwrap()
+        .circuit;
+    assert_eq!(lowered.operations().len(), 5);
+    device.validate_circuit(&lowered).unwrap();
+}
+
+#[test]
+fn predicted_makespan_multiplies_static_for_body_duration() {
+    let p0 = PhysicalQubit::new(0);
+    let mut device = Device::line("timed-static-for", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+    device
+        .add_qubit_properties(
+            p0,
+            QubitProp::new(0.0)
+                .with_native_instruction(
+                    InstructionProp::new(Instruction::Standard(StandardGate::H), 0.001)
+                        .with_length(10.0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    let mut circuit = Circuit::new(1);
+    let loop_var = circuit.var(ClassicalType::uint(3).unwrap());
+    circuit
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(3, 0).unwrap(),
+            ClassicalExpr::uint_literal(3, 3).unwrap(),
+            ClassicalExpr::uint_literal(3, 1).unwrap(),
+            |body, _| {
+                body.h(Qubit::new(0))?;
+                body.continue_loop()
+            },
+        )
+        .unwrap();
+
+    let result = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap();
+
+    assert_eq!(result.diagnostics.predicted_makespan, Some(30.0));
+}
+
+#[test]
+fn predicted_makespan_is_unknown_for_dynamic_nonzero_loop() {
+    let p0 = PhysicalQubit::new(0);
+    let mut device = Device::line("timed-dynamic-loop", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+    device
+        .add_qubit_properties(
+            p0,
+            QubitProp::new(0.0)
+                .with_native_instruction(
+                    InstructionProp::new(Instruction::Standard(StandardGate::H), 0.001)
+                        .with_length(10.0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.h(Qubit::new(0))?;
+            body.break_loop()
+        })
+        .unwrap();
+
+    let result = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(5),
+    )
+    .unwrap();
+
+    assert_eq!(result.diagnostics.predicted_makespan, None);
+    assert_eq!(result.diagnostics.unknown_loop_count, 1);
+}
+
+#[test]
+fn equal_topology_routes_prefer_the_lower_error_native_path() {
+    let [p0, p1, p2, p3] = [0, 1, 2, 3].map(PhysicalQubit::new);
+    let topology = Topology::new(
+        vec![p0, p1, p2, p3],
+        vec![
+            (p0, p1, "cx".to_string()),
+            (p0, p2, "cx".to_string()),
+            (p1, p3, "cx".to_string()),
+            (p2, p3, "cx".to_string()),
+        ],
+    )
+    .unwrap();
+    let mut device = Device::new(
+        "calibrated-square",
+        HashSet::from([p0, p1, p2, p3]),
+        topology,
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap()
+    .with_default_single_qubit_error(0.0001);
+    for (left, right, error) in [
+        (p0, p1, 0.1),
+        (p0, p2, 0.001),
+        (p1, p3, 0.001),
+        (p2, p3, 0.1),
+    ] {
+        device
+            .add_edge_properties(
+                left,
+                right,
+                EdgeProp::new()
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::CX),
+                        error,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let layout = Layout::from_pairs(&[(0, 1), (1, 2)], 4).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let routed = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(9),
+    )
+    .unwrap();
+    let first_swap = &routed.circuit.operations()[0];
+    let swap_edge = first_swap
+        .qubits
+        .iter()
+        .copied()
+        .map(PhysicalQubit::from_qubit)
+        .collect::<HashSet<_>>();
+
+    assert_eq!(routed.swap_count, 1);
+    assert!(
+        swap_edge == HashSet::from([p0, p2]) || swap_edge == HashSet::from([p1, p3]),
+        "selected calibrated SWAP edge was {swap_edge:?}"
+    );
+}
+
+#[test]
+fn uniform_native_cost_does_not_increase_swaps_over_topology_scoring() {
+    let topology_device = Device::line("uniform-topology-line", 6).unwrap();
+    let native_device = Device::line("uniform-native-line", 6)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.001)
+        .with_default_two_qubit_error(0.01);
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)], 6).unwrap();
+    let mut circuit = Circuit::new(6);
+    for (left, right) in [
+        (0, 5),
+        (1, 4),
+        (2, 3),
+        (0, 3),
+        (5, 2),
+        (1, 5),
+        (4, 0),
+        (2, 4),
+        (3, 1),
+        (0, 5),
+    ] {
+        circuit.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+    }
+
+    for seed in 0..8 {
+        let config = SabreConfig {
+            routing_trials: 3,
+            seed: Some(seed),
+            ..SabreConfig::deterministic_seeded(seed)
+        };
+        let topology = sabre_route(&circuit, &topology_device, &layout, &config).unwrap();
+        let native = sabre_route(&circuit, &native_device, &layout, &config).unwrap();
+
+        assert!(
+            native.swap_count <= topology.swap_count,
+            "uniform native scoring added SWAPs for seed {seed}: topology={}, native={}",
+            topology.swap_count,
+            native.swap_count
+        );
+    }
 }
 
 #[test]
@@ -230,8 +690,56 @@ fn route_with_decay_is_reproducible_for_same_seed() {
 }
 
 #[test]
+fn fixed_seed_is_independent_of_rayon_thread_count() {
+    let device = Device::line("line", 6).unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 5), (2, 2), (3, 4)], 6).unwrap();
+    let config = SabreConfig {
+        routing_trials: 8,
+        seed: Some(29),
+        heuristic: SabreHeuristicConfig {
+            lookahead_weights: vec![0.5, 0.25],
+            decay_increment: Some(0.01),
+            ..SabreHeuristicConfig::default()
+        },
+        ..SabreConfig::deterministic_seeded(29)
+    };
+    let mut circuit = Circuit::new(4);
+    for (left, right) in [(0, 1), (2, 3), (0, 3), (1, 2), (0, 2), (1, 3)] {
+        circuit.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+    }
+    let route_in_pool = |threads| {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| sabre_route(&circuit, &device, &layout, &config))
+            .unwrap()
+    };
+
+    let single_threaded = route_in_pool(1);
+    let four_threaded = route_in_pool(4);
+
+    assert_eq!(single_threaded.swap_count, four_threaded.swap_count);
+    assert_eq!(
+        single_threaded.final_layout.l2p_map(),
+        four_threaded.final_layout.l2p_map()
+    );
+    assert_eq!(single_threaded.diagnostics, four_threaded.diagnostics);
+    assert_eq!(
+        format!("{:?}", single_threaded.circuit.operations()),
+        format!("{:?}", four_threaded.circuit.operations())
+    );
+}
+
+#[test]
 fn control_flow_body_is_routed_and_restored() {
-    let device = Device::line("line", 3).unwrap();
+    let device = Device::line("native-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
     let layout = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
     let config = SabreConfig::deterministic_seeded(7);
     let mut circuit = Circuit::new(2);
@@ -248,13 +756,118 @@ fn control_flow_body_is_routed_and_restored() {
     assert_eq!(result.diagnostics.control_flow_blocks_routed, 1);
     match &result.circuit.operations()[0].instruction {
         Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
-            assert!(op.then_body().operations().iter().any(|operation| matches!(
-                operation.instruction,
-                Instruction::Standard(StandardGate::SWAP)
-            )));
+            let epilogue_and_route_swaps = op
+                .then_body()
+                .operations()
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation.instruction,
+                        Instruction::Standard(StandardGate::SWAP)
+                    )
+                })
+                .count();
+            assert!(epilogue_and_route_swaps >= 2);
+            assert_eq!(result.swap_count, epilogue_and_route_swaps);
         }
         other => panic!("expected routed if/else operation, got {other:?}"),
     }
+    let lowered = DeviceLowerer::new(&device)
+        .transform(&result.circuit, None)
+        .unwrap()
+        .circuit;
+    device.validate_circuit(&lowered).unwrap();
+}
+
+#[test]
+fn control_flow_epilogue_avoids_topology_edges_without_a_native_swap_plan() {
+    let [p0, p1, p2] = [0, 1, 2].map(PhysicalQubit::new);
+    let topology = Topology::new(
+        vec![p0, p1, p2],
+        vec![
+            (p0, p1, "native".to_string()),
+            (p1, p2, "native".to_string()),
+            (p0, p2, "terminal-only".to_string()),
+        ],
+    )
+    .unwrap();
+    let mut device = Device::new("selective-swap", HashSet::from([p0, p1, p2]), topology).unwrap();
+    let edge_properties = |gates: &[StandardGate]| {
+        let mut properties = EdgeProp::new();
+        for gate in gates {
+            properties
+                .set_native_instruction(InstructionProp::new(Instruction::Standard(*gate), 0.01))
+                .unwrap();
+        }
+        properties
+    };
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            edge_properties(&[StandardGate::SWAP, StandardGate::CZ]),
+        )
+        .unwrap();
+    device
+        .add_edge_properties(
+            p1,
+            p2,
+            edge_properties(&[StandardGate::SWAP, StandardGate::CZ]),
+        )
+        .unwrap();
+    device
+        .add_edge_properties(p0, p2, edge_properties(&[StandardGate::CX]))
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.cz(Qubit::new(0), Qubit::new(1))?;
+            Ok(())
+        })
+        .unwrap();
+
+    let result = sabre_route(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(17),
+    )
+    .unwrap();
+    let Instruction::ClassicalControl(ClassicalControlOp::If(op)) =
+        &result.circuit.operations()[0].instruction
+    else {
+        panic!("expected routed if operation");
+    };
+    let swaps = op
+        .then_body()
+        .operations()
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation.instruction,
+                Instruction::Standard(StandardGate::SWAP)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(result.final_layout.l2p_map(), layout.l2p_map());
+    assert_eq!(result.swap_count, swaps.len());
+    assert!(!swaps.is_empty());
+    assert!(swaps.iter().all(|operation| {
+        operation
+            .qubits
+            .iter()
+            .copied()
+            .map(PhysicalQubit::from_qubit)
+            .collect::<HashSet<_>>()
+            != HashSet::from([p0, p2])
+    }));
+    let lowered = DeviceLowerer::new(&device)
+        .transform(&result.circuit, None)
+        .unwrap()
+        .circuit;
+    device.validate_circuit(&lowered).unwrap();
 }
 
 #[test]
@@ -444,9 +1057,10 @@ fn route_disconnected_topology_errors_without_panic() {
 
     let error = sabre_route(&circuit, &device, &layout, &config).unwrap_err();
 
-    assert!(
-        matches!(error, CompilerError::InvalidInput(message) if message.contains("disconnected"))
-    );
+    assert!(matches!(
+        error,
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoExecutablePairTerminal { .. })
+    ));
 }
 
 #[test]
@@ -680,8 +1294,16 @@ fn routing_trials_select_no_worse_than_first_trial() {
 
 #[test]
 fn fallback_triggers_when_attempt_limit_is_zero() {
-    let device = Device::line("line", 4).unwrap();
-    let layout = Layout::from_pairs(&[(0, 0), (1, 3)], 4).unwrap();
+    // One greedy SWAP would make the pair adjacent. With a zero attempt
+    // budget, fallback must run before that greedy choice is attempted.
+    let device = Device::line("native-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
     let config = SabreConfig {
         heuristic: SabreHeuristicConfig {
             attempt_limit: 0,
@@ -697,35 +1319,11 @@ fn fallback_triggers_when_attempt_limit_is_zero() {
     assert!(result.swap_count > 0);
     assert!(result.diagnostics.fallback_count > 0);
     assert_all_two_qubit_operations_are_adjacent_on_line(&result.circuit);
-}
-
-#[test]
-fn trial_objective_controls_quality_tie_breaking() {
-    let left = super::routing::TrialQuality {
-        swap_count: 1,
-        two_qubit_depth: 5,
-        operation_count: 20,
-    };
-    let right = super::routing::TrialQuality {
-        swap_count: 1,
-        two_qubit_depth: 2,
-        operation_count: 8,
-    };
-
-    assert!(
-        super::routing::compare_trial_quality(SabreTrialObjective::SwapCount, left, 0, right, 1)
-            .is_lt()
-    );
-    assert!(
-        super::routing::compare_trial_quality(
-            SabreTrialObjective::SwapThenDepth,
-            left,
-            0,
-            right,
-            1
-        )
-        .is_gt()
-    );
+    let lowered = DeviceLowerer::new(&device)
+        .transform(&result.circuit, None)
+        .unwrap()
+        .circuit;
+    device.validate_circuit(&lowered).unwrap();
 }
 
 #[test]

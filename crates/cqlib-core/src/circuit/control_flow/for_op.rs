@@ -11,7 +11,7 @@
 // that they have been altered from the originals.
 
 use super::ControlBody;
-use crate::circuit::classical_expr::ClassicalExpr;
+use crate::circuit::classical_expr::{ClassicalExpr, ClassicalExprKind, simplify};
 use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, Qubit};
 use std::collections::BTreeSet;
 
@@ -96,6 +96,27 @@ impl ForOp {
         &self.body
     }
 
+    /// Returns the exact iteration count when every range expression reduces
+    /// to an unsigned literal. Runtime-dependent ranges and zero steps are
+    /// intentionally reported as unknown.
+    pub(crate) fn static_iteration_count(&self) -> Option<u128> {
+        let literal = |expr: &ClassicalExpr| match simplify(expr).kind() {
+            ClassicalExprKind::UIntLiteral { value, .. } => Some(*value),
+            _ => None,
+        };
+        let start = literal(&self.start)?;
+        let stop = literal(&self.stop)?;
+        let step = literal(&self.step)?;
+        if step == 0 {
+            return None;
+        }
+        Some(if start >= stop {
+            0
+        } else {
+            (stop - start).div_ceil(step)
+        })
+    }
+
     /// Returns mutable variables read by the range expressions.
     pub fn classical_var_reads(&self) -> BTreeSet<ClassicalVar> {
         let mut vars = self.start.vars();
@@ -173,6 +194,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn static_iteration_count_accepts_simplifiable_uint_constants() {
+        let var = ClassicalVar::new(test_circuit_id(), 0, ClassicalType::uint(8).unwrap());
+        let bitvec_uint = |value| {
+            ClassicalExpr::bit_vec_literal(8, value)
+                .unwrap()
+                .to_uint()
+                .unwrap()
+        };
+        let op = ForOp::new(
+            var,
+            bitvec_uint(1),
+            bitvec_uint(8),
+            bitvec_uint(2),
+            ControlBody::new(vec![]),
+        )
+        .unwrap();
+
+        assert_eq!(op.static_iteration_count(), Some(4));
     }
 
     #[test]

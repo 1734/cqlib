@@ -11,7 +11,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{CompilerWorkflow, RewritePhase, WorkflowState};
+use super::{CompilerWorkflow, RewritePhase, WorkflowState, sabre_config_for_mode};
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
     Circuit, CircuitGate, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit,
@@ -21,7 +21,8 @@ use crate::compile::resource::ResourcePolicy;
 use crate::compile::transform::CircuitAnalysis;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::{
-    CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget, compile,
+    CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
+    SabreRoutingFailure, compile,
 };
 use crate::device::{Device, EdgeProp, InstructionProp, Layout, PhysicalQubit};
 use crate::util::test_utils::{
@@ -188,6 +189,38 @@ fn normal_workflow_reports_staged_order() {
     assert!(result.steps[12].skipped);
     assert!(result.steps[14].skipped);
     assert!(result.steps[15].skipped);
+}
+
+#[test]
+fn enhanced_sabre_uses_the_same_objective_with_larger_search_budgets() {
+    let normal = sabre_config_for_mode(CompileMode::Normal, Some(7));
+    let enhanced = sabre_config_for_mode(CompileMode::Enhanced, Some(7));
+
+    assert_eq!(enhanced.trial_objective, normal.trial_objective);
+    assert_eq!(enhanced.swap_regret_ratio, normal.swap_regret_ratio);
+    assert_eq!(
+        enhanced.heuristic.basic_weight,
+        normal.heuristic.basic_weight
+    );
+    assert_eq!(
+        enhanced.heuristic.decay_increment,
+        normal.heuristic.decay_increment
+    );
+    assert_eq!(enhanced.heuristic.decay_reset, normal.heuristic.decay_reset);
+    assert_eq!(
+        enhanced.heuristic.attempt_limit,
+        normal.heuristic.attempt_limit
+    );
+    assert_eq!(
+        enhanced.heuristic.best_epsilon,
+        normal.heuristic.best_epsilon
+    );
+    assert!(enhanced.layout_trials > normal.layout_trials);
+    assert!(enhanced.layout_assignment_budget > normal.layout_assignment_budget);
+    assert!(enhanced.refinement_iterations > normal.refinement_iterations);
+    assert!(enhanced.layout_scoring_trials > normal.layout_scoring_trials);
+    assert!(enhanced.routing_trials > normal.routing_trials);
+    assert!(enhanced.heuristic.lookahead_weights.len() > normal.heuristic.lookahead_weights.len());
 }
 
 #[test]
@@ -943,7 +976,7 @@ fn device_workflow_uses_local_native_capabilities_without_global_defaults() {
 }
 
 #[test]
-fn device_workflow_reports_structured_failure_when_no_native_plan_exists() {
+fn device_workflow_rejects_unroutable_native_interaction_during_sabre_preflight() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
@@ -969,24 +1002,14 @@ fn device_workflow_reports_structured_failure_when_no_native_plan_exists() {
     .run(&circuit)
     .unwrap_err();
 
-    let CompilerError::DeviceLoweringFailed(failure) = err else {
-        panic!("expected a device instruction lowering failure");
-    };
     assert!(matches!(
-        failure.instruction,
-        Instruction::Standard(StandardGate::CX)
+        err,
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::UnreachablePairPlacement {
+            logical,
+            physical,
+        }) if logical == [Qubit::new(0).into(), Qubit::new(1).into()]
+            && physical == [PhysicalQubit::new(0), PhysicalQubit::new(1)]
     ));
-    assert_eq!(
-        failure.qargs,
-        vec![PhysicalQubit::new(0), PhysicalQubit::new(1)]
-    );
-    assert!(!failure.attempted_candidates.is_empty());
-    assert!(
-        failure
-            .attempted_candidates
-            .iter()
-            .any(|attempt| attempt.template == "direction_reverse_CX")
-    );
 }
 
 #[test]

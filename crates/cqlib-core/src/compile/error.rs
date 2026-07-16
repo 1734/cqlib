@@ -11,7 +11,7 @@
 // that they have been altered from the originals.
 
 use crate::circuit::{CircuitError, Instruction};
-use crate::device::{DeviceValidationError, PhysicalQubit};
+use crate::device::{DeviceValidationError, LogicalQubit, PhysicalQubit};
 use std::fmt;
 use thiserror::Error;
 
@@ -56,6 +56,81 @@ impl fmt::Display for DeviceLoweringFailure {
 
 impl std::error::Error for DeviceLoweringFailure {}
 
+/// Structured failures produced while selecting or routing a SABRE layout.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SabreRoutingFailure {
+    /// No physical qubit supports the complete native plan required by a
+    /// logical unary requirement.
+    #[error("logical unary requirement on {logical} has no executable native terminal")]
+    NoExecutableUnaryTerminal {
+        /// Logical qubit carrying the unsupported unary requirement.
+        logical: LogicalQubit,
+    },
+    /// A unary requirement cannot reach any physical qubit on which its
+    /// selected native plan is executable.
+    #[error(
+        "logical unary requirement on {logical} at physical qubit {physical} cannot reach an executable location through lowerable SWAP edges"
+    )]
+    UnreachableUnaryPlacement {
+        /// Logical qubit carrying the unary requirement.
+        logical: LogicalQubit,
+        /// Physical location at which the logical qubit starts.
+        physical: PhysicalQubit,
+    },
+    /// No ordered physical pair supports the complete native plan required by
+    /// a logical interaction.
+    #[error("logical interaction {logical:?} has no executable native terminal pair")]
+    NoExecutablePairTerminal {
+        /// Ordered logical pair carrying the unsupported interaction.
+        logical: [LogicalQubit; 2],
+    },
+    /// An ordered pair requirement cannot reach any physical pair on which its
+    /// selected native plan is executable.
+    #[error(
+        "logical interaction {logical:?} at physical qubits {physical:?} cannot reach an executable terminal pair through lowerable SWAP edges"
+    )]
+    UnreachablePairPlacement {
+        /// Ordered logical pair carrying the interaction.
+        logical: [LogicalQubit; 2],
+        /// Ordered physical placement at which routing starts.
+        physical: [PhysicalQubit; 2],
+    },
+    /// No assignment of logical qubits to SWAP-feasible movement components
+    /// satisfies all unary, ordered-pair, and capacity constraints.
+    #[error(
+        "no movement-component assignment satisfies all unary, ordered-pair, and capacity constraints"
+    )]
+    MovementAssignmentInfeasible,
+    /// The bounded component-assignment search stopped without either finding
+    /// a placement or proving that none exists.
+    #[error(
+        "movement-component assignment exhausted budget {budget} after {expansions} expansions without proving infeasibility"
+    )]
+    MovementAssignmentBudgetExhausted {
+        /// Maximum number of assignment states permitted by the configuration.
+        budget: usize,
+        /// Number of assignment states actually expanded.
+        expansions: usize,
+    },
+    /// Candidate generation succeeded, but every candidate failed an exact
+    /// movement-reachability or native-lowering requirement.
+    #[error(
+        "all {evaluated} SABRE layout candidates were infeasible ({missing_terminal} missing a native terminal, {movement_unreachable} movement-unreachable, {unsupported_native} rejected during native lowering)"
+    )]
+    NoFeasibleLayoutCandidate {
+        /// Total number of candidates evaluated.
+        evaluated: usize,
+        /// Candidates rejected because a requirement has no executable native
+        /// terminal anywhere on the target.
+        missing_terminal: usize,
+        /// Candidates rejected because their starting placement cannot reach
+        /// an existing terminal through lowerable SWAPs.
+        movement_unreachable: usize,
+        /// Candidates rejected because an exact-qargs native plan was absent.
+        unsupported_native: usize,
+    },
+}
+
 /// Errors raised by compiler infrastructure and compiler state validation.
 #[derive(Debug, Error)]
 pub enum CompilerError {
@@ -79,6 +154,10 @@ pub enum CompilerError {
     /// No exact-qargs native lowering plan exists for an operation.
     #[error("device instruction lowering failed: {0}")]
     DeviceLoweringFailed(#[source] DeviceLoweringFailure),
+    /// SABRE could not find a feasible layout or route under the declared
+    /// movement and native-instruction constraints.
+    #[error("SABRE routing failed: {0}")]
+    SabreRoutingFailed(#[source] SabreRoutingFailure),
     /// The final circuit violates the configured device execution contract.
     #[error("device validation failed: {0}")]
     DeviceValidationFailed(#[from] DeviceValidationError),

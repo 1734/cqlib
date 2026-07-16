@@ -27,18 +27,20 @@ use super::{
     greedy_layout_prepared, is_perfect_layout, vf2_perfect_layout_prepared,
 };
 use crate::circuit::Circuit;
-use crate::compile::CompilerError;
 use crate::compile::sabre::{
-    InteractionReachability, RoutingTarget, SabreConfig, SabreDag, TrialQuality,
-    compare_trial_quality, interaction_reachability_for_target,
-    normalize_initial_layout_for_target, route_trial_unchecked, trial_seeds,
+    ComponentAssignmentSearch, InteractionReachability, RequirementReachabilityFailure,
+    RoutingTarget, SabreConfig, SabreDag, TrialQuality, compare_trial_quality,
+    interaction_reachability_for_target, movement_component_assignment,
+    normalize_initial_layout_for_target, route_trial_unchecked, trial_heuristic_profile,
+    trial_seeds, trial_swap_limit,
 };
+use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Circuit-side data prepared once for repeated SABRE layout selection.
 ///
@@ -51,7 +53,23 @@ pub struct PreparedSabreCircuit {
     analysis: CircuitLayoutAnalysis,
     routing_dag: SabreDag,
     refinement_dag: SabreDag,
-    logical_components: Vec<Vec<LogicalQubit>>,
+}
+
+/// Device-side SABRE data prepared for one circuit's interaction signatures.
+///
+/// The physical graph remains the layout/scoring view. The routing target owns
+/// exact native-plan summaries, SWAP-feasible connectivity, and terminal costs.
+#[derive(Debug, Clone)]
+pub struct PreparedSabreDeviceTarget {
+    physical: PhysicalLayoutGraph,
+    routing: RoutingTarget,
+}
+
+impl PreparedSabreDeviceTarget {
+    /// Returns the physical graph used by layout objective scoring.
+    pub fn physical(&self) -> &PhysicalLayoutGraph {
+        &self.physical
+    }
 }
 
 impl PreparedSabreCircuit {
@@ -81,13 +99,21 @@ pub fn prepare_sabre_circuit(circuit: &Circuit) -> Result<PreparedSabreCircuit, 
     let analysis = analyze_circuit_for_layout(circuit)?;
     let routing_dag = SabreDag::from_operations(circuit.operations())?;
     let refinement_dag = SabreDag::refinement_workload(circuit.operations())?;
-    let logical_components = logical_interaction_components(&analysis);
     Ok(PreparedSabreCircuit {
         analysis,
         routing_dag,
         refinement_dag,
-        logical_components,
     })
+}
+
+/// Prepares exact device-native SABRE data for a prepared circuit.
+pub fn prepare_sabre_device_target(
+    prepared: &PreparedSabreCircuit,
+    device: &Device,
+) -> Result<PreparedSabreDeviceTarget, CompilerError> {
+    let physical = build_physical_layout_graph(device)?;
+    let routing = RoutingTarget::from_device(device, &physical, &prepared.routing_dag)?;
+    Ok(PreparedSabreDeviceTarget { physical, routing })
 }
 
 /// Selects an initial layout with SABRE forward/backward refinement.
@@ -136,8 +162,8 @@ pub fn sabre_layout(
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
-    let physical = build_physical_layout_graph(device)?;
-    sabre_layout_prepared(&prepared, &physical, objective, config)
+    let target = prepare_sabre_device_target(&prepared, device)?;
+    sabre_layout_prepared(&prepared, &target, objective, config)
 }
 
 /// Selects a SABRE initial layout from prepared circuit-side data.
@@ -161,20 +187,20 @@ pub fn sabre_layout(
 /// ```rust
 /// use cqlib_core::circuit::{Circuit, Qubit};
 /// use cqlib_core::compile::sabre::SabreConfig;
-/// use cqlib_core::compile::transform::layout::build_physical_layout_graph;
 /// use cqlib_core::compile::transform::{
-///     LayoutObjective, prepare_sabre_circuit, sabre_layout_prepared,
+///     LayoutObjective, prepare_sabre_circuit, prepare_sabre_device_target,
+///     sabre_layout_prepared,
 /// };
 /// use cqlib_core::device::Device;
 ///
 /// let mut circuit = Circuit::new(3);
 /// circuit.cx(Qubit::new(0), Qubit::new(2))?;
 /// let prepared = prepare_sabre_circuit(&circuit)?;
-/// let physical = build_physical_layout_graph(&Device::line("line-3", 3)?)?;
+/// let target = prepare_sabre_device_target(&prepared, &Device::line("line-3", 3)?)?;
 ///
 /// let result = sabre_layout_prepared(
 ///     &prepared,
-///     &physical,
+///     &target,
 ///     &LayoutObjective::topology_only(),
 ///     &SabreConfig::deterministic_seeded(42),
 /// )?;
@@ -183,12 +209,13 @@ pub fn sabre_layout(
 /// ```
 pub fn sabre_layout_prepared(
     prepared: &PreparedSabreCircuit,
-    physical: &PhysicalLayoutGraph,
+    prepared_target: &PreparedSabreDeviceTarget,
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
     validate_layout_config(config)?;
-    let target = RoutingTarget::from_physical(physical)?;
+    let physical = &prepared_target.physical;
+    let target = &prepared_target.routing;
     let analysis = &prepared.analysis;
     let sabre = &prepared.routing_dag;
     let forwards = &prepared.refinement_dag;
@@ -204,15 +231,8 @@ pub fn sabre_layout_prepared(
     }
 
     let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or_else(rand::random));
-    let candidates = initial_layout_candidates(
-        analysis,
-        physical,
-        &target,
-        objective,
-        &prepared.logical_components,
-        config.layout_trials,
-        &mut rng,
-    )?;
+    let candidates =
+        initial_layout_candidates(prepared, prepared_target, objective, config, &mut rng)?;
     let candidates_evaluated = candidates.len();
     let trials = candidates
         .into_iter()
@@ -230,40 +250,63 @@ pub fn sabre_layout_prepared(
         })
         .collect::<Vec<_>>();
 
-    let evaluations = trials
+    let outcomes = trials
         .into_par_iter()
         .map(|trial| {
-            if matches!(
-                interaction_reachability_for_target(sabre, &target, &trial.layout)?,
-                InteractionReachability::Unreachable { .. }
-            ) {
-                return Ok(None);
+            match interaction_reachability_for_target(sabre, target, &trial.layout)? {
+                InteractionReachability::Reachable => {}
+                InteractionReachability::UnreachableUnary {
+                    cause: RequirementReachabilityFailure::NoExecutableTerminal,
+                    ..
+                }
+                | InteractionReachability::UnreachablePair {
+                    cause: RequirementReachabilityFailure::NoExecutableTerminal,
+                    ..
+                } => {
+                    return Ok(CandidateOutcome::Infeasible(
+                        CandidateInfeasibleReason::MissingTerminal,
+                    ));
+                }
+                InteractionReachability::UnreachableUnary {
+                    cause: RequirementReachabilityFailure::MovementDisconnected,
+                    ..
+                }
+                | InteractionReachability::UnreachablePair {
+                    cause: RequirementReachabilityFailure::MovementDisconnected,
+                    ..
+                } => {
+                    return Ok(CandidateOutcome::Infeasible(
+                        CandidateInfeasibleReason::MovementUnreachable,
+                    ));
+                }
             }
             let mut refined = trial.layout;
-            for (forward_seed, backward_seed) in trial.refinement_seeds {
+            for (iteration, (forward_seed, backward_seed)) in
+                trial.refinement_seeds.into_iter().enumerate()
+            {
                 // One refinement iteration routes forward, keeps the final
                 // layout, then routes the reversed interaction DAG. This is
                 // the SABRE layout-refinement loop, not final circuit routing.
                 refined = match route_trial_unchecked(
                     forwards,
-                    &target,
+                    target,
                     &refined,
-                    &config.heuristic,
+                    &trial_heuristic_profile(&config.heuristic, iteration * 2),
                     forward_seed,
                 ) {
                     Ok(result) => result.final_layout,
-                    Err(error) => return Err(error),
+                    Err(error) => return classify_candidate_error(error),
                 };
 
                 refined = match route_trial_unchecked(
                     &backwards,
-                    &target,
+                    target,
                     &refined,
-                    &config.heuristic,
+                    &trial_heuristic_profile(&config.heuristic, iteration * 2 + 1),
                     backward_seed,
                 ) {
                     Ok(result) => result.final_layout,
-                    Err(error) => return Err(error),
+                    Err(error) => return classify_candidate_error(error),
                 };
             }
 
@@ -271,25 +314,48 @@ pub fn sabre_layout_prepared(
             // Multiple scoring trials reduce seed sensitivity without exposing
             // final SWAP insertion through this layout API.
             let route_quality =
-                match best_route_quality(sabre, &target, &refined, config, trial.scoring_seed) {
+                match best_route_quality(sabre, target, &refined, config, trial.scoring_seed) {
                     Ok(quality) => quality,
-                    Err(error) => return Err(error),
+                    Err(error) => return classify_candidate_error(error),
                 };
             let score = objective.score_layout(analysis, physical, &refined)?;
-            Ok(Some(CandidateEvaluation {
+            Ok(CandidateOutcome::Success(CandidateEvaluation {
                 index: trial.index,
                 route_quality,
                 layout: refined,
                 score,
             }))
         })
-        .collect::<Result<Vec<_>, CompilerError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, CompilerError>>()?;
+    let mut evaluations = Vec::new();
+    let mut missing_terminal = 0usize;
+    let mut movement_unreachable = 0usize;
+    let mut unsupported_native = 0usize;
+    for outcome in outcomes {
+        match outcome {
+            CandidateOutcome::Success(evaluation) => evaluations.push(evaluation),
+            CandidateOutcome::Infeasible(CandidateInfeasibleReason::MissingTerminal) => {
+                missing_terminal = missing_terminal.saturating_add(1);
+            }
+            CandidateOutcome::Infeasible(CandidateInfeasibleReason::MovementUnreachable) => {
+                movement_unreachable = movement_unreachable.saturating_add(1);
+            }
+            CandidateOutcome::Infeasible(CandidateInfeasibleReason::UnsupportedNative) => {
+                unsupported_native = unsupported_native.saturating_add(1);
+            }
+        }
+    }
 
+    let swap_limit = trial_swap_limit(
+        config.trial_objective,
+        config.swap_regret_ratio,
+        evaluations
+            .iter()
+            .map(|evaluation| evaluation.route_quality),
+    );
     let best = evaluations
         .into_iter()
+        .filter(|evaluation| evaluation.route_quality.swap_count <= swap_limit)
         .min_by(|left, right| {
             compare_trial_quality(
                 config.trial_objective,
@@ -302,10 +368,12 @@ pub fn sabre_layout_prepared(
             .then_with(|| left.index.cmp(&right.index))
         })
         .ok_or_else(|| {
-            CompilerError::InvalidInput(
-                "sabre layout found no candidate whose interactions are connected in the usable topology"
-                    .to_string(),
-            )
+            CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoFeasibleLayoutCandidate {
+                evaluated: candidates_evaluated,
+                missing_terminal,
+                movement_unreachable,
+                unsupported_native,
+            })
         })?;
     let swap_count = best.route_quality.swap_count;
     let layout = best.layout;
@@ -337,6 +405,38 @@ struct CandidateTrial {
     scoring_seed: u64,
 }
 
+enum CandidateOutcome<T> {
+    Success(T),
+    Infeasible(CandidateInfeasibleReason),
+}
+
+enum CandidateInfeasibleReason {
+    MissingTerminal,
+    MovementUnreachable,
+    UnsupportedNative,
+}
+
+fn classify_candidate_error<T>(error: CompilerError) -> Result<CandidateOutcome<T>, CompilerError> {
+    match error {
+        CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutableUnaryTerminal { .. }
+            | SabreRoutingFailure::NoExecutablePairTerminal { .. },
+        ) => Ok(CandidateOutcome::Infeasible(
+            CandidateInfeasibleReason::MissingTerminal,
+        )),
+        CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachableUnaryPlacement { .. }
+            | SabreRoutingFailure::UnreachablePairPlacement { .. },
+        ) => Ok(CandidateOutcome::Infeasible(
+            CandidateInfeasibleReason::MovementUnreachable,
+        )),
+        CompilerError::DeviceLoweringFailed(_) => Ok(CandidateOutcome::Infeasible(
+            CandidateInfeasibleReason::UnsupportedNative,
+        )),
+        fatal => Err(fatal),
+    }
+}
+
 struct CandidateEvaluation {
     /// Original candidate index, retained after parallel evaluation.
     index: usize,
@@ -359,6 +459,11 @@ fn validate_layout_config(config: &SabreConfig) -> Result<(), CompilerError> {
             "sabre layout_trials must be greater than zero".to_string(),
         ));
     }
+    if config.layout_assignment_budget == 0 {
+        return Err(CompilerError::InvalidInput(
+            "sabre layout_assignment_budget must be greater than zero".to_string(),
+        ));
+    }
     if config.layout_scoring_trials == 0 {
         return Err(CompilerError::InvalidInput(
             "sabre layout_scoring_trials must be greater than zero".to_string(),
@@ -373,45 +478,64 @@ fn validate_layout_config(config: &SabreConfig) -> Result<(), CompilerError> {
 /// and random physical orders. The result is deduplicated in logical-qubit
 /// order so duplicate layouts from different sources are evaluated once.
 fn initial_layout_candidates(
-    analysis: &CircuitLayoutAnalysis,
-    physical: &PhysicalLayoutGraph,
-    target: &RoutingTarget,
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreDeviceTarget,
     objective: &LayoutObjective,
-    logical_components: &[Vec<LogicalQubit>],
-    layout_trials: usize,
+    config: &SabreConfig,
     rng: &mut StdRng,
 ) -> Result<Vec<Layout>, CompilerError> {
+    let analysis = &prepared.analysis;
+    let sabre = &prepared.routing_dag;
+    let physical = &prepared_target.physical;
+    let target = &prepared_target.routing;
     let mut candidates = Vec::new();
     let logical_qubits = &analysis.logical_qubits;
-    let physical_components = physical.connected_components();
-    let deterministic_assignment =
-        component_assignment(logical_components, physical_components, None)
-            .ok_or_else(|| component_capacity_error(logical_components, physical_components))?;
-
-    // Feasible deterministic anchors guarantee that topology reachability does
-    // not depend on random seed, even on a disconnected physical target.
-    candidates.push(component_safe_layout(
-        logical_qubits,
-        logical_components,
-        physical_components,
+    let assignment = match movement_component_assignment(
+        sabre,
         target,
-        &deterministic_assignment,
+        logical_qubits,
+        config.layout_assignment_budget,
+    )? {
+        ComponentAssignmentSearch::Found(assignment) => assignment,
+        ComponentAssignmentSearch::ProvenInfeasible => {
+            return Err(CompilerError::SabreRoutingFailed(
+                SabreRoutingFailure::MovementAssignmentInfeasible,
+            ));
+        }
+        ComponentAssignmentSearch::BudgetExhausted { expansions } => {
+            return Err(CompilerError::SabreRoutingFailed(
+                SabreRoutingFailure::MovementAssignmentBudgetExhausted {
+                    budget: config.layout_assignment_budget,
+                    expansions,
+                },
+            ));
+        }
+    };
+
+    // Deterministic anchors guarantee that exact movement reachability does not
+    // depend on a random seed, including cross-component terminal pairs.
+    candidates.push(movement_component_layout(
+        logical_qubits,
+        &assignment.components,
+        &assignment.logical_components,
+        target,
         false,
         None,
     )?);
-    candidates.push(component_safe_layout(
+    candidates.push(movement_component_layout(
         logical_qubits,
-        logical_components,
-        physical_components,
+        &assignment.components,
+        &assignment.logical_components,
         target,
-        &deterministic_assignment,
         true,
         None,
     )?);
 
     if let Ok(greedy) = greedy_layout_prepared(analysis, physical, objective) {
         let greedy = normalize_initial_layout_for_target(logical_qubits, target, &greedy.layout)?;
-        if layout_components_are_reachable(logical_components, physical, &greedy)? {
+        if interaction_reachability_for_target(sabre, target, &greedy)?
+            == InteractionReachability::Reachable
+        {
             candidates.push(greedy);
         }
     }
@@ -419,20 +543,19 @@ fn initial_layout_candidates(
         vf2_perfect_layout_prepared(analysis, physical, objective, &Vf2LayoutConfig::default())
     {
         let vf2 = normalize_initial_layout_for_target(logical_qubits, target, &vf2.layout)?;
-        if layout_components_are_reachable(logical_components, physical, &vf2)? {
+        if interaction_reachability_for_target(sabre, target, &vf2)?
+            == InteractionReachability::Reachable
+        {
             candidates.push(vf2);
         }
     }
 
-    for _ in 0..layout_trials {
-        let assignment = component_assignment(logical_components, physical_components, Some(rng))
-            .expect("a deterministic feasible component assignment was already found");
-        candidates.push(component_safe_layout(
+    for _ in 0..config.layout_trials {
+        candidates.push(movement_component_layout(
             logical_qubits,
-            logical_components,
-            physical_components,
+            &assignment.components,
+            &assignment.logical_components,
             target,
-            &assignment,
             false,
             Some(rng),
         )?);
@@ -441,23 +564,22 @@ fn initial_layout_candidates(
     deduplicate_layouts(candidates, logical_qubits)
 }
 
-fn component_safe_layout(
+fn movement_component_layout(
     logical_qubits: &[LogicalQubit],
-    logical_components: &[Vec<LogicalQubit>],
     physical_components: &[Vec<PhysicalQubit>],
+    logical_components: &[usize],
     target: &RoutingTarget,
-    assignment: &[usize],
     reverse: bool,
     mut rng: Option<&mut StdRng>,
 ) -> Result<Layout, CompilerError> {
     let mut mapping = BTreeMap::new();
     let mut used = BTreeSet::new();
     for (physical_index, physical_component) in physical_components.iter().enumerate() {
-        let mut logical = logical_components
+        let mut logical = logical_qubits
             .iter()
             .enumerate()
-            .filter(|(index, _)| assignment[*index] == physical_index)
-            .flat_map(|(_, component)| component.iter().copied())
+            .filter(|(index, _)| logical_components[*index] == physical_index)
+            .map(|(_, logical)| *logical)
             .collect::<Vec<_>>();
         let mut physical = physical_component.clone();
         if let Some(rng) = rng.as_deref_mut() {
@@ -501,170 +623,6 @@ fn component_safe_layout(
             "sabre layout failed to construct an initial candidate: {error}"
         ))
     })
-}
-
-fn logical_interaction_components(analysis: &CircuitLayoutAnalysis) -> Vec<Vec<LogicalQubit>> {
-    let mut adjacency: BTreeMap<LogicalQubit, BTreeSet<LogicalQubit>> = BTreeMap::new();
-    for interaction in analysis
-        .interactions
-        .interactions()
-        .iter()
-        .filter(|interaction| interaction.weight > 0.0)
-    {
-        adjacency
-            .entry(interaction.left)
-            .or_default()
-            .insert(interaction.right);
-        adjacency
-            .entry(interaction.right)
-            .or_default()
-            .insert(interaction.left);
-    }
-
-    let mut unseen = adjacency.keys().copied().collect::<BTreeSet<_>>();
-    let mut components = Vec::new();
-    while let Some(start) = unseen.pop_first() {
-        let mut queue = VecDeque::from([start]);
-        let mut component = Vec::new();
-        while let Some(logical) = queue.pop_front() {
-            component.push(logical);
-            if let Some(neighbors) = adjacency.get(&logical) {
-                for &neighbor in neighbors {
-                    if unseen.remove(&neighbor) {
-                        queue.push_back(neighbor);
-                    }
-                }
-            }
-        }
-        component.sort_unstable();
-        components.push(component);
-    }
-    components.sort_unstable_by_key(|component| component[0]);
-    components
-}
-
-fn component_assignment(
-    logical_components: &[Vec<LogicalQubit>],
-    physical_components: &[Vec<PhysicalQubit>],
-    mut rng: Option<&mut StdRng>,
-) -> Option<Vec<usize>> {
-    let mut items = logical_components
-        .iter()
-        .enumerate()
-        .map(|(index, component)| (index, component.len(), component[0]))
-        .collect::<Vec<_>>();
-    items.sort_unstable_by_key(|(_, size, first)| (std::cmp::Reverse(*size), *first));
-    if let Some(rng) = rng.as_deref_mut() {
-        let mut start = 0;
-        while start < items.len() {
-            let size = items[start].1;
-            let end = items[start..]
-                .iter()
-                .position(|item| item.1 != size)
-                .map_or(items.len(), |offset| start + offset);
-            items[start..end].shuffle(rng);
-            start = end;
-        }
-    }
-
-    let mut remaining = physical_components.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut assignment = vec![usize::MAX; logical_components.len()];
-    let mut failed = HashSet::new();
-    if assign_components_recursive(
-        0,
-        &items,
-        &mut remaining,
-        &mut assignment,
-        &mut failed,
-        &mut rng,
-    ) {
-        Some(assignment)
-    } else {
-        None
-    }
-}
-
-fn assign_components_recursive(
-    next: usize,
-    items: &[(usize, usize, LogicalQubit)],
-    remaining: &mut [usize],
-    assignment: &mut [usize],
-    failed: &mut HashSet<(usize, Vec<usize>)>,
-    rng: &mut Option<&mut StdRng>,
-) -> bool {
-    if next == items.len() {
-        return true;
-    }
-    let mut canonical_remaining = remaining.to_vec();
-    canonical_remaining.sort_unstable();
-    let key = (next, canonical_remaining);
-    if failed.contains(&key) {
-        return false;
-    }
-
-    let (logical_index, size, _) = items[next];
-    let mut bins = (0..remaining.len())
-        .filter(|&index| remaining[index] >= size)
-        .collect::<Vec<_>>();
-    if let Some(rng) = rng.as_deref_mut() {
-        bins.shuffle(rng);
-    } else {
-        bins.sort_unstable_by_key(|&index| (remaining[index] - size, index));
-    }
-    let mut tried_capacities = BTreeSet::new();
-    for physical_index in bins {
-        if !tried_capacities.insert(remaining[physical_index]) {
-            continue;
-        }
-        remaining[physical_index] -= size;
-        assignment[logical_index] = physical_index;
-        if assign_components_recursive(next + 1, items, remaining, assignment, failed, rng) {
-            return true;
-        }
-        remaining[physical_index] += size;
-        assignment[logical_index] = usize::MAX;
-    }
-    failed.insert(key);
-    false
-}
-
-fn component_capacity_error(
-    logical_components: &[Vec<LogicalQubit>],
-    physical_components: &[Vec<PhysicalQubit>],
-) -> CompilerError {
-    let mut logical_sizes = logical_components.iter().map(Vec::len).collect::<Vec<_>>();
-    logical_sizes.sort_unstable_by(|left, right| right.cmp(left));
-    let mut physical_capacities = physical_components.iter().map(Vec::len).collect::<Vec<_>>();
-    physical_capacities.sort_unstable_by(|left, right| right.cmp(left));
-    CompilerError::InvalidInput(format!(
-        "sabre layout cannot place logical interaction components {logical_sizes:?} into usable physical component capacities {physical_capacities:?}"
-    ))
-}
-
-fn layout_components_are_reachable(
-    logical_components: &[Vec<LogicalQubit>],
-    physical: &PhysicalLayoutGraph,
-    layout: &Layout,
-) -> Result<bool, CompilerError> {
-    for component in logical_components {
-        let root = layout.get_physical(component[0]).ok_or_else(|| {
-            CompilerError::InvariantViolation(format!(
-                "sabre layout candidate does not map logical qubit {}",
-                component[0]
-            ))
-        })?;
-        for &logical in &component[1..] {
-            let mapped = layout.get_physical(logical).ok_or_else(|| {
-                CompilerError::InvariantViolation(format!(
-                    "sabre layout candidate does not map logical qubit {logical}"
-                ))
-            })?;
-            if physical.distance(root, mapped).is_none() {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
 }
 
 /// Removes duplicate candidate layouts while preserving first occurrence.
@@ -712,27 +670,32 @@ fn best_route_quality(
     config: &SabreConfig,
     seed: u64,
 ) -> Result<TrialQuality, CompilerError> {
-    let mut best: Option<(usize, TrialQuality)> = None;
-    for (index, seed) in trial_seeds(Some(seed), config.layout_scoring_trials)
+    let qualities = trial_seeds(Some(seed), config.layout_scoring_trials)
         .into_iter()
         .enumerate()
-    {
-        let quality =
-            route_trial_unchecked(sabre, target, initial_layout, &config.heuristic, seed)?.quality;
-        if best.as_ref().is_none_or(|(best_index, best_quality)| {
+        .map(|(index, seed)| {
+            let heuristic = trial_heuristic_profile(&config.heuristic, index);
+            route_trial_unchecked(sabre, target, initial_layout, &heuristic, seed)
+                .map(|result| (index, result.quality))
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?;
+    let swap_limit = trial_swap_limit(
+        config.trial_objective,
+        config.swap_regret_ratio,
+        qualities.iter().map(|(_, quality)| *quality),
+    );
+    Ok(qualities
+        .into_iter()
+        .filter(|(_, quality)| quality.swap_count <= swap_limit)
+        .min_by(|(left_index, left), (right_index, right)| {
             compare_trial_quality(
                 config.trial_objective,
-                quality,
-                index,
-                *best_quality,
-                *best_index,
+                *left,
+                *left_index,
+                *right,
+                *right_index,
             )
-            .is_lt()
-        }) {
-            best = Some((index, quality));
-        }
-    }
-    Ok(best
+        })
         .expect("layout_scoring_trials is validated to be non-zero")
         .1)
 }

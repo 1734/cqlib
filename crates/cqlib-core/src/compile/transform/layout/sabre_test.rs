@@ -12,10 +12,12 @@
 
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
-use crate::compile::CompilerError;
-use crate::compile::sabre::SabreConfig;
+use crate::compile::sabre::{SabreConfig, sabre_route};
 use crate::compile::transform::route_sabre;
-use crate::device::{Device, EdgeProp, InstructionProp, PhysicalQubit, Topology};
+use crate::compile::{CompilerError, SabreRoutingFailure};
+use crate::device::{
+    Device, EdgeProp, InstructionProp, LogicalQubit, PhysicalQubit, QubitProp, Topology,
+};
 use std::collections::HashSet;
 
 fn disconnected_device(name: &str, component_ids: &[&[u32]]) -> Device {
@@ -68,10 +70,10 @@ fn sabre_layout_prepared_matches_top_level_entry() {
     circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
 
     let prepared_circuit = prepare_sabre_circuit(&circuit).unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let prepared_target = prepare_sabre_device_target(&prepared_circuit, &device).unwrap();
     let top_level = sabre_layout(&circuit, &device, &objective, &config).unwrap();
     let prepared =
-        sabre_layout_prepared(&prepared_circuit, &physical, &objective, &config).unwrap();
+        sabre_layout_prepared(&prepared_circuit, &prepared_target, &objective, &config).unwrap();
 
     assert_eq!(top_level.layout.l2p_map(), prepared.layout.l2p_map());
     assert_eq!(
@@ -87,8 +89,10 @@ fn prepared_sabre_circuit_can_be_reused_across_targets_and_configs() {
     circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
     let prepared = prepare_sabre_circuit(&circuit).unwrap();
 
-    let line3 = build_physical_layout_graph(&Device::line("line-3", 3).unwrap()).unwrap();
-    let line4 = build_physical_layout_graph(&Device::line("line-4", 4).unwrap()).unwrap();
+    let line3 =
+        prepare_sabre_device_target(&prepared, &Device::line("line-3", 3).unwrap()).unwrap();
+    let line4 =
+        prepare_sabre_device_target(&prepared, &Device::line("line-4", 4).unwrap()).unwrap();
     let first = sabre_layout_prepared(
         &prepared,
         &line3,
@@ -218,10 +222,116 @@ fn infeasible_component_packing_reports_stable_sizes_and_capacities() {
 
     assert!(matches!(
         error,
-        CompilerError::InvalidInput(message)
-            if message.contains("logical interaction components [5, 5]")
-                && message.contains("physical component capacities [6, 4]")
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::MovementAssignmentInfeasible)
     ));
+}
+
+#[test]
+fn topology_connected_movement_components_find_cross_component_terminal_layout() {
+    let qubits = (0..4).map(PhysicalQubit::new).collect::<Vec<_>>();
+    let p0 = qubits[0];
+    let p1 = qubits[1];
+    let p2 = qubits[2];
+    let p3 = qubits[3];
+    let topology = Topology::new(
+        qubits.clone(),
+        vec![
+            (p0, p2, "swap-a".to_string()),
+            (p1, p3, "swap-b".to_string()),
+            (p0, p1, "cx-cross".to_string()),
+        ],
+    )
+    .unwrap();
+    let mut device =
+        Device::new("split-movement", qubits.iter().copied().collect(), topology).unwrap();
+    for (left, right) in [(p0, p2), (p1, p3)] {
+        device
+            .add_edge_properties(
+                left,
+                right,
+                EdgeProp::new()
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::SWAP),
+                        0.01,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let result = sabre_layout(
+        &circuit,
+        &device,
+        &LayoutObjective::topology_only(),
+        &SabreConfig::deterministic_seeded(0),
+    )
+    .unwrap();
+    let routed = sabre_route(
+        &circuit,
+        &device,
+        &result.layout,
+        &SabreConfig::deterministic_seeded(0),
+    )
+    .unwrap();
+
+    assert_eq!(routed.swap_count, 0);
+}
+
+#[test]
+fn local_unary_capability_selects_the_feasible_layout_candidate() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![p0, p1], vec![(p0, p1, "cx".to_string())]).unwrap();
+    let mut device = Device::new("local-h", HashSet::from([p0, p1]), topology).unwrap();
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    device
+        .add_qubit_properties(
+            p1,
+            QubitProp::new(0.0)
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::H),
+                    0.001,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let result = sabre_layout(
+        &circuit,
+        &device,
+        &LayoutObjective::topology_only(),
+        &SabreConfig::deterministic_seeded(0),
+    )
+    .unwrap();
+
+    assert_eq!(result.layout.get_physical(LogicalQubit::new(0)), Some(p1));
 }
 
 #[test]
@@ -299,6 +409,32 @@ fn sabre_layout_rejects_zero_layout_trials() {
     assert!(
         matches!(error, CompilerError::InvalidInput(message) if message.contains("layout_trials"))
     );
+}
+
+#[test]
+fn sabre_layout_distinguishes_assignment_budget_exhaustion() {
+    let device = Device::line("line", 2).unwrap();
+    let circuit = Circuit::new(2);
+    let config = SabreConfig {
+        layout_assignment_budget: 1,
+        ..SabreConfig::deterministic_seeded(7)
+    };
+
+    let error = sabre_layout(
+        &circuit,
+        &device,
+        &LayoutObjective::topology_only(),
+        &config,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::MovementAssignmentBudgetExhausted {
+            budget: 1,
+            expansions: 1
+        })
+    ));
 }
 
 #[test]

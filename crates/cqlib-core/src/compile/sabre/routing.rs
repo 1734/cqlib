@@ -10,16 +10,20 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::dag::{SabreControlFlow, SabreDag, SabreNodeKind};
+use super::cost::{CalibrationEstimator, NativePlanCost, RobustDurationKey, RobustErrorKey};
+use super::dag::{SabreControlFlow, SabreDag, SabreNode, SabreNodeKind};
 use super::heuristic::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
-use super::layer::Layer;
+use super::layer::{Layer, RequirementPlacement};
 use crate::circuit::value_instruction::storage_operation_to_value;
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ControlBody, ForOp, IfOp, Instruction, Operation,
     Parameter, Qubit, StandardGate, SwitchCase, SwitchOp, WhileOp,
 };
-use crate::compile::CompilerError;
+use crate::compile::device_planning::{DeviceGateState, NativePlanAvailability, NativePlanCatalog};
+use crate::compile::error::DeviceLoweringFailure;
+use crate::compile::knowledge::KnowledgeInstructionKey;
 use crate::compile::physical_target::PhysicalLayoutGraph;
+use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use indexmap::IndexSet;
 use rand::rngs::StdRng;
@@ -32,9 +36,12 @@ use rustworkx_core::petgraph::visit::EdgeRef;
 use rustworkx_core::token_swapper::token_swapper;
 use smallvec::{SmallVec, smallvec};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 const CONTROL_FLOW_EPILOGUE_TRIALS: usize = 4;
+const EAGER_PAIR_STATE_BUDGET: usize = 1_000_000;
+const LAZY_PAIR_CACHE_BUDGET: usize = 100_000;
 
 /// Routed circuit and layout metadata produced by [`sabre_route`].
 #[derive(Debug, Clone)]
@@ -52,7 +59,7 @@ pub struct SabreRoutingResult {
 }
 
 /// Diagnostics emitted by SABRE routing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SabreRoutingDiagnostics {
     /// Number of routing trials evaluated.
     pub trials_evaluated: usize,
@@ -66,6 +73,36 @@ pub struct SabreRoutingDiagnostics {
     pub two_qubit_depth: usize,
     /// Total number of operations in the selected routed operation stream.
     pub operation_count: usize,
+    /// Predicted native two-qubit operation count after device lowering.
+    pub native_two_qubit_count: usize,
+    /// ASAP two-qubit depth using the selected exact-qargs native plans.
+    pub native_two_qubit_depth: usize,
+    /// Predicted total native operation count after device lowering.
+    pub native_operation_count: usize,
+    /// Independent-gate negative log-success proxy, when calibration exists.
+    pub predicted_log_error: Option<f64>,
+    /// Native leaves whose error calibration could not be estimated.
+    pub unavailable_error_count: u32,
+    /// Native leaves using conservative error imputation.
+    pub imputed_error_count: u32,
+    /// Sum of native gate durations, when duration calibration exists.
+    ///
+    /// This is workload, not an ASAP-scheduled circuit makespan.
+    pub duration_work: Option<f64>,
+    /// Native-leaf ASAP makespan using exact-qargs selected lowering plans.
+    /// `None` means duration calibration is disabled/incomplete or a dynamic
+    /// non-zero loop has no statically known execution count.
+    pub predicted_makespan: Option<f64>,
+    /// Dynamic `for`/`while` loops whose total execution cost is unknown.
+    pub unknown_loop_count: usize,
+    /// Number of distinct unary/pair requirement signatures prepared.
+    pub requirement_signature_count: usize,
+    /// Pair-placement lower-bound states retained eagerly by the target.
+    pub eager_pair_state_count: usize,
+    /// Exact pair-state lower-bound lookups served by the lazy path.
+    pub lazy_pair_lookup_count: usize,
+    /// Lazy pair-state results retained in the bounded target cache.
+    pub lazy_pair_cached_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -78,11 +115,18 @@ pub(crate) struct TrialResult {
     pub(crate) quality: TrialQuality,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct TrialQuality {
     pub(crate) swap_count: usize,
     pub(crate) two_qubit_depth: usize,
     pub(crate) operation_count: usize,
+    pub(crate) native_two_qubit_ops: usize,
+    pub(crate) native_two_qubit_depth: usize,
+    pub(crate) native_total_ops: usize,
+    pub(crate) error: Option<RobustErrorKey>,
+    pub(crate) duration: Option<RobustDurationKey>,
+    pub(crate) makespan: Option<f64>,
+    pub(crate) unknown_loop_count: usize,
 }
 
 /// Routes `circuit` from `initial_layout` by inserting SWAP operations.
@@ -97,12 +141,13 @@ pub fn sabre_route(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<SabreRoutingResult, CompilerError> {
-    validate_routing_config(config)?;
+    validate_config(config)?;
     // Build a dense, reusable view of the physical topology once. The routing
     // loop indexes into this structure heavily for adjacency, distance, and
     // deterministic candidate ordering.
     let physical = PhysicalLayoutGraph::from_device(device)?;
-    let target = RoutingTarget::from_physical(&physical)?;
+    let sabre = SabreDag::from_operations(circuit.operations())?;
+    let target = RoutingTarget::from_device(device, &physical, &sabre)?;
     let logical_qubits = circuit
         .qubits()
         .into_iter()
@@ -110,7 +155,6 @@ pub fn sabre_route(
         .collect::<Vec<_>>();
     let initial_layout =
         normalize_initial_layout_for_target(&logical_qubits, &target, initial_layout)?;
-    let sabre = SabreDag::from_operations(circuit.operations())?;
     validate_reachable_interactions_for_target(&sabre, &target, &initial_layout)?;
 
     // Trials share the normalized layout and DAG but use independent seeds for
@@ -120,12 +164,19 @@ pub fn sabre_route(
         .into_par_iter()
         .enumerate()
         .map(|(index, seed)| {
-            route_trial_unchecked(&sabre, &target, &initial_layout, &config.heuristic, seed)
+            let heuristic = trial_heuristic_profile(&config.heuristic, index);
+            route_trial_unchecked(&sabre, &target, &initial_layout, &heuristic, seed)
                 .map(|result| (index, result))
         })
         .collect::<Result<Vec<_>, CompilerError>>()?;
+    let swap_limit = trial_swap_limit(
+        config.trial_objective,
+        config.swap_regret_ratio,
+        trial_results.iter().map(|(_, result)| result.quality),
+    );
     let (best_index, best) = trial_results
         .into_iter()
+        .filter(|(_, result)| result.quality.swap_count <= swap_limit)
         .min_by(|(left_index, left), (right_index, right)| {
             compare_trial_quality(
                 config.trial_objective,
@@ -199,6 +250,7 @@ pub fn sabre_route(
         routed.add_parameter(parameter);
     }
     routed.set_global_phase(circuit.global_phase());
+    let (lazy_pair_lookup_count, lazy_pair_cached_count) = target.lazy_pair_cache_stats();
 
     Ok(SabreRoutingResult {
         circuit: routed,
@@ -212,6 +264,19 @@ pub fn sabre_route(
             control_flow_blocks_routed: best.control_flow_blocks_routed,
             two_qubit_depth: best.quality.two_qubit_depth,
             operation_count: best.quality.operation_count,
+            native_two_qubit_count: best.quality.native_two_qubit_ops,
+            native_two_qubit_depth: best.quality.native_two_qubit_depth,
+            native_operation_count: best.quality.native_total_ops,
+            predicted_log_error: best.quality.error.map(|key| key.log_error),
+            unavailable_error_count: best.quality.error.map_or(0, |key| key.unavailable_count),
+            imputed_error_count: best.quality.error.map_or(0, |key| key.imputed_count),
+            duration_work: best.quality.duration.map(|key| key.duration_work),
+            predicted_makespan: best.quality.makespan,
+            unknown_loop_count: best.quality.unknown_loop_count,
+            requirement_signature_count: target.requirements.len(),
+            eager_pair_state_count: target.eager_pair_state_count,
+            lazy_pair_lookup_count,
+            lazy_pair_cached_count,
         },
     })
 }
@@ -223,13 +288,14 @@ pub fn sabre_route(
 /// Routing starts from a concrete initial layout and does not depend on those
 /// layout-only knobs.
 pub fn validate_config(config: &SabreConfig) -> Result<(), CompilerError> {
-    validate_routing_config(config)
-}
-
-fn validate_routing_config(config: &SabreConfig) -> Result<(), CompilerError> {
     if config.routing_trials == 0 {
         return Err(CompilerError::InvalidInput(
             "sabre routing_trials must be greater than zero".to_string(),
+        ));
+    }
+    if !(config.swap_regret_ratio.is_finite() && config.swap_regret_ratio >= 0.0) {
+        return Err(CompilerError::InvalidInput(
+            "sabre swap_regret_ratio must be finite and non-negative".to_string(),
         ));
     }
     config.heuristic.validate()
@@ -278,18 +344,26 @@ pub(crate) fn route_trial_unchecked(
     let mut search_steps_since_decay_reset = 0usize;
     while !state.front_layer.is_empty() {
         let mut current_swaps = Vec::new();
+        let mut seen_mappings = HashSet::from([mapping_signature(&state.layout, target)]);
+        let mut repeated_mapping = false;
         // Search accumulates speculative SWAPs until at least one front-layer
         // node becomes adjacent. Those SWAPs are emitted only when the routed
         // node is actually emitted, preserving a compact operation stream.
-        while routable_nodes.is_empty() && current_swaps.len() <= heuristic.attempt_limit {
-            let best_swap = state.choose_best_swap(target, heuristic)?;
+        while routable_nodes.is_empty()
+            && !repeated_mapping
+            && current_swaps.len() < heuristic.attempt_limit
+        {
+            let best_swap =
+                state.choose_best_swap(target, heuristic, current_swaps.last().copied())?;
             state.apply_swap(best_swap.physical, target)?;
             current_swaps.push(best_swap.physical);
-            let adjacent = |left, right| target.are_adjacent_by_index(left, right);
+            repeated_mapping = !seen_mappings.insert(mapping_signature(&state.layout, target));
+            let executable =
+                |requirement, placement| target.terminal_cost_for(requirement, placement).is_some();
             for candidate in best_swap
                 .indices
                 .into_iter()
-                .filter_map(|index| state.front_layer.routable_node_on_index(index, &adjacent))
+                .filter_map(|index| state.front_layer.routable_node_on_index(index, &executable))
             {
                 if !routable_nodes.contains(&candidate) {
                     routable_nodes.push(candidate);
@@ -322,7 +396,7 @@ pub(crate) fn route_trial_unchecked(
             routable_nodes.extend(forced);
         }
 
-        let distance = |left, right| target.distance_by_index(left, right);
+        let distance = |requirement, placement| target.distance_for(requirement, placement);
         for node in &routable_nodes {
             state.front_layer.remove(*node, &distance)?;
         }
@@ -344,7 +418,7 @@ pub(crate) fn route_trial_unchecked(
         routable_nodes.clear();
     }
 
-    let quality = trial_quality(&output.operations, output.swap_count);
+    let quality = trial_quality(&output.operations, output.swap_count, target)?;
     Ok(TrialResult {
         operations: output.operations,
         final_layout: state.layout,
@@ -362,6 +436,39 @@ pub(crate) fn route_trial_unchecked(
 pub(crate) fn trial_seeds(seed: Option<u64>, count: usize) -> Vec<u64> {
     let mut rng = StdRng::seed_from_u64(seed.unwrap_or_else(rand::random));
     (0..count).map(|_| rng.random()).collect()
+}
+
+/// Produces deterministic, bounded heuristic diversity across routing trials.
+///
+/// Seed-only trials explore near-ties but share the same blind spots. These
+/// profiles vary lookahead and decay without changing the common routing
+/// engine or final constrained quality objective.
+pub(crate) fn trial_heuristic_profile(
+    base: &SabreHeuristicConfig,
+    trial_index: usize,
+) -> SabreHeuristicConfig {
+    let mut profile = base.clone();
+    match trial_index % 4 {
+        0 => {}
+        1 => {
+            profile.decay_increment = None;
+        }
+        2 => {
+            for weight in &mut profile.lookahead_weights {
+                *weight *= 0.5;
+            }
+        }
+        3 => {
+            for weight in &mut profile.lookahead_weights {
+                *weight *= 1.5;
+            }
+            if let Some(increment) = &mut profile.decay_increment {
+                *increment *= 2.0;
+            }
+        }
+        _ => unreachable!(),
+    }
+    profile
 }
 
 /// Normalizes an initial layout against a device's usable physical topology.
@@ -420,7 +527,8 @@ pub fn validate_reachable_interactions(
     initial_layout: &Layout,
 ) -> Result<(), CompilerError> {
     let physical = PhysicalLayoutGraph::from_device(device)?;
-    let target = RoutingTarget::from_physical(&physical)?;
+    let sabre = SabreDag::from_operations(circuit.operations())?;
+    let target = RoutingTarget::from_device(device, &physical, &sabre)?;
     let logical_qubits = circuit
         .qubits()
         .into_iter()
@@ -428,8 +536,114 @@ pub fn validate_reachable_interactions(
         .collect::<Vec<_>>();
     let initial_layout =
         normalize_initial_layout_for_target(&logical_qubits, &target, initial_layout)?;
-    let sabre = SabreDag::from_operations(circuit.operations())?;
     validate_reachable_interactions_for_target(&sabre, &target, &initial_layout)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InteractionOperation {
+    instruction: KnowledgeInstructionKey,
+    qarg_roles: SmallVec<[u8; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InteractionSignature {
+    /// Layout refinement DAGs deliberately omit concrete operations.
+    GenericPair,
+    Unary(Vec<InteractionOperation>),
+    Pair(Vec<InteractionOperation>),
+}
+
+#[derive(Debug, Clone)]
+enum RequirementTable {
+    Unary {
+        terminals: Vec<Option<NativePlanCost>>,
+        lower_bounds: Vec<Option<RouteLowerBound>>,
+    },
+    Pair {
+        terminals: BTreeMap<[usize; 2], NativePlanCost>,
+        lower_bounds: Option<PairStateTable<RouteLowerBound>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PairStateTable<T> {
+    width: usize,
+    values: Vec<Option<T>>,
+}
+
+impl<T: Copy> PairStateTable<T> {
+    fn new(width: usize) -> Self {
+        Self {
+            width,
+            values: vec![None; width.saturating_mul(width.saturating_sub(1))],
+        }
+    }
+
+    fn get(&self, left: usize, right: usize) -> Option<T> {
+        pair_state_index(self.width, left, right)
+            .and_then(|index| self.values.get(index))
+            .copied()
+            .flatten()
+    }
+
+    fn set(&mut self, left: usize, right: usize, value: T) {
+        if let Some(index) = pair_state_index(self.width, left, right) {
+            self.values[index] = Some(value);
+        }
+    }
+
+    fn state_count(&self) -> usize {
+        self.values.len()
+    }
+}
+
+fn pair_state_index(width: usize, left: usize, right: usize) -> Option<usize> {
+    if width < 2 || left >= width || right >= width || left == right {
+        return None;
+    }
+    let right_without_diagonal = if right < left { right } else { right - 1 };
+    left.checked_mul(width - 1)?
+        .checked_add(right_without_diagonal)
+}
+
+#[derive(Debug, Default)]
+struct LazyPairCache {
+    values: HashMap<(usize, usize, usize), Option<RouteLowerBound>>,
+    lookup_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct RouteLowerBound {
+    remaining_swaps: u32,
+    native: NativePlanCost,
+}
+
+#[derive(Debug, Clone)]
+struct TimedNativeLeaf {
+    ordered_qargs: SmallVec<[PhysicalQubit; 2]>,
+    duration: f64,
+}
+
+impl RouteLowerBound {
+    fn with_swap(self, swap: NativePlanCost) -> Self {
+        Self {
+            remaining_swaps: self.remaining_swaps.saturating_add(1),
+            native: swap.combine(self.native),
+        }
+    }
+
+    fn combine(self, other: Self) -> Self {
+        Self {
+            remaining_swaps: self.remaining_swaps.saturating_add(other.remaining_swaps),
+            native: self.native.combine(other.native),
+        }
+    }
+
+    fn compare(self, other: Self) -> Ordering {
+        self.remaining_swaps
+            .cmp(&other.remaining_swaps)
+            .then_with(|| compare_optional_native_cost(Some(self.native), Some(other.native)))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -439,11 +653,31 @@ pub(crate) struct RoutingTarget {
     physical_index: BTreeMap<PhysicalQubit, usize>,
     physical_order_indices: Vec<usize>,
     neighbors_by_index: Vec<Vec<usize>>,
-    adjacent_by_index: Vec<Vec<bool>>,
-    distances: Vec<Vec<Option<f64>>>,
+    interaction_ids: HashMap<InteractionSignature, usize>,
+    requirements: Vec<RequirementTable>,
+    swap_costs: Vec<Vec<Option<NativePlanCost>>>,
+    native_costs: HashMap<DeviceGateState, NativePlanCost>,
+    native_timings: HashMap<DeviceGateState, Option<Vec<TimedNativeLeaf>>>,
+    native_unsupported: HashMap<DeviceGateState, DeviceLoweringFailure>,
+    native_cost_enabled: bool,
+    native_duration_enabled: bool,
+    eager_pair_state_count: usize,
+    lazy_pair_cache: Arc<Mutex<LazyPairCache>>,
     graph: UnGraph<(), ()>,
     graph_index: BTreeMap<PhysicalQubit, NodeIndex>,
     physical_by_index: Vec<PhysicalQubit>,
+}
+
+struct PreparedRoutingParts {
+    movement_edges: Vec<(usize, usize)>,
+    interaction_ids: HashMap<InteractionSignature, usize>,
+    requirements: Vec<RequirementTable>,
+    swap_costs: Vec<Vec<Option<NativePlanCost>>>,
+    native_costs: HashMap<DeviceGateState, NativePlanCost>,
+    native_timings: HashMap<DeviceGateState, Option<Vec<TimedNativeLeaf>>>,
+    native_unsupported: HashMap<DeviceGateState, DeviceLoweringFailure>,
+    native_cost_enabled: bool,
+    native_duration_enabled: bool,
 }
 
 impl RoutingTarget {
@@ -453,6 +687,178 @@ impl RoutingTarget {
     /// Dense indices make layer scoring cheap; semantic ids keep diagnostics
     /// and emitted SWAP operations stable.
     pub(crate) fn from_physical(physical: &PhysicalLayoutGraph) -> Result<Self, CompilerError> {
+        let edges = undirected_topology_edges(physical);
+        let count = physical.physical_qubits().len();
+        let neighbors = adjacency_from_edges(count, &edges);
+        let topology_swap_costs = default_swap_costs(count, &edges);
+        let mut generic_terminals = BTreeMap::new();
+        for &(left, right) in &edges {
+            generic_terminals.insert([left, right], NativePlanCost::default());
+            generic_terminals.insert([right, left], NativePlanCost::default());
+        }
+        let mut pair_state_budget = EAGER_PAIR_STATE_BUDGET;
+        Self::from_prepared_parts(
+            physical,
+            PreparedRoutingParts {
+                movement_edges: edges,
+                interaction_ids: HashMap::from([(InteractionSignature::GenericPair, 0)]),
+                requirements: vec![RequirementTable::Pair {
+                    lower_bounds: eager_pair_route_lower_bounds(
+                        &neighbors,
+                        &generic_terminals,
+                        &topology_swap_costs,
+                        &mut pair_state_budget,
+                    ),
+                    terminals: generic_terminals,
+                }],
+                swap_costs: topology_swap_costs,
+                native_costs: HashMap::new(),
+                native_timings: HashMap::new(),
+                native_unsupported: HashMap::new(),
+                native_cost_enabled: false,
+                native_duration_enabled: false,
+            },
+        )
+    }
+
+    /// Builds a device-aware target whose movement edges are exactly those on
+    /// which the final device lowerer can realize an emitted SWAP.
+    pub(crate) fn from_device(
+        device: &Device,
+        physical: &PhysicalLayoutGraph,
+        sabre: &SabreDag,
+    ) -> Result<Self, CompilerError> {
+        Self::from_device_with_pair_state_budget(device, physical, sabre, EAGER_PAIR_STATE_BUDGET)
+    }
+
+    fn from_device_with_pair_state_budget(
+        device: &Device,
+        physical: &PhysicalLayoutGraph,
+        sabre: &SabreDag,
+        pair_state_budget: usize,
+    ) -> Result<Self, CompilerError> {
+        let topology_edges = undirected_topology_edges(physical);
+        let physical_qubits = physical.physical_qubits();
+        let native_mode = device_declares_routing_capability(device, physical_qubits);
+        let mut pair_state_budget = pair_state_budget;
+        let signatures = ordered_interaction_signatures(sabre)?;
+        let interaction_ids = signatures
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, signature)| (signature, index))
+            .collect::<HashMap<_, _>>();
+
+        if !native_mode {
+            return Self::from_prepared_parts(
+                physical,
+                prepare_topology_only_parts(
+                    physical_qubits.len(),
+                    topology_edges,
+                    interaction_ids,
+                    &signatures,
+                    &mut pair_state_budget,
+                ),
+            );
+        }
+
+        let roots = collect_device_plan_roots(physical_qubits, &topology_edges, &signatures);
+
+        let catalog = NativePlanCatalog::build(device, roots)?;
+        let estimator = CalibrationEstimator::from_device(device, physical_qubits);
+        let native_identity = estimator.identity_cost();
+        let native_costs = catalog
+            .iter()
+            .map(|(state, summary)| (state.clone(), estimator.cost(summary)))
+            .collect();
+        let native_timings = catalog
+            .iter()
+            .map(|(state, summary)| {
+                let leaves = summary
+                    .leaves
+                    .iter()
+                    .map(|leaf| {
+                        Some(TimedNativeLeaf {
+                            ordered_qargs: leaf.ordered_qargs.clone(),
+                            duration: estimator.leaf_duration(leaf)?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>();
+                (state.clone(), leaves)
+            })
+            .collect();
+        let native_unsupported = catalog
+            .iter_availability()
+            .filter_map(|(state, availability)| {
+                let NativePlanAvailability::Unsupported(failure) = availability else {
+                    return None;
+                };
+                Some((state.clone(), failure.clone()))
+            })
+            .collect();
+        let count = physical_qubits.len();
+        let mut movement_edges = Vec::new();
+        let mut swap_costs = vec![vec![None; count]; count];
+        for &(left_index, right_index) in &topology_edges {
+            let state = DeviceGateState::standard(
+                StandardGate::SWAP,
+                smallvec![physical_qubits[left_index], physical_qubits[right_index]],
+            );
+            if let Some(summary) = catalog.summary(&state) {
+                let cost = estimator.cost(summary);
+                movement_edges.push((left_index, right_index));
+                swap_costs[left_index][right_index] = Some(cost);
+                swap_costs[right_index][left_index] = Some(cost);
+            }
+        }
+
+        let neighbors = adjacency_from_edges(count, &movement_edges);
+        let requirements = build_device_requirement_tables(
+            &signatures,
+            DeviceRequirementInputs {
+                physical_qubits,
+                topology_edges: &topology_edges,
+                movement_edges: &movement_edges,
+                neighbors: &neighbors,
+                swap_costs: &swap_costs,
+                catalog: &catalog,
+                estimator: &estimator,
+                native_identity,
+            },
+            &mut pair_state_budget,
+        );
+
+        Self::from_prepared_parts(
+            physical,
+            PreparedRoutingParts {
+                movement_edges,
+                interaction_ids,
+                requirements,
+                swap_costs,
+                native_costs,
+                native_timings,
+                native_unsupported,
+                native_cost_enabled: true,
+                native_duration_enabled: estimator.duration_enabled(),
+            },
+        )
+    }
+
+    fn from_prepared_parts(
+        physical: &PhysicalLayoutGraph,
+        parts: PreparedRoutingParts,
+    ) -> Result<Self, CompilerError> {
+        let PreparedRoutingParts {
+            movement_edges,
+            interaction_ids,
+            requirements,
+            swap_costs,
+            native_costs,
+            native_timings,
+            native_unsupported,
+            native_cost_enabled,
+            native_duration_enabled,
+        } = parts;
         let physical_qubits = physical.physical_qubits().to_vec();
         let physical_set = physical_qubits.iter().copied().collect::<BTreeSet<_>>();
         let mut graph = UnGraph::with_capacity(physical_qubits.len(), 0);
@@ -466,38 +872,34 @@ impl RoutingTarget {
             physical_index.insert(physical, dense_index);
             physical_by_index.push(physical);
         }
-        let mut distances = vec![vec![None; physical_qubits.len()]; physical_qubits.len()];
-        for (index, row) in distances.iter_mut().enumerate() {
-            row[index] = Some(0.0);
-        }
         let mut neighbors_by_index = vec![Vec::new(); physical_qubits.len()];
-        let mut adjacent_by_index = vec![vec![false; physical_qubits.len()]; physical_qubits.len()];
         let mut physical_order_indices = (0..physical_qubits.len()).collect::<Vec<_>>();
         physical_order_indices.sort_unstable_by_key(|index| physical_qubits[*index]);
 
-        for (left_index, left) in physical_qubits.iter().copied().enumerate() {
-            for (right_index, right) in physical_qubits
-                .iter()
-                .copied()
-                .enumerate()
-                .skip(left_index + 1)
-            {
-                if let Some(distance) = physical.distance(left, right) {
-                    distances[left_index][right_index] = Some(f64::from(distance));
-                    distances[right_index][left_index] = Some(f64::from(distance));
-                }
-                if physical.is_adjacent_undirected(left, right) {
-                    neighbors_by_index[left_index].push(right_index);
-                    neighbors_by_index[right_index].push(left_index);
-                    adjacent_by_index[left_index][right_index] = true;
-                    adjacent_by_index[right_index][left_index] = true;
-                    graph.add_edge(graph_index[&left], graph_index[&right], ());
-                }
-            }
+        for (left_index, right_index) in movement_edges {
+            let left = physical_qubits[left_index];
+            let right = physical_qubits[right_index];
+            neighbors_by_index[left_index].push(right_index);
+            neighbors_by_index[right_index].push(left_index);
+            graph.add_edge(graph_index[&left], graph_index[&right], ());
         }
         for items in &mut neighbors_by_index {
             items.sort_unstable_by_key(|index| physical_qubits[*index]);
         }
+
+        let eager_pair_state_count = requirements
+            .iter()
+            .filter_map(|requirement| match requirement {
+                RequirementTable::Pair {
+                    lower_bounds: Some(lower_bounds),
+                    ..
+                } => Some(lower_bounds.state_count()),
+                RequirementTable::Unary { .. }
+                | RequirementTable::Pair {
+                    lower_bounds: None, ..
+                } => None,
+            })
+            .sum();
 
         Ok(Self {
             physical_qubits,
@@ -505,8 +907,16 @@ impl RoutingTarget {
             physical_index,
             physical_order_indices,
             neighbors_by_index,
-            adjacent_by_index,
-            distances,
+            interaction_ids,
+            requirements,
+            swap_costs,
+            native_costs,
+            native_timings,
+            native_unsupported,
+            native_cost_enabled,
+            native_duration_enabled,
+            eager_pair_state_count,
+            lazy_pair_cache: Arc::new(Mutex::new(LazyPairCache::default())),
             graph,
             graph_index,
             physical_by_index,
@@ -530,73 +940,730 @@ impl RoutingTarget {
         })
     }
 
-    fn distance_by_index(
+    fn distance_for(
         &self,
-        left_index: usize,
-        right_index: usize,
+        requirement: usize,
+        placement: RequirementPlacement,
     ) -> Result<f64, CompilerError> {
-        let left = self.physical_at(left_index)?;
-        let right = self.physical_at(right_index)?;
-        self.distances[left_index][right_index].ok_or_else(|| {
-            CompilerError::InvalidInput(format!(
-                "physical qubits {left} and {right} are disconnected in the usable topology"
-            ))
-        })
+        self.distance_steps_for(requirement, placement)
+            .map(|distance| f64::from(distance) + 1.0)
+            .ok_or_else(|| {
+                CompilerError::InvalidInput(format!(
+                    "routing requirement {requirement} at {placement:?} cannot reach an executable terminal using lowerable SWAPs"
+                ))
+            })
     }
 
-    fn are_adjacent(
+    fn terminal_cost_for(
         &self,
-        left: PhysicalQubit,
-        right: PhysicalQubit,
-    ) -> Result<bool, CompilerError> {
-        let left_index = self.physical_index(left)?;
-        let right_index = self.physical_index(right)?;
-        Ok(self.adjacent_by_index[left_index][right_index])
-    }
-
-    fn are_adjacent_by_index(&self, left_index: usize, right_index: usize) -> bool {
-        self.adjacent_by_index[left_index][right_index]
-    }
-
-    fn shortest_path(
-        &self,
-        start: PhysicalQubit,
-        goal: PhysicalQubit,
-    ) -> Option<Vec<PhysicalQubit>> {
-        if start == goal {
-            return Some(vec![start]);
+        requirement: usize,
+        placement: RequirementPlacement,
+    ) -> Option<NativePlanCost> {
+        match (self.requirements.get(requirement)?, placement) {
+            (RequirementTable::Unary { terminals, .. }, RequirementPlacement::Unary(physical)) => {
+                terminals.get(physical).copied().flatten()
+            }
+            (
+                RequirementTable::Pair { terminals, .. },
+                RequirementPlacement::Pair([left, right]),
+            ) => terminals.get(&[left, right]).copied(),
+            _ => None,
         }
+    }
 
-        let start_index = self.physical_index(start).ok()?;
-        let goal_index = self.physical_index(goal).ok()?;
-        let mut queue = VecDeque::new();
-        let mut predecessor = vec![None; self.physical_qubits.len()];
-        let mut seen = vec![false; self.physical_qubits.len()];
-        queue.push_back(start_index);
-        seen[start_index] = true;
+    fn has_terminal(&self, requirement: usize) -> bool {
+        match self.requirements.get(requirement) {
+            Some(RequirementTable::Unary { terminals, .. }) => {
+                terminals.iter().any(Option::is_some)
+            }
+            Some(RequirementTable::Pair { terminals, .. }) => !terminals.is_empty(),
+            None => false,
+        }
+    }
 
-        while let Some(current) = queue.pop_front() {
-            for &neighbor in &self.neighbors_by_index[current] {
-                if seen[neighbor] {
-                    continue;
-                }
-                seen[neighbor] = true;
-                predecessor[neighbor] = Some(current);
-                if neighbor == goal_index {
-                    let mut path = vec![goal];
-                    let mut cursor = goal_index;
-                    while cursor != start_index {
-                        cursor = predecessor[cursor]?;
-                        path.push(self.physical_qubits[cursor]);
-                    }
-                    path.reverse();
-                    return Some(path);
-                }
-                queue.push_back(neighbor);
+    fn distance_steps_for(
+        &self,
+        requirement: usize,
+        placement: RequirementPlacement,
+    ) -> Option<u32> {
+        self.route_lower_bound_for(requirement, placement)
+            .map(|bound| bound.remaining_swaps)
+    }
+
+    fn route_lower_bound_for(
+        &self,
+        requirement: usize,
+        placement: RequirementPlacement,
+    ) -> Option<RouteLowerBound> {
+        match (self.requirements.get(requirement)?, placement) {
+            (
+                RequirementTable::Unary { lower_bounds, .. },
+                RequirementPlacement::Unary(physical),
+            ) => lower_bounds.get(physical).copied().flatten(),
+            (
+                RequirementTable::Pair {
+                    terminals,
+                    lower_bounds,
+                },
+                RequirementPlacement::Pair([left, right]),
+            ) => lower_bounds.as_ref().map_or_else(
+                || self.lazy_pair_route_lower_bound(requirement, terminals, left, right),
+                |bounds| bounds.get(left, right),
+            ),
+            _ => None,
+        }
+    }
+
+    fn lazy_pair_route_lower_bound(
+        &self,
+        requirement: usize,
+        terminals: &BTreeMap<[usize; 2], NativePlanCost>,
+        left: usize,
+        right: usize,
+    ) -> Option<RouteLowerBound> {
+        let key = (requirement, left, right);
+        {
+            let mut cache = self
+                .lazy_pair_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.lookup_count = cache.lookup_count.saturating_add(1);
+            if let Some(value) = cache.values.get(&key) {
+                return *value;
             }
         }
-        None
+
+        let value = pair_route_lower_bound_from_state(
+            &self.neighbors_by_index,
+            terminals,
+            &self.swap_costs,
+            [left, right],
+        );
+        let mut cache = self
+            .lazy_pair_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.values.len() < LAZY_PAIR_CACHE_BUDGET {
+            cache.values.entry(key).or_insert(value);
+        }
+        value
     }
+
+    fn lazy_pair_cache_stats(&self) -> (usize, usize) {
+        let cache = self
+            .lazy_pair_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (cache.lookup_count, cache.values.len())
+    }
+
+    fn interaction_id_for_node(
+        &self,
+        sabre: &SabreDag,
+        node: NodeIndex,
+    ) -> Result<usize, CompilerError> {
+        let signature = interaction_signature(&sabre.graph[node])?;
+        self.interaction_ids
+            .get(&signature)
+            .copied()
+            .or_else(|| {
+                self.interaction_ids
+                    .get(&InteractionSignature::GenericPair)
+                    .copied()
+            })
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "routing target has no generic interaction model".to_string(),
+                )
+            })
+    }
+
+    fn swap_cost(&self, left_index: usize, right_index: usize) -> Option<NativePlanCost> {
+        self.swap_costs
+            .get(left_index)
+            .and_then(|row| row.get(right_index))
+            .copied()
+            .flatten()
+    }
+
+    fn native_cost(&self, state: &DeviceGateState) -> Option<NativePlanCost> {
+        self.native_costs.get(state).copied()
+    }
+
+    fn native_timing(&self, state: &DeviceGateState) -> Option<&Option<Vec<TimedNativeLeaf>>> {
+        self.native_timings.get(state)
+    }
+
+    fn unsupported_native_plan(&self, state: &DeviceGateState) -> Option<&DeviceLoweringFailure> {
+        self.native_unsupported.get(state)
+    }
+}
+
+fn undirected_topology_edges(physical: &PhysicalLayoutGraph) -> Vec<(usize, usize)> {
+    physical.undirected_edges_by_index().collect()
+}
+
+fn device_declares_routing_capability(device: &Device, physical_qubits: &[PhysicalQubit]) -> bool {
+    if !device.native_gates().is_empty() {
+        return true;
+    }
+    if physical_qubits.iter().copied().any(|physical| {
+        device
+            .qubit_properties(physical)
+            .is_some_and(|properties| !properties.native_instructions().is_empty())
+    }) {
+        return true;
+    }
+    let usable = physical_qubits.iter().copied().collect::<BTreeSet<_>>();
+    device.topology().undirected_edges().any(|(left, right)| {
+        usable.contains(&left)
+            && usable.contains(&right)
+            && [
+                device.edge_properties(left, right),
+                device.edge_properties(right, left),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|properties| !properties.native_instructions().is_empty())
+    })
+}
+
+fn interaction_signature(node: &SabreNode) -> Result<InteractionSignature, CompilerError> {
+    let logicals: SmallVec<[LogicalQubit; 2]> = match &node.kind {
+        SabreNodeKind::Unary(logical) => smallvec![*logical],
+        SabreNodeKind::TwoQ(pair) => SmallVec::from_slice(pair),
+        SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => {
+            return Ok(InteractionSignature::GenericPair);
+        }
+    };
+    if node.operations.is_empty() {
+        return Ok(InteractionSignature::GenericPair);
+    }
+
+    let mut operations = Vec::new();
+    for operation in &node.operations {
+        let Some(instruction) = KnowledgeInstructionKey::from_instruction(&operation.instruction)
+        else {
+            match operation.instruction {
+                Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                    return Err(CompilerError::InvalidInput(format!(
+                        "sabre device preparation requires {} to be decomposed before routing",
+                        operation.instruction
+                    )));
+                }
+                _ => continue,
+            }
+        };
+        if matches!(
+            instruction,
+            KnowledgeInstructionKey::Standard(StandardGate::GPhase)
+        ) {
+            continue;
+        }
+        let mut qarg_roles = SmallVec::new();
+        for qubit in &operation.qubits {
+            let logical = LogicalQubit::from_qubit(*qubit);
+            let Some(role) = logicals.iter().position(|candidate| *candidate == logical) else {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "folded SABRE node on {logicals:?} contains operation {} on unrelated logical qubit {logical}",
+                    operation.instruction
+                )));
+            };
+            qarg_roles.push(role as u8);
+        }
+        operations.push(InteractionOperation {
+            instruction,
+            qarg_roles,
+        });
+    }
+    if operations.is_empty() {
+        Ok(InteractionSignature::GenericPair)
+    } else {
+        Ok(match &node.kind {
+            SabreNodeKind::Unary(_) => InteractionSignature::Unary(operations),
+            SabreNodeKind::TwoQ(_) => InteractionSignature::Pair(operations),
+            SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => unreachable!(),
+        })
+    }
+}
+
+fn collect_interaction_signatures(
+    sabre: &SabreDag,
+    output: &mut HashSet<InteractionSignature>,
+) -> Result<(), CompilerError> {
+    for node in sabre.graph.node_weights() {
+        match &node.kind {
+            SabreNodeKind::Unary(_) | SabreNodeKind::TwoQ(_) => {
+                output.insert(interaction_signature(node)?);
+            }
+            SabreNodeKind::ControlFlow(SabreControlFlow::If {
+                then_body,
+                else_body,
+                ..
+            }) => {
+                collect_interaction_signatures(then_body, output)?;
+                if let Some(else_body) = else_body {
+                    collect_interaction_signatures(else_body, output)?;
+                }
+            }
+            SabreNodeKind::ControlFlow(
+                SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
+            ) => collect_interaction_signatures(body, output)?,
+            SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
+                for case in cases {
+                    collect_interaction_signatures(&case.body, output)?;
+                }
+                if let Some(default) = default {
+                    collect_interaction_signatures(default, output)?;
+                }
+            }
+            SabreNodeKind::Synchronize => {}
+        }
+    }
+    Ok(())
+}
+
+fn states_for_requirement(
+    operations: &[InteractionOperation],
+    ordered_qargs: &[PhysicalQubit],
+) -> Vec<DeviceGateState> {
+    operations
+        .iter()
+        .map(|operation| DeviceGateState {
+            instruction: operation.instruction.clone(),
+            ordered_qargs: operation
+                .qarg_roles
+                .iter()
+                .map(|role| ordered_qargs[usize::from(*role)])
+                .collect(),
+        })
+        .collect()
+}
+
+fn combined_catalog_cost(
+    catalog: &NativePlanCatalog,
+    estimator: &CalibrationEstimator,
+    states: Vec<DeviceGateState>,
+) -> Option<NativePlanCost> {
+    let mut cost = None;
+    for state in states {
+        let summary = catalog.summary(&state)?;
+        let next = estimator.cost(summary);
+        cost = Some(cost.map_or(next, |current: NativePlanCost| current.combine(next)));
+    }
+    Some(cost.unwrap_or_default())
+}
+
+fn ordered_interaction_signatures(
+    sabre: &SabreDag,
+) -> Result<Vec<InteractionSignature>, CompilerError> {
+    let mut signatures = HashSet::from([InteractionSignature::GenericPair]);
+    collect_interaction_signatures(sabre, &mut signatures)?;
+    let mut signatures = signatures.into_iter().collect::<Vec<_>>();
+    signatures.sort_by_key(|signature| format!("{signature:?}"));
+    if let Some(position) = signatures
+        .iter()
+        .position(|signature| matches!(signature, InteractionSignature::GenericPair))
+    {
+        signatures.swap(0, position);
+    }
+    Ok(signatures)
+}
+
+fn prepare_topology_only_parts(
+    count: usize,
+    topology_edges: Vec<(usize, usize)>,
+    interaction_ids: HashMap<InteractionSignature, usize>,
+    signatures: &[InteractionSignature],
+    pair_state_budget: &mut usize,
+) -> PreparedRoutingParts {
+    let neighbors = adjacency_from_edges(count, &topology_edges);
+    let topology_swap_costs = default_swap_costs(count, &topology_edges);
+    let requirements = signatures
+        .iter()
+        .map(|signature| match signature {
+            InteractionSignature::Unary(_) => {
+                let terminals = vec![Some(NativePlanCost::default()); count];
+                RequirementTable::Unary {
+                    lower_bounds: unary_route_lower_bounds(
+                        &neighbors,
+                        &terminals,
+                        &topology_swap_costs,
+                    ),
+                    terminals,
+                }
+            }
+            InteractionSignature::GenericPair | InteractionSignature::Pair(_) => {
+                let mut terminals = BTreeMap::new();
+                for &(left, right) in &topology_edges {
+                    terminals.insert([left, right], NativePlanCost::default());
+                    terminals.insert([right, left], NativePlanCost::default());
+                }
+                RequirementTable::Pair {
+                    lower_bounds: eager_pair_route_lower_bounds(
+                        &neighbors,
+                        &terminals,
+                        &topology_swap_costs,
+                        pair_state_budget,
+                    ),
+                    terminals,
+                }
+            }
+        })
+        .collect();
+    PreparedRoutingParts {
+        movement_edges: topology_edges,
+        interaction_ids,
+        requirements,
+        swap_costs: topology_swap_costs,
+        native_costs: HashMap::new(),
+        native_timings: HashMap::new(),
+        native_unsupported: HashMap::new(),
+        native_cost_enabled: false,
+        native_duration_enabled: false,
+    }
+}
+
+fn collect_device_plan_roots(
+    physical_qubits: &[PhysicalQubit],
+    topology_edges: &[(usize, usize)],
+    signatures: &[InteractionSignature],
+) -> Vec<DeviceGateState> {
+    let mut roots = Vec::new();
+    for signature in signatures {
+        if let InteractionSignature::Unary(operations) = signature {
+            for &physical in physical_qubits {
+                roots.extend(states_for_requirement(operations, &[physical]));
+            }
+        }
+    }
+    for &(left_index, right_index) in topology_edges {
+        let left = physical_qubits[left_index];
+        let right = physical_qubits[right_index];
+        for ordered in [[left, right], [right, left]] {
+            roots.push(DeviceGateState::standard(
+                StandardGate::SWAP,
+                SmallVec::from_slice(&ordered),
+            ));
+        }
+        for signature in signatures {
+            let InteractionSignature::Pair(operations) = signature else {
+                continue;
+            };
+            for ordered in [[left, right], [right, left]] {
+                roots.extend(states_for_requirement(operations, &ordered));
+            }
+        }
+    }
+    roots
+}
+
+struct DeviceRequirementInputs<'a> {
+    physical_qubits: &'a [PhysicalQubit],
+    topology_edges: &'a [(usize, usize)],
+    movement_edges: &'a [(usize, usize)],
+    neighbors: &'a [Vec<usize>],
+    swap_costs: &'a [Vec<Option<NativePlanCost>>],
+    catalog: &'a NativePlanCatalog,
+    estimator: &'a CalibrationEstimator,
+    native_identity: NativePlanCost,
+}
+
+fn build_device_requirement_tables(
+    signatures: &[InteractionSignature],
+    inputs: DeviceRequirementInputs<'_>,
+    pair_state_budget: &mut usize,
+) -> Vec<RequirementTable> {
+    let DeviceRequirementInputs {
+        physical_qubits,
+        topology_edges,
+        movement_edges,
+        neighbors,
+        swap_costs,
+        catalog,
+        estimator,
+        native_identity,
+    } = inputs;
+    let count = physical_qubits.len();
+    let mut requirements = Vec::with_capacity(signatures.len());
+    for signature in signatures {
+        match signature {
+            InteractionSignature::GenericPair => {
+                let mut terminals = BTreeMap::new();
+                for &(left, right) in movement_edges {
+                    terminals.insert([left, right], native_identity);
+                    terminals.insert([right, left], native_identity);
+                }
+                requirements.push(RequirementTable::Pair {
+                    lower_bounds: eager_pair_route_lower_bounds(
+                        neighbors,
+                        &terminals,
+                        swap_costs,
+                        pair_state_budget,
+                    ),
+                    terminals,
+                });
+            }
+            InteractionSignature::Unary(operations) => {
+                let mut terminals = vec![None; count];
+                for (physical_index, physical) in physical_qubits.iter().copied().enumerate() {
+                    let states = states_for_requirement(operations, &[physical]);
+                    if let Some(cost) = combined_catalog_cost(catalog, estimator, states) {
+                        terminals[physical_index] = Some(cost);
+                    }
+                }
+                requirements.push(RequirementTable::Unary {
+                    lower_bounds: unary_route_lower_bounds(neighbors, &terminals, swap_costs),
+                    terminals,
+                });
+            }
+            InteractionSignature::Pair(operations) => {
+                let mut terminals = BTreeMap::new();
+                for &(left_index, right_index) in topology_edges {
+                    for (source, target) in [(left_index, right_index), (right_index, left_index)] {
+                        let ordered = [physical_qubits[source], physical_qubits[target]];
+                        let states = states_for_requirement(operations, &ordered);
+                        if let Some(cost) = combined_catalog_cost(catalog, estimator, states) {
+                            terminals.insert([source, target], cost);
+                        }
+                    }
+                }
+                requirements.push(RequirementTable::Pair {
+                    lower_bounds: eager_pair_route_lower_bounds(
+                        neighbors,
+                        &terminals,
+                        swap_costs,
+                        pair_state_budget,
+                    ),
+                    terminals,
+                });
+            }
+        }
+    }
+
+    // Refinement DAGs deliberately use a generic pair signature. It is
+    // terminal wherever at least one exact source interaction is terminal;
+    // final route scoring still checks the exact folded signature.
+    if requirements.len() > 1 {
+        let generic_terminals = requirements[1..]
+            .iter()
+            .filter_map(|requirement| match requirement {
+                RequirementTable::Pair { terminals, .. } => Some(terminals.keys().copied()),
+                RequirementTable::Unary { .. } => None,
+            })
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        if let RequirementTable::Pair {
+            terminals,
+            lower_bounds,
+        } = &mut requirements[0]
+        {
+            terminals.extend(
+                generic_terminals
+                    .into_iter()
+                    .map(|placement| (placement, native_identity)),
+            );
+            if lower_bounds.is_some() {
+                *lower_bounds = Some(pair_route_lower_bounds(neighbors, terminals, swap_costs));
+            }
+        }
+    }
+    requirements
+}
+
+fn adjacency_from_edges(count: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    let mut neighbors = vec![Vec::new(); count];
+    for &(left, right) in edges {
+        neighbors[left].push(right);
+        neighbors[right].push(left);
+    }
+    for adjacent in &mut neighbors {
+        adjacent.sort_unstable();
+        adjacent.dedup();
+    }
+    neighbors
+}
+
+fn default_swap_costs(count: usize, edges: &[(usize, usize)]) -> Vec<Vec<Option<NativePlanCost>>> {
+    let mut costs = vec![vec![None; count]; count];
+    for &(left, right) in edges {
+        costs[left][right] = Some(NativePlanCost::default());
+        costs[right][left] = Some(NativePlanCost::default());
+    }
+    costs
+}
+
+fn unary_route_lower_bounds(
+    swap_neighbors: &[Vec<usize>],
+    terminals: &[Option<NativePlanCost>],
+    swap_costs: &[Vec<Option<NativePlanCost>>],
+) -> Vec<Option<RouteLowerBound>> {
+    let mut bounds = terminals
+        .iter()
+        .map(|terminal| {
+            terminal.map(|native| RouteLowerBound {
+                remaining_swaps: 0,
+                native,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut queue = bounds
+        .iter()
+        .enumerate()
+        .filter_map(|(physical, bound)| bound.map(|_| physical))
+        .collect::<VecDeque<_>>();
+    while let Some(physical) = queue.pop_front() {
+        let current = bounds[physical].expect("queued unary state has a lower bound");
+        for &predecessor in &swap_neighbors[physical] {
+            let Some(swap) = swap_costs[physical][predecessor] else {
+                continue;
+            };
+            let candidate = current.with_swap(swap);
+            if bounds[predecessor].is_none_or(|previous| candidate.compare(previous).is_lt()) {
+                bounds[predecessor] = Some(candidate);
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    bounds
+}
+
+fn pair_route_lower_bounds(
+    swap_neighbors: &[Vec<usize>],
+    terminals: &BTreeMap<[usize; 2], NativePlanCost>,
+    swap_costs: &[Vec<Option<NativePlanCost>>],
+) -> PairStateTable<RouteLowerBound> {
+    let count = swap_neighbors.len();
+    let mut bounds = PairStateTable::new(count);
+    let mut queue = VecDeque::new();
+    for (&[left, right], &native) in terminals {
+        if left == right || left >= count || right >= count {
+            continue;
+        }
+        bounds.set(
+            left,
+            right,
+            RouteLowerBound {
+                remaining_swaps: 0,
+                native,
+            },
+        );
+        queue.push_back((left, right));
+    }
+
+    while let Some((left, right)) = queue.pop_front() {
+        let current = bounds
+            .get(left, right)
+            .expect("queued pair state has a lower bound");
+        for endpoint in [left, right] {
+            for &neighbor in &swap_neighbors[endpoint] {
+                let Some(swap) = swap_costs[endpoint][neighbor] else {
+                    continue;
+                };
+                let RequirementPlacement::Pair([previous_left, previous_right]) =
+                    RequirementPlacement::Pair([left, right]).after_swap([endpoint, neighbor])
+                else {
+                    unreachable!();
+                };
+                let candidate = current.with_swap(swap);
+                if bounds
+                    .get(previous_left, previous_right)
+                    .is_none_or(|bound| candidate.compare(bound).is_lt())
+                {
+                    bounds.set(previous_left, previous_right, candidate);
+                    queue.push_back((previous_left, previous_right));
+                }
+            }
+        }
+    }
+    bounds
+}
+
+fn eager_pair_route_lower_bounds(
+    swap_neighbors: &[Vec<usize>],
+    terminals: &BTreeMap<[usize; 2], NativePlanCost>,
+    swap_costs: &[Vec<Option<NativePlanCost>>],
+    remaining_budget: &mut usize,
+) -> Option<PairStateTable<RouteLowerBound>> {
+    let count = swap_neighbors.len();
+    let states = count.saturating_mul(count.saturating_sub(1));
+    if states > *remaining_budget {
+        return None;
+    }
+    *remaining_budget -= states;
+    Some(pair_route_lower_bounds(
+        swap_neighbors,
+        terminals,
+        swap_costs,
+    ))
+}
+
+fn pair_route_lower_bound_from_state(
+    swap_neighbors: &[Vec<usize>],
+    terminals: &BTreeMap<[usize; 2], NativePlanCost>,
+    swap_costs: &[Vec<Option<NativePlanCost>>],
+    start: [usize; 2],
+) -> Option<RouteLowerBound> {
+    let count = swap_neighbors.len();
+    pair_state_index(count, start[0], start[1])?;
+    let mut frontier = BTreeMap::from([(start, None::<NativePlanCost>)]);
+    let mut visited_depth = BTreeMap::from([(start, 0_u32)]);
+    let mut depth = 0_u32;
+
+    while !frontier.is_empty() {
+        let mut best_terminal = None::<NativePlanCost>;
+        for (placement, path_cost) in &frontier {
+            let Some(&terminal) = terminals.get(placement) else {
+                continue;
+            };
+            let candidate = path_cost.map_or(terminal, |path| path.combine(terminal));
+            if best_terminal.is_none_or(|best| {
+                compare_optional_native_cost(Some(candidate), Some(best)).is_lt()
+            }) {
+                best_terminal = Some(candidate);
+            }
+        }
+        if let Some(native) = best_terminal {
+            return Some(RouteLowerBound {
+                remaining_swaps: depth,
+                native,
+            });
+        }
+
+        let next_depth = depth.saturating_add(1);
+        let mut next = BTreeMap::<[usize; 2], Option<NativePlanCost>>::new();
+        for (&placement, &path_cost) in &frontier {
+            for endpoint in placement {
+                for &neighbor in &swap_neighbors[endpoint] {
+                    let Some(swap) = swap_costs[endpoint][neighbor] else {
+                        continue;
+                    };
+                    let RequirementPlacement::Pair(next_placement) =
+                        RequirementPlacement::Pair(placement).after_swap([endpoint, neighbor])
+                    else {
+                        unreachable!();
+                    };
+                    if visited_depth
+                        .get(&next_placement)
+                        .is_some_and(|visited| *visited < next_depth)
+                    {
+                        continue;
+                    }
+                    visited_depth.entry(next_placement).or_insert(next_depth);
+                    let candidate = Some(path_cost.map_or(swap, |path| path.combine(swap)));
+                    let previous = next.entry(next_placement).or_insert(None);
+                    if previous.is_none()
+                        || compare_optional_native_cost(candidate, *previous).is_lt()
+                    {
+                        *previous = candidate;
+                    }
+                }
+            }
+        }
+        frontier = next;
+        depth = next_depth;
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -662,7 +1729,7 @@ impl RoutingState {
             target.physical_index(swap[0])?,
             target.physical_index(swap[1])?,
         ];
-        let distance = |left, right| target.distance_by_index(left, right);
+        let distance = |requirement, placement| target.distance_for(requirement, placement);
         self.front_layer.apply_swap(swap_indices, &distance)?;
         for layer in &mut self.lookahead_layers {
             layer.apply_swap(swap_indices, &distance)?;
@@ -691,6 +1758,24 @@ impl RoutingState {
         while let Some(node_id) = to_visit.pop_front() {
             let node = &sabre.graph[node_id];
             match &node.kind {
+                SabreNodeKind::Unary(logical) => {
+                    let physical = physical_for(&self.layout, *logical)?;
+                    let requirement = target.interaction_id_for_node(sabre, node_id)?;
+                    let placement = RequirementPlacement::Unary(target.physical_index(physical)?);
+                    if target.terminal_cost_for(requirement, placement).is_none() {
+                        let distance =
+                            |requirement, placement| target.distance_for(requirement, placement);
+                        self.front_layer
+                            .insert(node_id, requirement, placement, &distance)?;
+                        continue;
+                    }
+                    output.apply_pending_swaps(pending_swaps.take());
+                    for operation in &node.operations {
+                        output
+                            .operations
+                            .push(map_operation(operation, &self.layout)?);
+                    }
+                }
                 SabreNodeKind::TwoQ(pair) => {
                     // A two-qubit node that is still non-adjacent becomes part
                     // of the front layer. Adjacent nodes flush any pending
@@ -699,14 +1784,24 @@ impl RoutingState {
                         physical_for(&self.layout, pair[0])?,
                         physical_for(&self.layout, pair[1])?,
                     ];
-                    if !target.are_adjacent(physical[0], physical[1])? {
-                        let distance = |left, right| target.distance_by_index(left, right);
+                    let interaction = target.interaction_id_for_node(sabre, node_id)?;
+                    let physical_indices = [
+                        target.physical_index(physical[0])?,
+                        target.physical_index(physical[1])?,
+                    ];
+                    if target
+                        .terminal_cost_for(
+                            interaction,
+                            RequirementPlacement::Pair(physical_indices),
+                        )
+                        .is_none()
+                    {
+                        let distance =
+                            |requirement, placement| target.distance_for(requirement, placement);
                         self.front_layer.insert(
                             node_id,
-                            [
-                                target.physical_index(physical[0])?,
-                                target.physical_index(physical[1])?,
-                            ],
+                            interaction,
+                            RequirementPlacement::Pair(physical_indices),
                             &distance,
                         )?;
                         continue;
@@ -955,15 +2050,37 @@ impl RoutingState {
             while index < to_visit.len() {
                 let node = to_visit[index];
                 match &sabre.graph[node].kind {
+                    SabreNodeKind::Unary(logical) => {
+                        if let Ok(physical) = physical_for(&self.layout, *logical) {
+                            let requirement = target.interaction_id_for_node(sabre, node)?;
+                            let distance = |requirement, placement| {
+                                target.distance_for(requirement, placement)
+                            };
+                            layer.insert(
+                                node,
+                                requirement,
+                                RequirementPlacement::Unary(target.physical_index(physical)?),
+                                &distance,
+                            )?;
+                            next_visit.push(node);
+                        }
+                    }
                     SabreNodeKind::TwoQ(pair) => {
                         if let (Ok(left), Ok(right)) = (
                             physical_for(&self.layout, pair[0]),
                             physical_for(&self.layout, pair[1]),
                         ) {
-                            let distance = |left, right| target.distance_by_index(left, right);
+                            let interaction = target.interaction_id_for_node(sabre, node)?;
+                            let distance = |requirement, placement| {
+                                target.distance_for(requirement, placement)
+                            };
                             layer.insert(
                                 node,
-                                [target.physical_index(left)?, target.physical_index(right)?],
+                                interaction,
+                                RequirementPlacement::Pair([
+                                    target.physical_index(left)?,
+                                    target.physical_index(right)?,
+                                ]),
                                 &distance,
                             )?;
                             next_visit.push(node);
@@ -1000,6 +2117,7 @@ impl RoutingState {
         &mut self,
         target: &RoutingTarget,
         heuristic: &SabreHeuristicConfig,
+        previous_swap: Option<[PhysicalQubit; 2]>,
     ) -> Result<SwapChoice, CompilerError> {
         if self.front_layer.is_empty() {
             return Err(CompilerError::InvariantViolation(
@@ -1029,6 +2147,11 @@ impl RoutingState {
         }
         candidates.sort_unstable_by_key(|candidate| candidate.physical);
         candidates.dedup_by(|left, right| left.physical == right.physical);
+        if candidates.len() > 1
+            && let Some(previous_swap) = previous_swap
+        {
+            candidates.retain(|candidate| candidate.physical != previous_swap);
+        }
         if candidates.is_empty() {
             return Err(CompilerError::TransformFailed {
                 name: "sabre_route",
@@ -1036,11 +2159,11 @@ impl RoutingState {
             });
         }
 
-        // SABRE score = weighted per-layer mean distance, with optional
-        // multiplicative decay on recently swapped physical qubits.
-        let distance = |left, right| target.distance_by_index(left, right);
+        // Select topology-tied candidates, then prefer the cheapest exact
+        // native route cost.
+        let distance = |requirement, placement| target.distance_for(requirement, placement);
         let mut best_score = f64::INFINITY;
-        let mut best_swaps = Vec::new();
+        let mut scored = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let decay = if heuristic.decay_increment.is_some() {
                 self.decay[candidate.indices[0]].max(self.decay[candidate.indices[1]])
@@ -1054,20 +2177,59 @@ impl RoutingState {
                 candidate.indices,
                 &distance,
                 decay,
+                target.physical_qubits.len(),
             )?;
 
-            if score - best_score < -heuristic.best_epsilon {
-                best_score = score;
-                best_swaps.clear();
-                best_swaps.push(candidate);
-            } else if (score - best_score).abs() <= heuristic.best_epsilon {
-                best_swaps.push(candidate);
+            best_score = best_score.min(score);
+            scored.push((candidate, score));
+        }
+
+        let has_native_cost = target.native_cost_enabled
+            && scored
+                .iter()
+                .any(|(candidate, _)| self.route_cost_after_swap(target, *candidate).is_some());
+        let mut eligible = scored
+            .into_iter()
+            .filter(|(_, score)| *score <= best_score + heuristic.best_epsilon)
+            .map(|(candidate, _)| candidate)
+            .collect::<Vec<_>>();
+        if has_native_cost {
+            eligible.sort_by(|left, right| {
+                compare_optional_route_bound(
+                    self.route_cost_after_swap(target, *left),
+                    self.route_cost_after_swap(target, *right),
+                )
+                .then_with(|| left.physical.cmp(&right.physical))
+            });
+            if let Some(best) = eligible.first().copied() {
+                let best_cost = self.route_cost_after_swap(target, best);
+                eligible.retain(|candidate| {
+                    compare_optional_route_bound(
+                        self.route_cost_after_swap(target, *candidate),
+                        best_cost,
+                    ) == Ordering::Equal
+                });
             }
         }
 
-        best_swaps.choose(&mut self.rng).copied().ok_or_else(|| {
+        eligible.choose(&mut self.rng).copied().ok_or_else(|| {
             CompilerError::InvariantViolation("sabre found no best SWAP".to_string())
         })
+    }
+
+    fn route_cost_after_swap(
+        &self,
+        target: &RoutingTarget,
+        candidate: SwapChoice,
+    ) -> Option<RouteLowerBound> {
+        let mut cost = RouteLowerBound {
+            remaining_swaps: 1,
+            native: target.swap_cost(candidate.indices[0], candidate.indices[1])?,
+        };
+        for (requirement, placement) in self.front_layer.placements_after_swap(candidate.indices) {
+            cost = cost.combine(target.route_lower_bound_for(requirement, placement)?);
+        }
+        Some(cost)
     }
 
     fn force_enable_closest_node(
@@ -1075,70 +2237,136 @@ impl RoutingState {
         target: &RoutingTarget,
         current_swaps: &mut Vec<[PhysicalQubit; 2]>,
     ) -> Result<Vec<NodeIndex>, CompilerError> {
-        // Fallback guarantees progress when the heuristic is stuck: choose the
-        // closest front-layer interaction and walk one endpoint along a shortest
-        // path until that interaction becomes adjacent.
-        let (closest_node, qubits) = self
+        // Fallback follows the exact unary/pair state lower bound. Each step is
+        // a lowerable SWAP and strictly reduces the remaining distance.
+        let (closest_node, requirement, mut placement) = self
             .front_layer
             .iter()
-            .min_by(|(_, a), (_, b)| {
-                target
-                    .distance_by_index(a[0], a[1])
-                    .and_then(|ad| {
-                        target
-                            .distance_by_index(b[0], b[1])
-                            .map(|bd| ad.total_cmp(&bd))
-                    })
-                    .unwrap_or(Ordering::Equal)
-            })
+            .min_by(
+                |(_, left_interaction, left), (_, right_interaction, right)| {
+                    target
+                        .distance_steps_for(*left_interaction, *left)
+                        .unwrap_or(u32::MAX)
+                        .cmp(
+                            &target
+                                .distance_steps_for(*right_interaction, *right)
+                                .unwrap_or(u32::MAX),
+                        )
+                },
+            )
             .ok_or_else(|| {
                 CompilerError::InvariantViolation(
                     "sabre fallback called with an empty front layer".to_string(),
                 )
             })?;
-        let path_start = target.physical_at(qubits[0])?;
-        let path_goal = target.physical_at(qubits[1])?;
-        let path = target.shortest_path(path_start, path_goal).ok_or_else(|| {
-            CompilerError::InvalidInput(format!(
-                "physical qubits {path_start} and {path_goal} are disconnected in the usable topology"
-            ))
-        })?;
-        if path.len() < 3 {
-            return Ok(vec![closest_node]);
-        }
-        for window in path.windows(2).take(path.len() - 2) {
-            let swap = [window[0], window[1]];
-            self.apply_swap(swap, target)?;
-            current_swaps.push(swap);
-        }
-
-        let mut routed = Vec::new();
-        if self.front_layer.iter().any(|(node, current)| {
-            node == closest_node && target.are_adjacent_by_index(current[0], current[1])
-        }) {
-            routed.push(closest_node);
-        }
-
-        let adjacent = |left, right| target.are_adjacent_by_index(left, right);
-        for swap in current_swaps.iter().copied() {
-            let swap_indices = [
-                target.physical_index(swap[0])?,
-                target.physical_index(swap[1])?,
-            ];
-            for candidate in swap_indices
-                .into_iter()
-                .filter_map(|index| self.front_layer.routable_node_on_index(index, &adjacent))
-            {
-                if !routed.contains(&candidate) {
-                    routed.push(candidate);
+        while let Some(distance) = target.distance_steps_for(requirement, placement) {
+            if distance == 0 {
+                break;
+            }
+            let mut improving = Vec::new();
+            let endpoints: SmallVec<[usize; 2]> = match placement {
+                RequirementPlacement::Unary(physical) => smallvec![physical],
+                RequirementPlacement::Pair(pair) => SmallVec::from_slice(&pair),
+            };
+            for endpoint in endpoints {
+                for &neighbor in &target.neighbors_by_index[endpoint] {
+                    let swap = [endpoint, neighbor];
+                    let next = placement.after_swap(swap);
+                    if target.distance_steps_for(requirement, next) == Some(distance - 1) {
+                        improving.push((swap, next));
+                    }
                 }
             }
+            improving.sort_by(|(left_swap, _), (right_swap, _)| {
+                compare_optional_native_cost(
+                    target.swap_cost(left_swap[0], left_swap[1]),
+                    target.swap_cost(right_swap[0], right_swap[1]),
+                )
+                .then_with(|| {
+                    let left = [
+                        target.physical_qubits[left_swap[0]],
+                        target.physical_qubits[left_swap[1]],
+                    ];
+                    let right = [
+                        target.physical_qubits[right_swap[0]],
+                        target.physical_qubits[right_swap[1]],
+                    ];
+                    left.cmp(&right)
+                })
+            });
+            let Some((swap_indices, next)) = improving.into_iter().next() else {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "routing-state distance {distance} has no improving lowerable SWAP"
+                )));
+            };
+            let swap = [
+                target.physical_at(swap_indices[0])?,
+                target.physical_at(swap_indices[1])?,
+            ];
+            self.apply_swap(swap, target)?;
+            current_swaps.push(swap);
+            placement = next;
         }
 
-        if routed.is_empty() {
-            routed.push(closest_node);
+        let routed = self
+            .front_layer
+            .iter()
+            .filter_map(|(node, requirement, placement)| {
+                target
+                    .terminal_cost_for(requirement, placement)
+                    .is_some()
+                    .then_some(node)
+            })
+            .collect::<Vec<_>>();
+        if !routed.contains(&closest_node) {
+            return Err(CompilerError::InvariantViolation(
+                "routing-state fallback did not enable its selected node".to_string(),
+            ));
         }
         Ok(routed)
+    }
+}
+
+fn mapping_signature(layout: &Layout, target: &RoutingTarget) -> Vec<Option<LogicalQubit>> {
+    target
+        .physical_qubits
+        .iter()
+        .map(|physical| layout.get_logical(*physical))
+        .collect()
+}
+
+fn compare_optional_native_cost(
+    left: Option<NativePlanCost>,
+    right: Option<NativePlanCost>,
+) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left
+            .native_two_qubit_ops
+            .cmp(&right.native_two_qubit_ops)
+            .then_with(|| match (left.error, right.error) {
+                (Some(left), Some(right)) => left.compare(right),
+                _ => Ordering::Equal,
+            })
+            .then_with(|| match (left.duration, right.duration) {
+                (Some(left), Some(right)) => left.compare(right),
+                _ => Ordering::Equal,
+            })
+            .then_with(|| left.native_total_ops.cmp(&right.native_total_ops)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_optional_route_bound(
+    left: Option<RouteLowerBound>,
+    right: Option<RouteLowerBound>,
+) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.compare(right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
 }
 
@@ -1147,17 +2375,19 @@ fn heuristic_score_after_swap(
     lookahead_layers: &[Layer],
     heuristic: &SabreHeuristicConfig,
     swap: [usize; 2],
-    distances: &impl Fn(usize, usize) -> Result<f64, CompilerError>,
+    distances: &impl Fn(usize, RequirementPlacement) -> Result<f64, CompilerError>,
     decay: f64,
+    device_width: usize,
 ) -> Result<f64, CompilerError> {
-    let mut score = heuristic.basic_weight * front_layer.mean_score_after_swap(swap, distances)?;
+    let mut score = heuristic.basic_weight * front_layer.total_score_after_swap(swap, distances)?;
+    let lookahead_scale = device_width.max(1) as f64;
     for (layer, weight) in lookahead_layers
         .iter()
         .zip(heuristic.lookahead_weights.iter().copied())
     {
-        score += weight * layer.mean_score_after_swap(swap, distances)?;
+        score += weight * layer.total_score_after_swap(swap, distances)? / lookahead_scale;
     }
-    Ok(score * decay)
+    Ok(score + (decay - 1.0).max(0.0))
 }
 
 #[derive(Debug, Default)]
@@ -1236,7 +2466,7 @@ fn route_control_flow_body(
     result.operations.extend(control_transfer);
     result.swap_count += epilogue_swaps.len();
     result.final_layout = layout;
-    result.quality = trial_quality(&result.operations, result.swap_count);
+    result.quality = trial_quality(&result.operations, result.swap_count, target)?;
     if result.final_layout.l2p_map() != entry_layout.l2p_map() {
         return Err(CompilerError::InvariantViolation(
             "sabre control-flow epilogue did not restore the entry layout".to_string(),
@@ -1419,6 +2649,360 @@ fn physical_for(layout: &Layout, logical: LogicalQubit) -> Result<PhysicalQubit,
     })
 }
 
+/// One exact movement-component assignment for all logical qubits.
+#[derive(Debug, Clone)]
+pub(crate) struct MovementComponentAssignment {
+    pub(crate) components: Vec<Vec<PhysicalQubit>>,
+    /// Component index in the same order as the requested logical-qubit list.
+    pub(crate) logical_components: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ComponentAssignmentSearch {
+    Found(MovementComponentAssignment),
+    ProvenInfeasible,
+    BudgetExhausted { expansions: usize },
+}
+
+#[derive(Debug)]
+struct PairComponentConstraint {
+    left: usize,
+    right: usize,
+    allowed: BTreeSet<(usize, usize)>,
+}
+
+/// Solves the exact component-level placement constraints induced by unary and
+/// ordered-pair requirements. The search is exhaustive: `None` means the
+/// component model proved infeasible, never that a search budget expired.
+pub(crate) fn movement_component_assignment(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    logical_qubits: &[LogicalQubit],
+    expansion_budget: usize,
+) -> Result<ComponentAssignmentSearch, CompilerError> {
+    let component_indices = target.movement_component_indices();
+    let components = component_indices
+        .iter()
+        .map(|component| {
+            component
+                .iter()
+                .map(|index| target.physical_qubits[*index])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let logical_index = logical_qubits
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, logical)| (logical, index))
+        .collect::<BTreeMap<_, _>>();
+    let all_components = (0..components.len()).collect::<BTreeSet<_>>();
+    let mut domains = vec![all_components; logical_qubits.len()];
+    let mut pair_constraints = Vec::new();
+    collect_component_constraints(
+        sabre,
+        target,
+        &component_indices,
+        &logical_index,
+        &mut domains,
+        &mut pair_constraints,
+    )?;
+    if domains.iter().any(BTreeSet::is_empty) {
+        return Ok(ComponentAssignmentSearch::ProvenInfeasible);
+    }
+
+    let capacities = components.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut remaining = capacities;
+    let mut assignment = vec![None; logical_qubits.len()];
+    let mut budget = expansion_budget;
+    let result = assign_logical_components(
+        &domains,
+        &pair_constraints,
+        &mut remaining,
+        &mut assignment,
+        &mut budget,
+    );
+    match result {
+        ComponentSearchProgress::Found => Ok(ComponentAssignmentSearch::Found(
+            MovementComponentAssignment {
+                components,
+                logical_components: assignment
+                    .into_iter()
+                    .map(|component| component.expect("successful assignment is complete"))
+                    .collect(),
+            },
+        )),
+        ComponentSearchProgress::ProvenInfeasible => {
+            Ok(ComponentAssignmentSearch::ProvenInfeasible)
+        }
+        ComponentSearchProgress::BudgetExhausted => {
+            Ok(ComponentAssignmentSearch::BudgetExhausted {
+                expansions: expansion_budget - budget,
+            })
+        }
+    }
+}
+
+impl RoutingTarget {
+    fn movement_component_indices(&self) -> Vec<Vec<usize>> {
+        let mut unseen = (0..self.physical_qubits.len()).collect::<BTreeSet<_>>();
+        let mut components = Vec::new();
+        while let Some(start) = unseen.pop_first() {
+            let mut queue = VecDeque::from([start]);
+            let mut component = Vec::new();
+            while let Some(physical) = queue.pop_front() {
+                component.push(physical);
+                for &neighbor in &self.neighbors_by_index[physical] {
+                    if unseen.remove(&neighbor) {
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            component.sort_unstable_by_key(|index| self.physical_qubits[*index]);
+            components.push(component);
+        }
+        components.sort_unstable_by_key(|component| self.physical_qubits[component[0]]);
+        components
+    }
+}
+
+fn collect_component_constraints(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    components: &[Vec<usize>],
+    logical_index: &BTreeMap<LogicalQubit, usize>,
+    domains: &mut [BTreeSet<usize>],
+    pairs: &mut Vec<PairComponentConstraint>,
+) -> Result<(), CompilerError> {
+    for node_index in sabre.graph.node_indices() {
+        let node = &sabre.graph[node_index];
+        match &node.kind {
+            SabreNodeKind::Unary(logical) => {
+                let index = *logical_index.get(logical).ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "unary component constraint references unknown logical qubit {logical}"
+                    ))
+                })?;
+                let requirement = target.interaction_id_for_node(sabre, node_index)?;
+                domains[index].retain(|component| {
+                    components[*component].iter().any(|physical| {
+                        target
+                            .route_lower_bound_for(
+                                requirement,
+                                RequirementPlacement::Unary(*physical),
+                            )
+                            .is_some()
+                    })
+                });
+            }
+            SabreNodeKind::TwoQ(logicals) => {
+                let left = *logical_index.get(&logicals[0]).ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "pair component constraint references unknown logical qubit {}",
+                        logicals[0]
+                    ))
+                })?;
+                let right = *logical_index.get(&logicals[1]).ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "pair component constraint references unknown logical qubit {}",
+                        logicals[1]
+                    ))
+                })?;
+                let requirement = target.interaction_id_for_node(sabre, node_index)?;
+                let mut allowed = BTreeSet::new();
+                for (left_component, left_physical) in components.iter().enumerate() {
+                    for (right_component, right_physical) in components.iter().enumerate() {
+                        if left_physical.iter().any(|left| {
+                            right_physical.iter().any(|right| {
+                                left != right
+                                    && target
+                                        .route_lower_bound_for(
+                                            requirement,
+                                            RequirementPlacement::Pair([*left, *right]),
+                                        )
+                                        .is_some()
+                            })
+                        }) {
+                            allowed.insert((left_component, right_component));
+                        }
+                    }
+                }
+                if allowed.is_empty() {
+                    domains[left].clear();
+                    domains[right].clear();
+                } else {
+                    domains[left].retain(|component| {
+                        allowed.iter().any(|(allowed, _)| allowed == component)
+                    });
+                    domains[right].retain(|component| {
+                        allowed.iter().any(|(_, allowed)| allowed == component)
+                    });
+                    pairs.push(PairComponentConstraint {
+                        left,
+                        right,
+                        allowed,
+                    });
+                }
+            }
+            SabreNodeKind::ControlFlow(SabreControlFlow::If {
+                then_body,
+                else_body,
+                ..
+            }) => {
+                collect_component_constraints(
+                    then_body,
+                    target,
+                    components,
+                    logical_index,
+                    domains,
+                    pairs,
+                )?;
+                if let Some(else_body) = else_body {
+                    collect_component_constraints(
+                        else_body,
+                        target,
+                        components,
+                        logical_index,
+                        domains,
+                        pairs,
+                    )?;
+                }
+            }
+            SabreNodeKind::ControlFlow(
+                SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
+            ) => collect_component_constraints(
+                body,
+                target,
+                components,
+                logical_index,
+                domains,
+                pairs,
+            )?,
+            SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
+                for case in cases {
+                    collect_component_constraints(
+                        &case.body,
+                        target,
+                        components,
+                        logical_index,
+                        domains,
+                        pairs,
+                    )?;
+                }
+                if let Some(default) = default {
+                    collect_component_constraints(
+                        default,
+                        target,
+                        components,
+                        logical_index,
+                        domains,
+                        pairs,
+                    )?;
+                }
+            }
+            SabreNodeKind::Synchronize => {}
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentSearchProgress {
+    Found,
+    ProvenInfeasible,
+    BudgetExhausted,
+}
+
+fn assign_logical_components(
+    domains: &[BTreeSet<usize>],
+    constraints: &[PairComponentConstraint],
+    remaining: &mut [usize],
+    assignment: &mut [Option<usize>],
+    budget: &mut usize,
+) -> ComponentSearchProgress {
+    if assignment.iter().all(Option::is_some) {
+        return ComponentSearchProgress::Found;
+    }
+    let Some((logical, candidates)) = assignment
+        .iter()
+        .enumerate()
+        .filter(|(_, assigned)| assigned.is_none())
+        .map(|(logical, _)| {
+            let candidates = domains[logical]
+                .iter()
+                .copied()
+                .filter(|component| remaining[*component] > 0)
+                .filter(|component| {
+                    component_assignment_is_consistent(logical, *component, constraints, assignment)
+                })
+                .collect::<Vec<_>>();
+            (logical, candidates)
+        })
+        .min_by_key(|(logical, candidates)| (candidates.len(), *logical))
+    else {
+        return ComponentSearchProgress::ProvenInfeasible;
+    };
+    if candidates.is_empty() {
+        return ComponentSearchProgress::ProvenInfeasible;
+    }
+    for component in candidates {
+        if *budget == 0 {
+            return ComponentSearchProgress::BudgetExhausted;
+        }
+        *budget -= 1;
+        assignment[logical] = Some(component);
+        remaining[component] -= 1;
+        let forward_consistent = assignment
+            .iter()
+            .enumerate()
+            .filter(|(_, assigned)| assigned.is_none())
+            .all(|(unassigned, _)| {
+                domains[unassigned].iter().copied().any(|candidate| {
+                    remaining[candidate] > 0
+                        && component_assignment_is_consistent(
+                            unassigned,
+                            candidate,
+                            constraints,
+                            assignment,
+                        )
+                })
+            });
+        if forward_consistent {
+            match assign_logical_components(domains, constraints, remaining, assignment, budget) {
+                ComponentSearchProgress::Found => return ComponentSearchProgress::Found,
+                ComponentSearchProgress::BudgetExhausted => {
+                    remaining[component] += 1;
+                    assignment[logical] = None;
+                    return ComponentSearchProgress::BudgetExhausted;
+                }
+                ComponentSearchProgress::ProvenInfeasible => {}
+            }
+        }
+        remaining[component] += 1;
+        assignment[logical] = None;
+    }
+    ComponentSearchProgress::ProvenInfeasible
+}
+
+fn component_assignment_is_consistent(
+    logical: usize,
+    component: usize,
+    constraints: &[PairComponentConstraint],
+    assignment: &[Option<usize>],
+) -> bool {
+    constraints.iter().all(|constraint| {
+        if constraint.left == logical {
+            assignment[constraint.right]
+                .is_none_or(|right| constraint.allowed.contains(&(component, right)))
+        } else if constraint.right == logical {
+            assignment[constraint.left]
+                .is_none_or(|left| constraint.allowed.contains(&(left, component)))
+        } else {
+            true
+        }
+    })
+}
+
 /// Validates that every interaction in a SABRE DAG is physically reachable.
 ///
 /// Reachability is recursive because control-flow bodies are routed with the
@@ -1430,22 +3014,56 @@ pub(crate) fn validate_reachable_interactions_for_target(
 ) -> Result<(), CompilerError> {
     match interaction_reachability_for_target(sabre, target, layout)? {
         InteractionReachability::Reachable => Ok(()),
-        InteractionReachability::Unreachable { logical, physical } => {
-            Err(CompilerError::InvalidInput(format!(
-                "logical interaction {}-{} maps to disconnected physical qubits {} and {} in the usable topology",
-                logical[0], logical[1], physical[0], physical[1]
-            )))
-        }
+        InteractionReachability::UnreachableUnary {
+            logical,
+            physical: _,
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutableUnaryTerminal { logical },
+        )),
+        InteractionReachability::UnreachableUnary {
+            logical,
+            physical,
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachableUnaryPlacement { logical, physical },
+        )),
+        InteractionReachability::UnreachablePair {
+            logical,
+            physical: _,
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutablePairTerminal { logical },
+        )),
+        InteractionReachability::UnreachablePair {
+            logical,
+            physical,
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachablePairPlacement { logical, physical },
+        )),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InteractionReachability {
     Reachable,
-    Unreachable {
+    UnreachableUnary {
+        logical: LogicalQubit,
+        physical: PhysicalQubit,
+        cause: RequirementReachabilityFailure,
+    },
+    UnreachablePair {
         logical: [LogicalQubit; 2],
         physical: [PhysicalQubit; 2],
+        cause: RequirementReachabilityFailure,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequirementReachabilityFailure {
+    NoExecutableTerminal,
+    MovementDisconnected,
 }
 
 pub(crate) fn interaction_reachability_for_target(
@@ -1453,17 +3071,49 @@ pub(crate) fn interaction_reachability_for_target(
     target: &RoutingTarget,
     layout: &Layout,
 ) -> Result<InteractionReachability, CompilerError> {
-    for node in sabre.graph.node_weights() {
+    for node_index in sabre.graph.node_indices() {
+        let node = &sabre.graph[node_index];
         match &node.kind {
+            SabreNodeKind::Unary(logical) => {
+                let physical = physical_for(layout, *logical)?;
+                let physical_index = target.physical_index(physical)?;
+                let requirement = target.interaction_id_for_node(sabre, node_index)?;
+                if target
+                    .distance_steps_for(requirement, RequirementPlacement::Unary(physical_index))
+                    .is_none()
+                {
+                    return Ok(InteractionReachability::UnreachableUnary {
+                        logical: *logical,
+                        physical,
+                        cause: if target.has_terminal(requirement) {
+                            RequirementReachabilityFailure::MovementDisconnected
+                        } else {
+                            RequirementReachabilityFailure::NoExecutableTerminal
+                        },
+                    });
+                }
+            }
             SabreNodeKind::TwoQ(pair) => {
                 let left = physical_for(layout, pair[0])?;
                 let right = physical_for(layout, pair[1])?;
                 let left_index = target.physical_index(left)?;
                 let right_index = target.physical_index(right)?;
-                if target.distances[left_index][right_index].is_none() {
-                    return Ok(InteractionReachability::Unreachable {
+                let interaction = target.interaction_id_for_node(sabre, node_index)?;
+                if target
+                    .distance_steps_for(
+                        interaction,
+                        RequirementPlacement::Pair([left_index, right_index]),
+                    )
+                    .is_none()
+                {
+                    return Ok(InteractionReachability::UnreachablePair {
                         logical: *pair,
                         physical: [left, right],
+                        cause: if target.has_terminal(interaction) {
+                            RequirementReachabilityFailure::MovementDisconnected
+                        } else {
+                            RequirementReachabilityFailure::NoExecutableTerminal
+                        },
                     });
                 }
             }
@@ -1537,9 +3187,22 @@ pub(crate) fn compare_trial_quality(
             .two_qubit_depth
             .cmp(&right.two_qubit_depth)
             .then_with(|| left_index.cmp(&right_index)),
-        SabreTrialObjective::SwapThenDepth => left
-            .swap_count
-            .cmp(&right.swap_count)
+        SabreTrialObjective::NativeQualityWithinSwapBudget => left
+            .native_two_qubit_ops
+            .cmp(&right.native_two_qubit_ops)
+            .then_with(|| {
+                left.native_two_qubit_depth
+                    .cmp(&right.native_two_qubit_depth)
+            })
+            .then_with(|| match (left.error, right.error) {
+                (Some(left), Some(right)) => left.compare(right),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            })
+            .then_with(|| compare_trial_duration(left, right))
+            .then_with(|| left.native_total_ops.cmp(&right.native_total_ops))
+            .then_with(|| left.swap_count.cmp(&right.swap_count))
             .then_with(|| left.two_qubit_depth.cmp(&right.two_qubit_depth))
             .then_with(|| left.operation_count.cmp(&right.operation_count))
             .then_with(|| left_index.cmp(&right_index)),
@@ -1552,12 +3215,615 @@ pub(crate) fn compare_trial_quality(
     }
 }
 
-fn trial_quality(operations: &[Operation], swap_count: usize) -> TrialQuality {
-    TrialQuality {
-        swap_count,
-        two_qubit_depth: two_qubit_depth(operations),
-        operation_count: operation_count(operations),
+fn compare_trial_duration(left: TrialQuality, right: TrialQuality) -> Ordering {
+    match (left.duration, right.duration) {
+        (Some(left_duration), Some(right_duration)) => left_duration
+            .unavailable_count
+            .cmp(&right_duration.unavailable_count)
+            .then_with(|| {
+                left_duration
+                    .imputed_count
+                    .cmp(&right_duration.imputed_count)
+            })
+            .then_with(|| match (left.makespan, right.makespan) {
+                (Some(left), Some(right)) => left.total_cmp(&right),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            })
+            .then_with(|| {
+                left_duration
+                    .duration_work
+                    .total_cmp(&right_duration.duration_work)
+            }),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
+}
+
+pub(crate) fn trial_swap_limit(
+    objective: SabreTrialObjective,
+    swap_regret_ratio: f64,
+    qualities: impl Iterator<Item = TrialQuality>,
+) -> usize {
+    if objective != SabreTrialObjective::NativeQualityWithinSwapBudget {
+        return usize::MAX;
+    }
+    let best = qualities
+        .map(|quality| quality.swap_count)
+        .min()
+        .unwrap_or(0);
+    let regret = ((best as f64) * swap_regret_ratio).ceil();
+    let regret = if regret >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        regret as usize
+    };
+    best.saturating_add(regret)
+}
+
+fn trial_quality(
+    operations: &[Operation],
+    swap_count: usize,
+    target: &RoutingTarget,
+) -> Result<TrialQuality, CompilerError> {
+    let abstract_two_qubit_depth = two_qubit_depth(operations);
+    let abstract_operation_count = operation_count(operations);
+    if !target.native_cost_enabled {
+        return Ok(TrialQuality {
+            swap_count,
+            two_qubit_depth: abstract_two_qubit_depth,
+            operation_count: abstract_operation_count,
+            native_two_qubit_ops: two_qubit_operation_count(operations),
+            native_two_qubit_depth: abstract_two_qubit_depth,
+            native_total_ops: abstract_operation_count,
+            error: None,
+            duration: None,
+            makespan: None,
+            unknown_loop_count: 0,
+        });
+    }
+
+    let native = native_plan_cost_for_operations(operations, target)?;
+    Ok(TrialQuality {
+        swap_count,
+        two_qubit_depth: abstract_two_qubit_depth,
+        operation_count: abstract_operation_count,
+        native_two_qubit_ops: native.static_native.native_two_qubit_ops as usize,
+        native_two_qubit_depth: native_two_qubit_depth(operations, target)?,
+        native_total_ops: native.static_native.native_total_ops as usize,
+        error: native.path_error,
+        duration: native.path_duration,
+        makespan: native_makespan(operations, target)?,
+        unknown_loop_count: native.unknown_loop_count,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NativeCircuitCost {
+    static_native: NativePlanCost,
+    path_error: Option<RobustErrorKey>,
+    path_duration: Option<RobustDurationKey>,
+    unknown_loop_count: usize,
+}
+
+impl NativeCircuitCost {
+    fn append_gate(&mut self, cost: NativePlanCost) {
+        self.static_native = combine_native_identity(self.static_native, cost);
+        self.path_error = combine_error_identity(self.path_error, cost.error);
+        self.path_duration = combine_duration_identity(self.path_duration, cost.duration);
+    }
+
+    fn append_sequence(&mut self, other: Self) {
+        self.static_native = combine_native_identity(self.static_native, other.static_native);
+        self.path_error = combine_error_identity(self.path_error, other.path_error);
+        self.path_duration = combine_duration_identity(self.path_duration, other.path_duration);
+        self.unknown_loop_count = self
+            .unknown_loop_count
+            .saturating_add(other.unknown_loop_count);
+    }
+
+    fn add_static_branch(&mut self, branch: Self) {
+        self.static_native = combine_native_identity(self.static_native, branch.static_native);
+    }
+}
+
+fn combine_native_identity(left: NativePlanCost, right: NativePlanCost) -> NativePlanCost {
+    NativePlanCost {
+        native_two_qubit_ops: left
+            .native_two_qubit_ops
+            .saturating_add(right.native_two_qubit_ops),
+        native_total_ops: left.native_total_ops.saturating_add(right.native_total_ops),
+        error: combine_error_identity(left.error, right.error),
+        duration: combine_duration_identity(left.duration, right.duration),
+    }
+}
+
+fn combine_error_identity(
+    left: Option<RobustErrorKey>,
+    right: Option<RobustErrorKey>,
+) -> Option<RobustErrorKey> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.combine(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn combine_duration_identity(
+    left: Option<RobustDurationKey>,
+    right: Option<RobustDurationKey>,
+) -> Option<RobustDurationKey> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.combine(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn worst_error(
+    left: Option<RobustErrorKey>,
+    right: Option<RobustErrorKey>,
+) -> Option<RobustErrorKey> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left.compare(right).is_ge() {
+            left
+        } else {
+            right
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn worst_duration(
+    left: Option<RobustDurationKey>,
+    right: Option<RobustDurationKey>,
+) -> Option<RobustDurationKey> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left.compare(right).is_ge() {
+            left
+        } else {
+            right
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn repeat_error(value: Option<RobustErrorKey>, count: u128) -> Option<RobustErrorKey> {
+    value.map(|value| RobustErrorKey {
+        unavailable_count: (u128::from(value.unavailable_count) * count).min(u128::from(u32::MAX))
+            as u32,
+        imputed_count: (u128::from(value.imputed_count) * count).min(u128::from(u32::MAX)) as u32,
+        log_error: value.log_error * count as f64,
+    })
+}
+
+fn repeat_duration(value: Option<RobustDurationKey>, count: u128) -> Option<RobustDurationKey> {
+    value.map(|value| RobustDurationKey {
+        unavailable_count: (u128::from(value.unavailable_count) * count).min(u128::from(u32::MAX))
+            as u32,
+        imputed_count: (u128::from(value.imputed_count) * count).min(u128::from(u32::MAX)) as u32,
+        duration_work: value.duration_work * count as f64,
+    })
+}
+
+fn native_plan_cost_for_operations(
+    operations: &[Operation],
+    target: &RoutingTarget,
+) -> Result<NativeCircuitCost, CompilerError> {
+    let mut total = NativeCircuitCost::default();
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(StandardGate::GPhase) => {}
+            Instruction::Standard(_) | Instruction::McGate(_) => {
+                let state = DeviceGateState::from_instruction(
+                    &operation.instruction,
+                    operation
+                        .qubits
+                        .iter()
+                        .copied()
+                        .map(PhysicalQubit::from_qubit)
+                        .collect(),
+                )
+                .ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "missing native-cost key for routed operation {}",
+                        operation.instruction
+                    ))
+                })?;
+                let cost = match target.native_cost(&state) {
+                    Some(cost) => cost,
+                    None if target.unsupported_native_plan(&state).is_some() => {
+                        return Err(CompilerError::DeviceLoweringFailed(
+                            target
+                                .unsupported_native_plan(&state)
+                                .expect("guarded unsupported plan exists")
+                                .clone(),
+                        ));
+                    }
+                    None => {
+                        return Err(CompilerError::InvariantViolation(format!(
+                            "routed operation {} on {:?} was not prepared in the native plan catalog",
+                            operation.instruction, state.ordered_qargs
+                        )));
+                    }
+                };
+                total.append_gate(cost);
+            }
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    let then_cost =
+                        native_plan_cost_for_operations(op.then_body().operations(), target)?;
+                    let else_cost = op
+                        .else_body()
+                        .map(|body| native_plan_cost_for_operations(body.operations(), target))
+                        .transpose()?
+                        .unwrap_or_default();
+                    total.add_static_branch(then_cost);
+                    total.add_static_branch(else_cost);
+                    total.path_error = combine_error_identity(
+                        total.path_error,
+                        worst_error(then_cost.path_error, else_cost.path_error),
+                    );
+                    total.path_duration = combine_duration_identity(
+                        total.path_duration,
+                        worst_duration(then_cost.path_duration, else_cost.path_duration),
+                    );
+                    total.unknown_loop_count = total.unknown_loop_count.saturating_add(
+                        then_cost
+                            .unknown_loop_count
+                            .max(else_cost.unknown_loop_count),
+                    );
+                }
+                ClassicalControlOp::While(op) => {
+                    let mut body = native_plan_cost_for_operations(op.body().operations(), target)?;
+                    body.unknown_loop_count = body.unknown_loop_count.saturating_add(1);
+                    total.append_sequence(body);
+                }
+                ClassicalControlOp::For(op) => {
+                    let mut body = native_plan_cost_for_operations(op.body().operations(), target)?;
+                    total.add_static_branch(body);
+                    if let Some(iterations) = op.static_iteration_count() {
+                        body.static_native = NativePlanCost::default();
+                        body.path_error = repeat_error(body.path_error, iterations);
+                        body.path_duration = repeat_duration(body.path_duration, iterations);
+                    } else {
+                        body.static_native = NativePlanCost::default();
+                        body.unknown_loop_count = body.unknown_loop_count.saturating_add(1);
+                    }
+                    total.append_sequence(body);
+                }
+                ClassicalControlOp::Switch(op) => {
+                    let mut worst_path = NativeCircuitCost::default();
+                    for case in op.cases() {
+                        let branch =
+                            native_plan_cost_for_operations(case.body().operations(), target)?;
+                        total.add_static_branch(branch);
+                        worst_path.path_error =
+                            worst_error(worst_path.path_error, branch.path_error);
+                        worst_path.path_duration =
+                            worst_duration(worst_path.path_duration, branch.path_duration);
+                        worst_path.unknown_loop_count =
+                            worst_path.unknown_loop_count.max(branch.unknown_loop_count);
+                    }
+                    if let Some(body) = op.default() {
+                        let branch = native_plan_cost_for_operations(body.operations(), target)?;
+                        total.add_static_branch(branch);
+                        worst_path.path_error =
+                            worst_error(worst_path.path_error, branch.path_error);
+                        worst_path.path_duration =
+                            worst_duration(worst_path.path_duration, branch.path_duration);
+                        worst_path.unknown_loop_count =
+                            worst_path.unknown_loop_count.max(branch.unknown_loop_count);
+                    }
+                    total.path_error =
+                        combine_error_identity(total.path_error, worst_path.path_error);
+                    total.path_duration =
+                        combine_duration_identity(total.path_duration, worst_path.path_duration);
+                    total.unknown_loop_count = total
+                        .unknown_loop_count
+                        .saturating_add(worst_path.unknown_loop_count);
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => {}
+            Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "unlowerable routed operation {} reached native trial scoring",
+                    operation.instruction
+                )));
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn native_makespan(
+    operations: &[Operation],
+    target: &RoutingTarget,
+) -> Result<Option<f64>, CompilerError> {
+    if !target.native_duration_enabled {
+        return Ok(None);
+    }
+    let mut ready = BTreeMap::<Qubit, f64>::new();
+    if !schedule_native_operations(operations, target, &mut ready)? {
+        return Ok(None);
+    }
+    Ok(Some(ready.values().copied().fold(0.0_f64, f64::max)))
+}
+
+fn schedule_native_operations(
+    operations: &[Operation],
+    target: &RoutingTarget,
+    ready: &mut BTreeMap<Qubit, f64>,
+) -> Result<bool, CompilerError> {
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(StandardGate::GPhase) => {}
+            Instruction::Standard(_) | Instruction::McGate(_) => {
+                let state = DeviceGateState::from_instruction(
+                    &operation.instruction,
+                    operation
+                        .qubits
+                        .iter()
+                        .copied()
+                        .map(PhysicalQubit::from_qubit)
+                        .collect(),
+                )
+                .ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "missing native-duration key for routed operation {}",
+                        operation.instruction
+                    ))
+                })?;
+                let Some(timing) = target.native_timing(&state) else {
+                    if let Some(failure) = target.unsupported_native_plan(&state) {
+                        return Err(CompilerError::DeviceLoweringFailed(failure.clone()));
+                    }
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "routed operation {} on {:?} was not prepared for native duration",
+                        operation.instruction, state.ordered_qargs
+                    )));
+                };
+                let Some(leaves) = timing else {
+                    return Ok(false);
+                };
+                for leaf in leaves {
+                    let qargs = leaf
+                        .ordered_qargs
+                        .iter()
+                        .copied()
+                        .map(PhysicalQubit::qubit)
+                        .collect::<SmallVec<[Qubit; 2]>>();
+                    schedule_atomic_duration(&qargs, leaf.duration, ready);
+                }
+            }
+            Instruction::ClassicalControl(control) => {
+                let Some(duration) = native_control_flow_duration(control, target)? else {
+                    return Ok(false);
+                };
+                schedule_atomic_duration(&operation.qubits, duration, ready);
+            }
+            Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => {
+                schedule_atomic_duration(&operation.qubits, 0.0, ready);
+            }
+            Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "unlowerable routed operation {} reached native makespan scoring",
+                    operation.instruction
+                )));
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn native_control_flow_duration(
+    control: &ClassicalControlOp,
+    target: &RoutingTarget,
+) -> Result<Option<f64>, CompilerError> {
+    match control {
+        ClassicalControlOp::If(op) => {
+            let Some(then_duration) =
+                native_sequence_duration(op.then_body().operations(), target)?
+            else {
+                return Ok(None);
+            };
+            let else_duration = if let Some(body) = op.else_body() {
+                let Some(duration) = native_sequence_duration(body.operations(), target)? else {
+                    return Ok(None);
+                };
+                duration
+            } else {
+                0.0
+            };
+            Ok(Some(then_duration.max(else_duration)))
+        }
+        ClassicalControlOp::While(op) => {
+            let duration = native_sequence_duration(op.body().operations(), target)?;
+            Ok(duration.filter(|duration| *duration == 0.0))
+        }
+        ClassicalControlOp::For(op) => {
+            let Some(duration) = native_sequence_duration(op.body().operations(), target)? else {
+                return Ok(None);
+            };
+            let Some(iterations) = op.static_iteration_count() else {
+                return Ok((duration == 0.0).then_some(0.0));
+            };
+            Ok(Some(duration * iterations as f64))
+        }
+        ClassicalControlOp::Switch(op) => {
+            let mut duration = 0.0_f64;
+            for case in op.cases() {
+                let Some(branch) = native_sequence_duration(case.body().operations(), target)?
+                else {
+                    return Ok(None);
+                };
+                duration = duration.max(branch);
+            }
+            if let Some(body) = op.default() {
+                let Some(branch) = native_sequence_duration(body.operations(), target)? else {
+                    return Ok(None);
+                };
+                duration = duration.max(branch);
+            }
+            Ok(Some(duration))
+        }
+        ClassicalControlOp::Break | ClassicalControlOp::Continue => Ok(Some(0.0)),
+    }
+}
+
+fn native_sequence_duration(
+    operations: &[Operation],
+    target: &RoutingTarget,
+) -> Result<Option<f64>, CompilerError> {
+    let mut ready = BTreeMap::new();
+    if !schedule_native_operations(operations, target, &mut ready)? {
+        return Ok(None);
+    }
+    Ok(Some(ready.values().copied().fold(0.0_f64, f64::max)))
+}
+
+fn schedule_atomic_duration(qargs: &[Qubit], duration: f64, ready: &mut BTreeMap<Qubit, f64>) {
+    let start = qargs
+        .iter()
+        .filter_map(|qubit| ready.get(qubit).copied())
+        .fold(0.0_f64, f64::max);
+    let finish = start + duration;
+    for qubit in qargs {
+        ready.insert(*qubit, finish);
+    }
+}
+
+fn native_two_qubit_depth(
+    operations: &[Operation],
+    target: &RoutingTarget,
+) -> Result<usize, CompilerError> {
+    let mut qubit_depths = BTreeMap::<Qubit, usize>::new();
+    let mut max_depth = 0;
+    for operation in operations {
+        let local_depth = operation_local_native_two_qubit_depth(operation, target)?;
+        if local_depth == 0 {
+            continue;
+        }
+        let base = operation
+            .qubits
+            .iter()
+            .map(|qubit| qubit_depths.get(qubit).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let depth = base + local_depth;
+        for qubit in &operation.qubits {
+            qubit_depths.insert(*qubit, depth);
+        }
+        max_depth = max_depth.max(depth);
+    }
+    Ok(max_depth)
+}
+
+fn operation_local_native_two_qubit_depth(
+    operation: &Operation,
+    target: &RoutingTarget,
+) -> Result<usize, CompilerError> {
+    match &operation.instruction {
+        Instruction::Standard(StandardGate::GPhase) => Ok(0),
+        Instruction::Standard(_) | Instruction::McGate(_) => {
+            let state = DeviceGateState::from_instruction(
+                &operation.instruction,
+                operation
+                    .qubits
+                    .iter()
+                    .copied()
+                    .map(PhysicalQubit::from_qubit)
+                    .collect(),
+            )
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "missing native-depth key for routed operation {}",
+                    operation.instruction
+                ))
+            })?;
+            match target.native_cost(&state) {
+                Some(cost) => Ok(cost.native_two_qubit_ops as usize),
+                None if target.unsupported_native_plan(&state).is_some() => {
+                    Err(CompilerError::DeviceLoweringFailed(
+                        target
+                            .unsupported_native_plan(&state)
+                            .expect("guarded unsupported plan exists")
+                            .clone(),
+                    ))
+                }
+                None => Err(CompilerError::InvariantViolation(format!(
+                    "routed operation {} on {:?} was not prepared in the native plan catalog",
+                    operation.instruction, state.ordered_qargs
+                ))),
+            }
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
+            let then_depth = native_two_qubit_depth(op.then_body().operations(), target)?;
+            let else_depth = op
+                .else_body()
+                .map(|body| native_two_qubit_depth(body.operations(), target))
+                .transpose()?
+                .unwrap_or(0);
+            Ok(then_depth.max(else_depth))
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::While(op)) => {
+            native_two_qubit_depth(op.body().operations(), target)
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
+            let body_depth = native_two_qubit_depth(op.body().operations(), target)?;
+            let iterations = op
+                .static_iteration_count()
+                .unwrap_or(1)
+                .min(usize::MAX as u128) as usize;
+            Ok(body_depth.saturating_mul(iterations))
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => {
+            let mut depth = 0;
+            for case in op.cases() {
+                depth = depth.max(native_two_qubit_depth(case.body().operations(), target)?);
+            }
+            if let Some(body) = op.default() {
+                depth = depth.max(native_two_qubit_depth(body.operations(), target)?);
+            }
+            Ok(depth)
+        }
+        _ => Ok(0),
+    }
+}
+
+fn two_qubit_operation_count(operations: &[Operation]) -> usize {
+    operations
+        .iter()
+        .map(|operation| match &operation.instruction {
+            Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
+                two_qubit_operation_count(op.then_body().operations())
+                    + op.else_body()
+                        .map(|body| two_qubit_operation_count(body.operations()))
+                        .unwrap_or(0)
+            }
+            Instruction::ClassicalControl(ClassicalControlOp::While(op)) => {
+                two_qubit_operation_count(op.body().operations())
+            }
+            Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
+                two_qubit_operation_count(op.body().operations())
+            }
+            Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => {
+                op.cases()
+                    .iter()
+                    .map(|case| two_qubit_operation_count(case.body().operations()))
+                    .sum::<usize>()
+                    + op.default()
+                        .map(|body| two_qubit_operation_count(body.operations()))
+                        .unwrap_or(0)
+            }
+            _ => usize::from(operation.qubits.len() == 2),
+        })
+        .sum()
 }
 
 /// Estimates ASAP two-qubit depth for trial ranking.
@@ -1604,7 +3870,11 @@ fn operation_local_two_qubit_depth(operation: &Operation) -> usize {
             two_qubit_depth(op.body().operations())
         }
         Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
-            two_qubit_depth(op.body().operations())
+            let iterations = op
+                .static_iteration_count()
+                .unwrap_or(1)
+                .min(usize::MAX as u128) as usize;
+            two_qubit_depth(op.body().operations()).saturating_mul(iterations)
         }
         Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => op
             .cases()
@@ -1655,44 +3925,5 @@ fn operation_count(operations: &[Operation]) -> usize {
 }
 
 #[cfg(test)]
-mod score_tests {
-    use super::*;
-
-    fn line_distance(left: usize, right: usize) -> Result<f64, CompilerError> {
-        Ok(left.abs_diff(right) as f64)
-    }
-
-    #[test]
-    fn heuristic_normalizes_each_layer_before_weighting_and_decay() {
-        let mut front = Layer::new(2, 5);
-        front
-            .insert(NodeIndex::new(0), [0, 4], &line_distance)
-            .unwrap();
-        front
-            .insert(NodeIndex::new(1), [1, 3], &line_distance)
-            .unwrap();
-        let mut lookahead = Layer::new(1, 5);
-        lookahead
-            .insert(NodeIndex::new(0), [0, 2], &line_distance)
-            .unwrap();
-        let empty = Layer::new(0, 5);
-        let heuristic = SabreHeuristicConfig {
-            basic_weight: 1.0,
-            lookahead_weights: vec![0.5, 20.0],
-            ..SabreHeuristicConfig::default()
-        };
-
-        let score = heuristic_score_after_swap(
-            &front,
-            &[lookahead, empty],
-            &heuristic,
-            [0, 1],
-            &line_distance,
-            1.2,
-        )
-        .unwrap();
-
-        // front mean = (3 + 3) / 2 = 3; lookahead mean = 1; empty = 0.
-        assert!((score - 4.2).abs() < 1e-12);
-    }
-}
+#[path = "score_test.rs"]
+mod score_test;

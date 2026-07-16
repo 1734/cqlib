@@ -462,7 +462,7 @@ fn topology_direction_and_local_gate_override_are_distinct_costs() {
 }
 
 #[test]
-fn physical_target_rejects_every_invalid_two_qubit_probability() {
+fn device_input_or_physical_target_rejects_every_invalid_two_qubit_probability() {
     let p0 = PhysicalQubit::new(0);
     let p1 = PhysicalQubit::new(1);
     for error in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
@@ -472,25 +472,20 @@ fn physical_target_rejects_every_invalid_two_qubit_probability() {
             .with_default_two_qubit_error(error);
         assert!(build_physical_layout_graph(&default_device).is_err());
 
-        let mut local_device = Device::new("local", HashSet::from([p0, p1]), topology).unwrap();
-        local_device
-            .add_edge_properties(
-                p0,
-                p1,
-                EdgeProp::new()
-                    .with_native_instruction(InstructionProp::new(
-                        Instruction::Standard(StandardGate::CZ),
-                        0.01,
-                    ))
-                    .unwrap()
-                    .with_native_instruction(InstructionProp::new(
-                        Instruction::Standard(StandardGate::CX),
-                        error,
-                    ))
-                    .unwrap(),
-            )
+        let valid = EdgeProp::new()
+            .with_native_instruction(InstructionProp::new(
+                Instruction::Standard(StandardGate::CZ),
+                0.01,
+            ))
             .unwrap();
-        assert!(build_physical_layout_graph(&local_device).is_err());
+        assert!(
+            valid
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    error,
+                ))
+                .is_err()
+        );
     }
 }
 

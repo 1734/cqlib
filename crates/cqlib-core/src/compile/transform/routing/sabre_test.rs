@@ -143,7 +143,7 @@ proptest! {
 }
 
 #[test]
-fn sabre_identity_no_swap_rebuild_should_report_changed_instead_of_panicking() {
+fn sabre_identity_no_swap_rebuild_reports_unchanged_without_panicking() {
     let device = Device::ring("regression-ring", 5).unwrap();
     let objective = LayoutObjective::topology_only();
     let config = SabreConfig::deterministic_seeded(31);
@@ -153,7 +153,11 @@ fn sabre_identity_no_swap_rebuild_should_report_changed_instead_of_panicking() {
 
     let result = route_sabre(&circuit, &device, &objective, &config).unwrap();
 
-    assert!(result.changed(&circuit));
+    assert!(!result.changed(&circuit));
+    assert_eq!(
+        format!("{:?}", result.circuit().operations()),
+        format!("{:?}", circuit.operations())
+    );
     assert_two_qubit_operations_supported_by_topology(result.circuit(), device.topology());
 }
 

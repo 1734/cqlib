@@ -53,9 +53,9 @@
 //! [`CompileTarget`] is mutually exclusive: [`CompileTarget::Logical`] keeps
 //! logical operations, [`CompileTarget::Basis`] lowers to an explicit basis,
 //! and [`CompileTarget::Device`] routes and lowers for one device. Device
-//! compilation uses SABRE only for undirected topology routing. Its following
-//! device-lowering stage verifies ordered qargs, edge-level overrides, and
-//! direction-specific capabilities, then
+//! compilation uses an exact-plan-aware SABRE movement graph and checks local
+//! unary and ordered two-qubit capabilities during routing. Its following
+//! device-lowering stage emits the shared exact-qargs plans, then
 //! [`Device::validate_circuit`](crate::device::Device::validate_circuit)
 //! validates the completed output.
 //! A successful device compilation therefore never returns a circuit rejected
@@ -243,6 +243,7 @@
 
 pub mod commutation;
 pub mod compiler;
+pub(crate) mod device_planning;
 pub mod error;
 pub mod knowledge;
 pub mod physical_target;
@@ -268,7 +269,7 @@ pub use compiler::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
     DeviceCompileTarget, compile,
 };
-pub use error::CompilerError;
+pub use error::{CompilerError, SabreRoutingFailure};
 pub use sabre::{
     SabreConfig, SabreHeuristicConfig, SabreRoutingDiagnostics, SabreRoutingResult,
     normalize_initial_layout, sabre_route, validate_config, validate_reachable_interactions,

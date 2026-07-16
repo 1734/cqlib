@@ -118,6 +118,24 @@ impl InstructionProp {
     pub fn length(&self) -> Option<f64> {
         self.length
     }
+
+    fn validate(&self) -> Result<(), DeviceError> {
+        if !(self.error_rate.is_finite() && (0.0..=1.0).contains(&self.error_rate)) {
+            return Err(DeviceError::InvalidNativeInstructionErrorRate {
+                instruction: self.instruction.to_string(),
+                value: format!("{:?}", self.error_rate),
+            });
+        }
+        if let Some(length) = self.length
+            && !(length.is_finite() && length >= 0.0)
+        {
+            return Err(DeviceError::InvalidNativeInstructionDuration {
+                instruction: self.instruction.to_string(),
+                value: format!("{length:?}"),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Represents the physical and operational properties of a single quantum qubit.
@@ -223,6 +241,7 @@ impl QubitProp {
     /// Appends a single-qubit standard gate, preserving the list on error.
     pub fn set_native_instruction(&mut self, prop: InstructionProp) -> Result<(), DeviceError> {
         validate_native_gate_arity(prop.instruction(), 1..=1)?;
+        prop.validate()?;
         self.native_instructions.push(prop);
         Ok(())
     }
@@ -288,6 +307,13 @@ enum NativeInstructionSupport<'a> {
     Unsupported,
 }
 
+/// Optional calibration attached to one exact native instruction capability.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct NativeInstructionCalibration {
+    pub(crate) error_rate: Option<f64>,
+    pub(crate) duration: Option<f64>,
+}
+
 impl EdgeProp {
     /// Creates a new empty edge property.
     pub fn new() -> Self {
@@ -310,6 +336,7 @@ impl EdgeProp {
     /// Appends a two-qubit standard gate, preserving the list on error.
     pub fn set_native_instruction(&mut self, prop: InstructionProp) -> Result<(), DeviceError> {
         validate_native_gate_arity(prop.instruction(), 2..=2)?;
+        prop.validate()?;
         self.native_instructions.push(prop);
         Ok(())
     }
@@ -1079,6 +1106,52 @@ impl Device {
         ) {
             NativeInstructionSupport::Explicit(prop) => Some(prop.error_rate()),
             NativeInstructionSupport::Inherited => self.default_two_qubit_error,
+            NativeInstructionSupport::Unsupported => None,
+        }
+    }
+
+    /// Returns calibration for a supported instruction on exact ordered qargs.
+    ///
+    /// Capability and calibration are deliberately separate: `None` means the
+    /// instruction is unsupported, while `Some(default)` means it is supported
+    /// but has no explicit or inherited calibration data.
+    pub(crate) fn native_instruction_calibration(
+        &self,
+        instruction: &Instruction,
+        qargs: &[PhysicalQubit],
+    ) -> Option<NativeInstructionCalibration> {
+        if !self.supports_native_instruction(instruction, qargs) {
+            return None;
+        }
+
+        let support = match qargs {
+            [qubit] => self.resolve_native_instruction(
+                self.qubit_properties
+                    .get(qubit)
+                    .map(QubitProp::native_instructions),
+                instruction,
+            ),
+            [control, target] => self.resolve_native_instruction(
+                self.edge_properties(*control, *target)
+                    .map(EdgeProp::native_instructions),
+                instruction,
+            ),
+            _ => NativeInstructionSupport::Inherited,
+        };
+
+        match support {
+            NativeInstructionSupport::Explicit(prop) => Some(NativeInstructionCalibration {
+                error_rate: Some(prop.error_rate()),
+                duration: prop.length(),
+            }),
+            NativeInstructionSupport::Inherited => Some(NativeInstructionCalibration {
+                error_rate: match qargs.len() {
+                    1 => self.default_single_qubit_error,
+                    2 => self.default_two_qubit_error,
+                    _ => None,
+                },
+                duration: None,
+            }),
             NativeInstructionSupport::Unsupported => None,
         }
     }

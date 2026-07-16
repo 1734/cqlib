@@ -32,22 +32,22 @@ type EdgeId = usize;
 
 /// The physical cost minimized by device lowering.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct DevicePlanCost {
-    pub(super) two_qubit_ops: u32,
-    pub(super) total_ops: u32,
+pub(crate) struct DevicePlanCost {
+    pub(crate) two_qubit_ops: u32,
+    pub(crate) total_ops: u32,
     // A well-founded tertiary metric makes equal-physical-cost one-child
     // equivalences settle after their dependencies and prevents cyclic plans.
     derivation_steps: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PlanTemplate {
+pub(crate) enum PlanTemplate {
     Rule(RuleId),
     Direction(DirectionTemplate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PlanChoice {
+pub(crate) enum PlanChoice {
     Native,
     Template(PlanTemplate),
 }
@@ -106,7 +106,7 @@ impl Ord for QueueEntry {
 }
 
 /// One solved plan table for the finite closure reachable from circuit roots.
-pub(super) struct DevicePlanner<'a> {
+pub(crate) struct DevicePlanner<'a> {
     device: &'a Device,
     states: Vec<DeviceGateState>,
     state_ids: HashMap<DeviceGateState, StateId>,
@@ -116,7 +116,7 @@ pub(super) struct DevicePlanner<'a> {
 }
 
 impl<'a> DevicePlanner<'a> {
-    pub(super) fn build(
+    pub(crate) fn build(
         device: &'a Device,
         library: &RuleLibrary,
         roots: impl IntoIterator<Item = DeviceGateState>,
@@ -139,11 +139,104 @@ impl<'a> DevicePlanner<'a> {
         Ok(planner)
     }
 
-    pub(super) fn plan_for(&self, state: &DeviceGateState) -> Option<PlanChoice> {
+    pub(crate) fn plan_for(&self, state: &DeviceGateState) -> Option<PlanChoice> {
         self.state_ids.get(state).and_then(|id| self.plans[*id])
     }
 
-    pub(super) fn failure_for(&self, state: &DeviceGateState) -> DeviceLoweringFailure {
+    /// Summarizes the exact native leaves selected by this planner.
+    ///
+    /// This is observational: it deliberately does not add calibration values
+    /// to the planner's optimization key, so DeviceLowerer keeps selecting the
+    /// same plans while routing can score the plan that lowering will use.
+    pub(crate) fn summary_for(
+        &self,
+        state: &DeviceGateState,
+    ) -> Result<Option<NativePlanSummary>, String> {
+        let Some(&state_id) = self.state_ids.get(state) else {
+            return Ok(None);
+        };
+        if self.plans[state_id].is_none() {
+            return Ok(None);
+        }
+        let mut leaves = Vec::new();
+        let mut visiting = HashSet::new();
+        self.collect_native_leaves(state_id, &mut visiting, &mut leaves)?;
+        let native_two_qubit_ops = leaves
+            .iter()
+            .filter(|leaf| leaf.ordered_qargs.len() == 2)
+            .count() as u32;
+        Ok(Some(NativePlanSummary {
+            native_two_qubit_ops,
+            native_total_ops: leaves.len() as u32,
+            leaves,
+        }))
+    }
+
+    fn collect_native_leaves(
+        &self,
+        state_id: StateId,
+        visiting: &mut HashSet<StateId>,
+        output: &mut Vec<NativePlanLeaf>,
+    ) -> Result<(), String> {
+        if !visiting.insert(state_id) {
+            return Err(format!(
+                "device plan summary encountered a cycle at state {:?}",
+                self.states[state_id]
+            ));
+        }
+
+        match self.plans[state_id] {
+            Some(PlanChoice::Native) => {
+                let state = &self.states[state_id];
+                let instruction = instruction_from_key(&state.instruction);
+                let calibration = self
+                    .device
+                    .native_instruction_calibration(&instruction, &state.ordered_qargs)
+                    .ok_or_else(|| {
+                        format!(
+                            "selected native plan leaf {instruction} on {:?} is no longer supported",
+                            state.ordered_qargs
+                        )
+                    })?;
+                validate_leaf_calibration(
+                    &instruction,
+                    calibration.error_rate,
+                    calibration.duration,
+                )?;
+                output.push(NativePlanLeaf {
+                    instruction,
+                    ordered_qargs: state.ordered_qargs.clone(),
+                    error_rate: calibration.error_rate,
+                    duration: calibration.duration,
+                });
+            }
+            Some(PlanChoice::Template(template)) => {
+                let edge = self
+                    .edges
+                    .iter()
+                    .find(|edge| edge.parent == state_id && edge.template == template)
+                    .ok_or_else(|| {
+                        format!(
+                            "selected device plan template {template:?} has no hyperedge for {:?}",
+                            self.states[state_id]
+                        )
+                    })?;
+                for &child in &edge.children {
+                    self.collect_native_leaves(child, visiting, output)?;
+                }
+            }
+            None => {
+                return Err(format!(
+                    "device plan summary reached an unsolved state {:?}",
+                    self.states[state_id]
+                ));
+            }
+        }
+        visiting.remove(&state_id);
+        Ok(())
+    }
+
+    pub(crate) fn failure_for(&self, state: &DeviceGateState) -> DeviceLoweringFailure {
         let attempted_candidates = self
             .state_ids
             .get(state)
@@ -258,6 +351,45 @@ impl<'a> DevicePlanner<'a> {
             }
         }
     }
+}
+
+/// One exact native leaf in the selected lowering plan.
+#[derive(Debug, Clone)]
+pub(crate) struct NativePlanLeaf {
+    pub(crate) instruction: Instruction,
+    pub(crate) ordered_qargs: SmallVec<[crate::device::PhysicalQubit; 2]>,
+    pub(crate) error_rate: Option<f64>,
+    pub(crate) duration: Option<f64>,
+}
+
+/// Exact native resource summary for the plan selected by DevicePlanner.
+#[derive(Debug, Clone)]
+pub(crate) struct NativePlanSummary {
+    pub(crate) native_two_qubit_ops: u32,
+    pub(crate) native_total_ops: u32,
+    pub(crate) leaves: Vec<NativePlanLeaf>,
+}
+
+fn validate_leaf_calibration(
+    instruction: &Instruction,
+    error_rate: Option<f64>,
+    duration: Option<f64>,
+) -> Result<(), String> {
+    if let Some(error_rate) = error_rate
+        && !(error_rate.is_finite() && (0.0..=1.0).contains(&error_rate))
+    {
+        return Err(format!(
+            "native instruction {instruction} has invalid error rate {error_rate:?}"
+        ));
+    }
+    if let Some(duration) = duration
+        && !(duration.is_finite() && duration >= 0.0)
+    {
+        return Err(format!(
+            "native instruction {instruction} has invalid duration {duration:?}"
+        ));
+    }
+    Ok(())
 }
 
 impl DevicePlanCost {
@@ -419,6 +551,8 @@ impl<'a> GraphBuilder<'a> {
     }
 }
 
+/// Returns whether a decomposition source can be planned independently of
+/// concrete parameter values and bound positionally during emission.
 fn source_params_are_generic_and_distinct(params: &Option<SmallVec<[ParameterValue; 1]>>) -> bool {
     let mut symbols = HashSet::new();
     params.as_deref().unwrap_or(&[]).iter().all(|param| {
@@ -431,7 +565,7 @@ fn source_params_are_generic_and_distinct(params: &Option<SmallVec<[ParameterVal
     })
 }
 
-pub(super) fn instruction_from_key(key: &KnowledgeInstructionKey) -> Instruction {
+pub(crate) fn instruction_from_key(key: &KnowledgeInstructionKey) -> Instruction {
     match key {
         KnowledgeInstructionKey::Standard(gate) => Instruction::Standard(*gate),
         KnowledgeInstructionKey::McGate(gate) => Instruction::McGate(Box::new(gate.clone())),

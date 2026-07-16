@@ -13,13 +13,13 @@
 
 //! Audited equivalence templates for direction-sensitive two-qubit gates.
 
-use super::{DeviceGateState, LowerableOperation};
-use crate::circuit::{Instruction, StandardGate};
+use super::DeviceGateState;
+use crate::circuit::StandardGate;
 use smallvec::{SmallVec, smallvec};
 
 /// A direction equivalence admitted to exact device-lowering planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum DirectionTemplate {
+pub(crate) enum DirectionTemplate {
     Cx,
     Rzx,
     Symmetric(StandardGate),
@@ -53,30 +53,6 @@ impl DirectionTemplate {
                 instruction: parent.instruction.clone(),
                 ordered_qargs: smallvec![q1, q0],
             }],
-        }
-    }
-
-    pub(super) fn instantiate(self, source: &LowerableOperation) -> Vec<LowerableOperation> {
-        debug_assert_eq!(source.qubits.len(), 2);
-        let q0 = source.qubits[0];
-        let q1 = source.qubits[1];
-        let reversed = || LowerableOperation {
-            instruction: source.instruction.clone(),
-            qubits: smallvec![q1, q0],
-            params: source.params.clone(),
-            label: source.label.clone(),
-        };
-        match self {
-            Self::Cx | Self::Rzx => {
-                let h = |qubit| LowerableOperation {
-                    instruction: Instruction::Standard(StandardGate::H),
-                    qubits: smallvec![qubit],
-                    params: SmallVec::new(),
-                    label: None,
-                };
-                vec![h(q0), h(q1), reversed(), h(q0), h(q1)]
-            }
-            Self::Symmetric(_) => vec![reversed()],
         }
     }
 }

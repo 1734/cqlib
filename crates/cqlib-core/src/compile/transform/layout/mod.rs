@@ -66,7 +66,10 @@ pub use analysis::{
 pub use greedy::{greedy_layout, greedy_layout_prepared};
 pub use objective::{LayoutObjective, LayoutScore};
 pub use result::{LayoutDiagnostics, LayoutResult};
-pub use sabre::{PreparedSabreCircuit, prepare_sabre_circuit, sabre_layout, sabre_layout_prepared};
+pub use sabre::{
+    PreparedSabreCircuit, PreparedSabreDeviceTarget, prepare_sabre_circuit,
+    prepare_sabre_device_target, sabre_layout, sabre_layout_prepared,
+};
 pub use trivial::{trivial_layout, trivial_layout_prepared};
 pub use vf2::{
     Vf2EdgeRequirement, Vf2LayoutConfig, vf2_perfect_layout, vf2_perfect_layout_prepared,

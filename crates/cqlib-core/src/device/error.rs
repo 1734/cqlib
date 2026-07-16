@@ -41,6 +41,20 @@ pub enum DeviceError {
         /// Number of qubits used by the standard gate.
         actual: usize,
     },
+    /// A native instruction error rate is not a finite probability.
+    InvalidNativeInstructionErrorRate {
+        /// Human-readable instruction identity.
+        instruction: String,
+        /// Stable textual representation of the rejected value.
+        value: String,
+    },
+    /// A native instruction duration is negative or non-finite.
+    InvalidNativeInstructionDuration {
+        /// Human-readable instruction identity.
+        instruction: String,
+        /// Stable textual representation of the rejected value.
+        value: String,
+    },
 }
 
 /// Errors raised when a physical circuit does not satisfy device capabilities.
@@ -181,6 +195,14 @@ impl fmt::Display for DeviceError {
                     "instruction {instruction} cannot be stored as a native capability: expected {expected} qubits, got {actual}"
                 )
             }
+            Self::InvalidNativeInstructionErrorRate { instruction, value } => write!(
+                f,
+                "instruction {instruction} has invalid native error rate {value}: expected a finite value in [0, 1]"
+            ),
+            Self::InvalidNativeInstructionDuration { instruction, value } => write!(
+                f,
+                "instruction {instruction} has invalid native duration {value}: expected a finite non-negative value"
+            ),
         }
     }
 }
