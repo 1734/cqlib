@@ -20,16 +20,20 @@
 use super::collector::TwoQubitNumericBlock;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
-use super::cost::{ResynthesisCost, cost_of_source_ops};
+use super::cost::{ResynthesisCost, cost_of_source_ops, value_operations_of_source_ops};
 use crate::circuit::{
     Circuit, Instruction, Parameter, ParameterValue, ValueInstruction, ValueOperation,
     circuit_to_matrix,
 };
 use crate::compile::CompilerError;
 use crate::compile::transform::decompose::unitary::unitary_2q::{
+    DeviceTwoQubitSynthesisCandidate, plan_numeric_2q_unitary_for_device,
+};
+use crate::compile::transform::decompose::unitary::unitary_2q::{
     TwoQubitMatrixOp, two_qubit_operation_matrix_product,
 };
 use crate::compile::transform::decompose::unitary::{
+    DevicePhysicalCost, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
     TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
 };
 use ndarray::Array2;
@@ -52,14 +56,26 @@ pub(crate) struct BlockPatch {
     pub replacement: Vec<ValueOperation>,
     pub before_cost: ResynthesisCost,
     pub after_cost: ResynthesisCost,
+    pub device_after_cost: Option<DevicePhysicalCost>,
     pub synthesis_phase: f64,
 }
 
+#[cfg(test)]
 pub(crate) fn select_patches(
     blocks: Vec<TwoQubitNumericBlock>,
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
+) -> Result<Vec<BlockPatch>, CompilerError> {
+    select_patches_with_device(blocks, ops, commutation, config, None)
+}
+
+pub(crate) fn select_patches_with_device(
+    blocks: Vec<TwoQubitNumericBlock>,
+    ops: &[OperationView<'_>],
+    commutation: &CachedCommutation,
+    config: &TwoQubitBlockResynthesisConfig,
+    device_context: Option<&DeviceTwoQubitSynthesisContext>,
 ) -> Result<Vec<BlockPatch>, CompilerError> {
     let mut seen = HashSet::new();
     let mut blocks = blocks
@@ -70,7 +86,8 @@ pub(crate) fn select_patches(
 
     let mut patches = Vec::new();
     for block in blocks {
-        if let Some(patch) = try_synthesize_block(&block, ops, commutation, config)? {
+        if let Some(patch) = try_synthesize_block(&block, ops, commutation, config, device_context)?
+        {
             patches.push(patch);
         }
     }
@@ -120,8 +137,15 @@ fn compare_patches(lhs: &BlockPatch, rhs: &BlockPatch) -> Ordering {
         .lowered_two_qubit_ops
         .saturating_sub(rhs.after_cost.lowered_two_qubit_ops);
 
-    lhs.after_cost
-        .cmp(&rhs.after_cost)
+    let physical = match (lhs.device_after_cost, rhs.device_after_cost) {
+        (Some(left), Some(right)) => left.compare(right),
+        (None, None) => Ordering::Equal,
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+    };
+
+    physical
+        .then_with(|| lhs.after_cost.cmp(&rhs.after_cost))
         .then_with(|| rhs_reduction.cmp(&lhs_reduction))
         .then_with(|| Reverse(lhs.matched_orders.len()).cmp(&Reverse(rhs.matched_orders.len())))
         .then_with(|| lhs.first_order.cmp(&rhs.first_order))
@@ -132,6 +156,7 @@ fn try_synthesize_block(
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
+    device_context: Option<&DeviceTwoQubitSynthesisContext>,
 ) -> Result<Option<BlockPatch>, CompilerError> {
     let matrix = match block_matrix(block, ops) {
         Ok(matrix) => matrix,
@@ -152,6 +177,18 @@ fn try_synthesize_block(
         .iter()
         .map(|&order| &ops[order])
         .collect::<Vec<_>>();
+    if let Some(device_context) = device_context {
+        return try_synthesize_device_block(
+            block,
+            &matrix,
+            ops,
+            &matched,
+            &crossed,
+            commutation,
+            device_context,
+            before_cost,
+        );
+    }
     let candidates = match plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
         matrix: &matrix,
         qubits: block.qubits,
@@ -184,10 +221,113 @@ fn try_synthesize_block(
             replacement: candidate.operations,
             before_cost,
             after_cost: candidate.cost,
+            device_after_cost: None,
             synthesis_phase: candidate.global_phase,
         }));
     }
     Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_synthesize_device_block(
+    block: &TwoQubitNumericBlock,
+    matrix: &Array2<Complex64>,
+    ops: &[OperationView<'_>],
+    matched: &[&OperationView<'_>],
+    crossed: &[&OperationView<'_>],
+    commutation: &CachedCommutation,
+    context: &DeviceTwoQubitSynthesisContext,
+    before_cost: ResynthesisCost,
+) -> Result<Option<BlockPatch>, CompilerError> {
+    let source_operations = match value_operations_of_source_ops(matched) {
+        Ok(operations) => operations,
+        Err(_) => return Ok(None),
+    };
+    let (device_before_cost, source_domain) = match context.placement() {
+        DeviceSynthesisPlacement::PreLayoutEnvelope => {
+            let Some(evaluation) = context.evaluate_pre_layout(&source_operations, block.qubits)
+            else {
+                return Ok(None);
+            };
+            (evaluation.worst_cost, Some(evaluation.domain))
+        }
+        DeviceSynthesisPlacement::ExactPhysical => {
+            let Some(cost) = context.exact_cost(&source_operations, block.qubits) else {
+                return Ok(None);
+            };
+            (cost, None)
+        }
+    };
+    let candidates = match plan_numeric_2q_unitary_for_device(matrix, block.qubits, context) {
+        Ok(candidates) => candidates,
+        Err(_) => return Ok(None),
+    };
+
+    let mut best: Option<(DeviceTwoQubitSynthesisCandidate, DevicePhysicalCost)> = None;
+    for candidate in candidates {
+        let device_after_cost = match context.placement() {
+            DeviceSynthesisPlacement::PreLayoutEnvelope => {
+                let Some(source_domain) = source_domain.as_ref() else {
+                    continue;
+                };
+                let Some(evaluation) = candidate.pre_layout.as_ref() else {
+                    continue;
+                };
+                if !source_domain.is_subset(&evaluation.domain) {
+                    continue;
+                }
+                let Some(cost) = context.worst_cost_on_domain(
+                    &candidate.candidate.operations,
+                    block.qubits,
+                    source_domain,
+                ) else {
+                    continue;
+                };
+                cost
+            }
+            DeviceSynthesisPlacement::ExactPhysical => candidate.physical_cost,
+        };
+        if !device_after_cost.strictly_better_than(device_before_cost) {
+            continue;
+        }
+        if !commutation.replacements_commute_with_crossed(crossed, &candidate.candidate.operations)
+        {
+            continue;
+        }
+        if !patch_preserves_relevant_span(
+            block,
+            ops,
+            &candidate.candidate.operations,
+            candidate.candidate.global_phase,
+        )? {
+            continue;
+        }
+
+        let replace = best.as_ref().is_none_or(|(current, current_cost)| {
+            device_after_cost
+                .compare(*current_cost)
+                .then_with(|| candidate.candidate.cost.cmp(&current.candidate.cost))
+                .is_lt()
+        });
+        if replace {
+            best = Some((candidate, device_after_cost));
+        }
+    }
+
+    let Some((candidate, device_after_cost)) = best else {
+        return Ok(None);
+    };
+    let after_cost = candidate.candidate.cost;
+    Ok(Some(BlockPatch {
+        first_order: block.first_order(),
+        matched_orders: block.matched_orders.clone(),
+        crossed_orders: block.crossed_orders.clone(),
+        replacement: candidate.candidate.operations,
+        before_cost,
+        after_cost,
+        device_after_cost: Some(device_after_cost),
+        synthesis_phase: candidate.candidate.global_phase,
+    }))
 }
 
 // Matrix construction uses the same convention as `circuit_to_matrix`: source

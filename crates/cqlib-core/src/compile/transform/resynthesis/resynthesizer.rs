@@ -21,13 +21,14 @@
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::collect_two_qubit_blocks_dag;
-use super::selector::{BlockPatch, select_patches};
+use super::selector::{BlockPatch, select_patches_with_device};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
     StandardGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
     ValueSwitchCase,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::decompose::unitary::DeviceTwoQubitSynthesisContext;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
 use smallvec::smallvec;
@@ -45,12 +46,30 @@ const PHASE_EPS: f64 = 1e-12;
 #[derive(Debug, Clone)]
 pub struct ResynthesizeTwoQubitBlocks {
     config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
 }
 
 impl ResynthesizeTwoQubitBlocks {
     /// Creates a transformer from an explicit resynthesis configuration.
     pub fn new(config: TwoQubitBlockResynthesisConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            device_context: None,
+        }
+    }
+
+    pub(crate) fn new_device_aware(
+        config: TwoQubitBlockResynthesisConfig,
+        device_context: DeviceTwoQubitSynthesisContext,
+    ) -> Self {
+        Self {
+            config,
+            device_context: Some(device_context),
+        }
+    }
+
+    pub(crate) fn is_applicable(circuit: &Circuit) -> bool {
+        has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit)
     }
 }
 
@@ -70,7 +89,11 @@ impl Transformer for ResynthesizeTwoQubitBlocks {
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
     ) -> Result<TransformResult, CompilerError> {
-        resynthesize_two_qubit_blocks(circuit, self.config.clone())
+        resynthesize_two_qubit_blocks_with_device(
+            circuit,
+            self.config.clone(),
+            self.device_context.clone(),
+        )
     }
 }
 
@@ -83,6 +106,14 @@ pub fn resynthesize_two_qubit_blocks(
     circuit: &Circuit,
     config: TwoQubitBlockResynthesisConfig,
 ) -> Result<TransformResult, CompilerError> {
+    resynthesize_two_qubit_blocks_with_device(circuit, config, None)
+}
+
+fn resynthesize_two_qubit_blocks_with_device(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+) -> Result<TransformResult, CompilerError> {
     if !has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit) {
         return Ok(TransformResult {
             circuit: circuit.clone(),
@@ -94,6 +125,7 @@ pub fn resynthesize_two_qubit_blocks(
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
         config,
+        device_context,
     };
     pass.run()
 }
@@ -102,6 +134,7 @@ struct ResynthesisPass<'a> {
     source: &'a Circuit,
     rebuild: CircuitRebuildContext,
     config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
 }
 
 struct SequenceRewrite {
@@ -135,7 +168,13 @@ impl<'a> ResynthesisPass<'a> {
         let views = self.build_views(operations)?;
         let mut commutation = CachedCommutation::new(self.config.commutation.clone());
         let blocks = collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?;
-        let patches = select_patches(blocks, &views, &commutation, &self.config)?;
+        let patches = select_patches_with_device(
+            blocks,
+            &views,
+            &commutation,
+            &self.config,
+            self.device_context.as_ref(),
+        )?;
 
         if patches.is_empty() {
             return self.preserve_sequence(operations, classical_remap);

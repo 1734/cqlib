@@ -27,8 +27,22 @@ pub(crate) fn cost_of_source_ops(
     ops: &[&OperationView<'_>],
     target: &TwoQubitSynthesisTarget,
 ) -> Result<ResynthesisCost, CompilerError> {
-    let operations = ops
-        .iter()
+    let operations = value_operations_of_source_ops(ops)?;
+    let mut cost = target_aware_cost_of_value_operations(
+        &operations,
+        target,
+        TwoQubitUnitaryDecomposeBasis::PauliRotations,
+    )?;
+    // Backend preference orders equivalent synthesis candidates only. Source
+    // operations must not receive a synthetic backend advantage.
+    cost.backend_order = 0;
+    Ok(cost)
+}
+
+pub(crate) fn value_operations_of_source_ops(
+    ops: &[&OperationView<'_>],
+) -> Result<Vec<ValueOperation>, CompilerError> {
+    ops.iter()
         .map(|view| {
             let Instruction::Standard(gate) = view.operation.instruction else {
                 return Err(CompilerError::InvariantViolation(
@@ -52,16 +66,7 @@ pub(crate) fn cost_of_source_ops(
                 label: view.operation.label.clone(),
             })
         })
-        .collect::<Result<Vec<_>, CompilerError>>()?;
-    let mut cost = target_aware_cost_of_value_operations(
-        &operations,
-        target,
-        TwoQubitUnitaryDecomposeBasis::PauliRotations,
-    )?;
-    // Backend preference orders equivalent synthesis candidates only. Source
-    // operations must not receive a synthetic backend advantage.
-    cost.backend_order = 0;
-    Ok(cost)
+        .collect()
 }
 
 #[cfg(test)]

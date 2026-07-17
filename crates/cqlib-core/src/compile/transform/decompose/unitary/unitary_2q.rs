@@ -33,6 +33,10 @@
 
 use super::two_qubit_kak::{KakDecomposition, kak_decompose};
 use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
+use super::{
+    DevicePhysicalCost, DevicePreLayoutEvaluation, DeviceSynthesisPlacement,
+    DeviceTwoQubitSynthesisContext,
+};
 use crate::circuit::gate::gate_matrix::rz_gate;
 use crate::circuit::{Instruction, ParameterValue, Qubit, StandardGate, ValueOperation};
 use crate::compile::CompilerError;
@@ -181,6 +185,22 @@ impl TwoQubitSynthesisTarget {
             .as_ref()
             .map(|model| model.signature().clone())
     }
+
+    /// Builds a generator-only target for device-aware physical evaluation.
+    ///
+    /// Device feasibility and cost are evaluated through exact native plans,
+    /// so attaching the basis-only lowering model here would incorrectly
+    /// reject device-lowerable intermediate gates.
+    fn for_device_backends(mut native_2q: Vec<StandardGate>) -> Self {
+        native_2q.sort_by_key(|gate| *gate as u8);
+        native_2q.dedup();
+        Self {
+            native_2q,
+            native_1q: Vec::new(),
+            fallback_pauli: true,
+            lowering_cost_model: None,
+        }
+    }
 }
 
 impl Default for TwoQubitSynthesisTarget {
@@ -241,6 +261,15 @@ pub struct TwoQubitSynthesisCandidate {
     pub operations: Vec<ValueOperation>,
     pub global_phase: f64,
     pub cost: TargetAwareSynthesisCost,
+}
+
+/// Internal device-scored candidate with deterministic direction metadata.
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceTwoQubitSynthesisCandidate {
+    pub(crate) candidate: TwoQubitSynthesisCandidate,
+    pub(crate) physical_cost: DevicePhysicalCost,
+    pub(crate) pre_layout: Option<DevicePreLayoutEvaluation>,
+    direction_order: usize,
 }
 
 /// Numeric synthesis result for a two-qubit unitary matrix.
@@ -337,6 +366,164 @@ pub fn plan_numeric_2q_unitary(
             .then_with(|| lhs.operations.len().cmp(&rhs.operations.len()))
     });
     Ok(candidates)
+}
+
+/// Plans exact two-qubit candidates against one pass-local device context.
+pub(crate) fn plan_numeric_2q_unitary_for_device(
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    context: &DeviceTwoQubitSynthesisContext,
+) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
+    let mut native_2q = context
+        .native_two_qubit_backends(qubits)
+        .into_iter()
+        .collect::<Vec<_>>();
+    native_2q.sort_by_key(|gate| *gate as u8);
+    let target = TwoQubitSynthesisTarget::for_device_backends(native_2q);
+    let mut oriented = Vec::new();
+
+    for candidate in plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+        matrix,
+        qubits,
+        target: target.clone(),
+    })? {
+        push_device_candidate(&mut oriented, candidate, qubits, 0, context);
+    }
+
+    let swap = StandardGate::SWAP
+        .matrix(&[])
+        .map_err(CompilerError::Circuit)?
+        .into_owned();
+    let reversed_matrix = swap.dot(matrix).dot(&swap);
+    let reversed_qubits = [qubits[1], qubits[0]];
+    for candidate in plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+        matrix: &reversed_matrix,
+        qubits: reversed_qubits,
+        target,
+    })? {
+        if candidate_matches_matrix(
+            &candidate.operations,
+            candidate.global_phase,
+            matrix,
+            qubits,
+        )? {
+            push_device_candidate(&mut oriented, candidate, qubits, 1, context);
+        }
+    }
+
+    Ok(oriented)
+}
+
+/// Selects the best unitary decomposition without comparing unlike placement domains.
+pub(crate) fn select_device_unitary_candidate(
+    mut candidates: Vec<DeviceTwoQubitSynthesisCandidate>,
+    qubits: [Qubit; 2],
+    context: &DeviceTwoQubitSynthesisContext,
+) -> Option<TwoQubitSynthesisCandidate> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    match context.placement() {
+        DeviceSynthesisPlacement::ExactPhysical => {
+            candidates.sort_by(compare_device_candidates);
+        }
+        DeviceSynthesisPlacement::PreLayoutEnvelope => {
+            let best_coverage = candidates
+                .iter()
+                .filter_map(|candidate| candidate.pre_layout.as_ref())
+                .map(|evaluation| evaluation.coverage)
+                .min()?;
+            candidates.retain(|candidate| {
+                candidate
+                    .pre_layout
+                    .as_ref()
+                    .is_some_and(|evaluation| evaluation.coverage == best_coverage)
+            });
+
+            let mut common_domain = candidates
+                .first()
+                .and_then(|candidate| candidate.pre_layout.as_ref())?
+                .domain
+                .clone();
+            for candidate in candidates.iter().skip(1) {
+                let domain = &candidate.pre_layout.as_ref()?.domain;
+                common_domain.retain(|pair| domain.contains(pair));
+            }
+
+            if common_domain.is_empty() {
+                candidates.sort_by(compare_stable_device_candidates);
+            } else {
+                for candidate in &mut candidates {
+                    candidate.physical_cost = context.worst_cost_on_domain(
+                        &candidate.candidate.operations,
+                        qubits,
+                        &common_domain,
+                    )?;
+                }
+                candidates.sort_by(compare_device_candidates);
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.candidate)
+}
+
+fn push_device_candidate(
+    output: &mut Vec<DeviceTwoQubitSynthesisCandidate>,
+    candidate: TwoQubitSynthesisCandidate,
+    qubits: [Qubit; 2],
+    direction_order: usize,
+    context: &DeviceTwoQubitSynthesisContext,
+) {
+    match context.placement() {
+        DeviceSynthesisPlacement::PreLayoutEnvelope => {
+            if let Some(evaluation) = context.evaluate_pre_layout(&candidate.operations, qubits) {
+                output.push(DeviceTwoQubitSynthesisCandidate {
+                    physical_cost: evaluation.worst_cost,
+                    pre_layout: Some(evaluation),
+                    candidate,
+                    direction_order,
+                });
+            }
+        }
+        DeviceSynthesisPlacement::ExactPhysical => {
+            if let Some(physical_cost) = context.exact_cost(&candidate.operations, qubits) {
+                output.push(DeviceTwoQubitSynthesisCandidate {
+                    candidate,
+                    physical_cost,
+                    pre_layout: None,
+                    direction_order,
+                });
+            }
+        }
+    }
+}
+
+fn compare_device_candidates(
+    left: &DeviceTwoQubitSynthesisCandidate,
+    right: &DeviceTwoQubitSynthesisCandidate,
+) -> std::cmp::Ordering {
+    left.physical_cost
+        .compare(right.physical_cost)
+        .then_with(|| compare_stable_device_candidates(left, right))
+}
+
+fn compare_stable_device_candidates(
+    left: &DeviceTwoQubitSynthesisCandidate,
+    right: &DeviceTwoQubitSynthesisCandidate,
+) -> std::cmp::Ordering {
+    backend_order(left.candidate.backend)
+        .cmp(&backend_order(right.candidate.backend))
+        .then_with(|| left.direction_order.cmp(&right.direction_order))
+        .then_with(|| {
+            left.candidate
+                .operations
+                .len()
+                .cmp(&right.candidate.operations.len())
+        })
 }
 
 #[derive(Default)]

@@ -45,7 +45,9 @@ use crate::circuit::{Circuit, Instruction};
 use crate::compile::CompilerError;
 use crate::compile::resource::ResourceLimits;
 use crate::compile::sabre::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
-use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
+};
 use crate::compile::transform::decompose::{
     DecomposeDefinitions, DecomposeMcGates, DecomposeUnitaries, McGateDecomposeConfig,
     UnitaryDecomposeConfig,
@@ -182,7 +184,12 @@ impl CompilerWorkflow {
             "canonicalize.after_decomposition",
             |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
         )?;
-        self.apply_two_qubit_resynthesis(state, "optimization", "resynthesize.two_qubit_blocks")
+        self.apply_two_qubit_resynthesis(
+            state,
+            "optimization",
+            "resynthesize.two_qubit_blocks",
+            DeviceSynthesisPlacement::PreLayoutEnvelope,
+        )
     }
 
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -342,11 +349,24 @@ impl CompilerWorkflow {
 
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.unitary_decompose_config_for_state(state);
+        let decomposer = if let Some(target) = self
+            .device_target()
+            .filter(|_| state.analysis.has_unitary_gates)
+        {
+            let context = DeviceTwoQubitSynthesisContext::build(
+                &target.device,
+                &state.current,
+                DeviceSynthesisPlacement::PreLayoutEnvelope,
+            )?;
+            DecomposeUnitaries::new_device_aware(config, context)
+        } else {
+            DecomposeUnitaries::new(config)
+        };
         apply_circuit_transform(
             state,
             "translation",
             "decompose.unitary",
-            |circuit, analysis| DecomposeUnitaries::new(config).transform(circuit, Some(analysis)),
+            |circuit, analysis| decomposer.transform(circuit, Some(analysis)),
         )
     }
 
@@ -372,10 +392,21 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
         stage: &'static str,
         name: &'static str,
+        placement: DeviceSynthesisPlacement,
     ) -> Result<(), CompilerError> {
         let config = self.two_qubit_resynthesis_config_for_state(state);
+        let resynthesizer = if let Some(target) = self
+            .device_target()
+            .filter(|_| ResynthesizeTwoQubitBlocks::is_applicable(&state.current))
+        {
+            let context =
+                DeviceTwoQubitSynthesisContext::build(&target.device, &state.current, placement)?;
+            ResynthesizeTwoQubitBlocks::new_device_aware(config, context)
+        } else {
+            ResynthesizeTwoQubitBlocks::new(config)
+        };
         apply_circuit_transform(state, stage, name, |circuit, analysis| {
-            ResynthesizeTwoQubitBlocks::new(config).transform(circuit, Some(analysis))
+            resynthesizer.transform(circuit, Some(analysis))
         })
     }
 
@@ -396,6 +427,7 @@ impl CompilerWorkflow {
             state,
             "optimization",
             "resynthesize.two_qubit_blocks.post_routing",
+            DeviceSynthesisPlacement::ExactPhysical,
         )
     }
 

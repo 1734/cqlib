@@ -42,6 +42,7 @@
 //!   primitive used by the two-qubit emitter.
 
 pub mod decompose;
+pub(crate) mod device_synthesis;
 pub mod two_qubit_kak;
 pub mod unitary_1q;
 pub mod unitary_2q;
@@ -56,4 +57,9 @@ pub use unitary_2q::{
     TargetAwareSynthesisCost, TwoQubitSynthesisCandidate, TwoQubitSynthesisRequest,
     TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis, TwoQubitUnitarySynthesisResult,
     plan_numeric_2q_unitary, synthesize_numeric_2q_unitary, target_aware_cost_of_value_operations,
+};
+
+pub(crate) use device_synthesis::{
+    DevicePhysicalCost, DevicePreLayoutEvaluation, DeviceSynthesisPlacement,
+    DeviceTwoQubitSynthesisContext,
 };

@@ -35,13 +35,15 @@
 //! rejects unresolved or non-finite unitary parameters, missing matrices,
 //! invalid matrix shapes, and unitary gates acting on three or more qubits.
 
+use super::DeviceTwoQubitSynthesisContext;
 use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 use super::unitary_2q::{
     TwoQubitSynthesisRequest, TwoQubitSynthesisTarget, plan_numeric_2q_unitary,
+    plan_numeric_2q_unitary_for_device, select_device_unitary_candidate,
 };
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
-    StandardGate, UnitaryGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction,
+    Qubit, StandardGate, UnitaryGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction,
     ValueOperation, ValueSwitchCase,
 };
 use crate::compile::CompilerError;
@@ -55,6 +57,7 @@ use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::smallvec;
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 const SYNTHESIS_NAME: &str = "decompose.unitary";
 const ANGLE_EPS: f64 = 1e-12;
@@ -85,11 +88,25 @@ impl Default for UnitaryDecomposeConfig {
 #[derive(Debug, Clone)]
 pub struct DecomposeUnitaries {
     config: UnitaryDecomposeConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
 }
 
 impl DecomposeUnitaries {
     pub fn new(config: UnitaryDecomposeConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            device_context: None,
+        }
+    }
+
+    pub(crate) fn new_device_aware(
+        config: UnitaryDecomposeConfig,
+        device_context: DeviceTwoQubitSynthesisContext,
+    ) -> Self {
+        Self {
+            config,
+            device_context: Some(device_context),
+        }
     }
 }
 
@@ -123,7 +140,11 @@ impl Transformer for DecomposeUnitaries {
                 changed: false,
             });
         }
-        let result = decompose_unitaries_transform(circuit, self.config.clone())?;
+        let result = decompose_unitaries_transform_with_device(
+            circuit,
+            self.config.clone(),
+            self.device_context.clone(),
+        )?;
         if result.changed {
             Ok(result)
         } else {
@@ -166,6 +187,15 @@ fn decompose_unitaries_transform(
     decompose_unitaries_transform_with_rule_stats(circuit, config).map(|(result, _)| result)
 }
 
+fn decompose_unitaries_transform_with_device(
+    circuit: &Circuit,
+    config: UnitaryDecomposeConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+) -> Result<TransformResult, CompilerError> {
+    decompose_unitaries_transform_with_context(circuit, config, device_context)
+        .map(|(result, _)| result)
+}
+
 /// Rewrites supported matrix-backed unitary operations and returns runtime rule stats.
 ///
 /// This diagnostic entry point exposes pass-local decomposition-rule reuse for
@@ -181,11 +211,21 @@ fn decompose_unitaries_transform_with_rule_stats(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
 ) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+    decompose_unitaries_transform_with_context(circuit, config, None)
+}
+
+fn decompose_unitaries_transform_with_context(
+    circuit: &Circuit,
+    config: UnitaryDecomposeConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
     let decomposer = UnitaryDecomposer {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
         top_phase: circuit.global_phase(),
         config,
+        device_context,
+        device_cache: HashMap::new(),
         rule_cache: DecompositionRuleCache::default(),
         changed: false,
     };
@@ -197,13 +237,22 @@ struct UnitaryDecomposer<'a> {
     rebuild: CircuitRebuildContext,
     top_phase: Parameter,
     config: UnitaryDecomposeConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+    device_cache: HashMap<DeviceUnitaryCacheKey, Decomposition>,
     rule_cache: DecompositionRuleCache,
     changed: bool,
 }
 
+#[derive(Clone)]
 struct Decomposition {
     operations: Vec<ValueOperation>,
     phase_delta: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DeviceUnitaryCacheKey {
+    matrix_bits: Vec<(u64, u64)>,
+    ordered_qargs: [Qubit; 2],
 }
 
 impl<'a> UnitaryDecomposer<'a> {
@@ -465,6 +514,34 @@ impl<'a> UnitaryDecomposer<'a> {
             }
             2 => {
                 let qubits = [operation.qubits[0], operation.qubits[1]];
+                if let Some(context) = self.device_context.as_ref() {
+                    let cache_key = DeviceUnitaryCacheKey {
+                        matrix_bits: matrix
+                            .iter()
+                            .map(|value| (value.re.to_bits(), value.im.to_bits()))
+                            .collect(),
+                        ordered_qargs: qubits,
+                    };
+                    if let Some(decomposition) = self.device_cache.get(&cache_key) {
+                        return Ok(decomposition.clone());
+                    }
+                    let candidates =
+                        plan_numeric_2q_unitary_for_device(matrix.as_ref(), qubits, context)?;
+                    let candidate = select_device_unitary_candidate(candidates, qubits, context)
+                        .ok_or_else(|| CompilerError::TransformFailed {
+                            name: SYNTHESIS_NAME,
+                            reason: format!(
+                                "no exact device-aware two-qubit synthesis candidate for UnitaryGate '{}'",
+                                gate.label()
+                            ),
+                        })?;
+                    let decomposition = Decomposition {
+                        operations: candidate.operations,
+                        phase_delta: candidate.global_phase,
+                    };
+                    self.device_cache.insert(cache_key, decomposition.clone());
+                    return Ok(decomposition);
+                }
                 let request = NumericUnitaryRuleRequest {
                     num_qubits: gate.num_qubits(),
                     matrix: matrix.as_ref(),

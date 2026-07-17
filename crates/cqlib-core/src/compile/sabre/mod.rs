@@ -106,6 +106,9 @@ mod heuristic;
 mod layer;
 mod routing;
 
+pub(crate) use cost::{
+    CalibrationEstimator, MetricAvailability, NativePlanCost, RobustDurationKey, RobustErrorKey,
+};
 pub(crate) use dag::SabreDag;
 pub use heuristic::{
     SabreConfig, SabreHeuristicConfig, SabreTrialObjective, SabreVf2PrepassConfig,

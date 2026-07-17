@@ -343,6 +343,192 @@ fn workflow_uses_cx_kak_for_cx_target() {
 }
 
 #[test]
+fn workflow_uses_three_native_cx_for_device_targeted_swap_unitary() {
+    let gate = UnitaryGate::new("DEVICE_CX_SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let device = Device::bidirectional_line("device-cx-kak", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(41),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CX).count(),
+        3
+    );
+    assert!(
+        ops.iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CX))
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn workflow_uses_three_native_cz_for_device_targeted_swap_unitary() {
+    let gate = UnitaryGate::new("DEVICE_CZ_SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let device = Device::bidirectional_line("device-cz-kak", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CZ),
+        ])
+        .unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(43),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CZ).count(),
+        3
+    );
+    assert!(
+        ops.iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn enhanced_exact_pair_resynthesis_removes_local_family_lowering_overhead() {
+    // Pre-layout prefers the broad CX family when CZ is only native on one edge
+    // (see device_synthesis pre_layout coverage test). Force the routed pair onto
+    // that CZ-only edge so Enhanced post-routing ExactPhysical resynthesis can
+    // rewrite CX → native CZ and avoid per-CX H-CZ-H lowering overhead.
+    let p1 = PhysicalQubit::new(1);
+    let p2 = PhysicalQubit::new(2);
+    let mut device = Device::bidirectional_line("heterogeneous-exact-pair", 4)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    for (control, target) in [(p1, p2), (p2, p1)] {
+        device
+            .add_edge_properties(
+                control,
+                target,
+                EdgeProp::new()
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::CZ),
+                        0.005,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let gate = UnitaryGate::new("LOCAL_CZ_SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    // The four-qubit device gives CX wider physical-pair coverage than the
+    // single CZ-only edge; logical qubit indices do not affect that envelope.
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let initial_layout = Layout::from_pairs(&[(0, 1), (1, 2)], 4).unwrap();
+    let compile_for_mode = |mode| {
+        CompilerWorkflow::new(CompileConfig {
+            mode,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device: device.clone(),
+                initial_layout: Some(initial_layout.clone()),
+                seed: Some(47),
+            }),
+            resource_policy: ResourcePolicy::default(),
+        })
+        .run(&circuit)
+        .unwrap()
+    };
+
+    let normal = compile_for_mode(CompileMode::Normal);
+    let enhanced = compile_for_mode(CompileMode::Enhanced);
+    let enhanced_ops = standard_ops(&enhanced.circuit);
+    let normal_ops = standard_ops(&normal.circuit);
+
+    assert_eq!(
+        enhanced_ops
+            .iter()
+            .filter(|gate| **gate == StandardGate::CZ)
+            .count(),
+        3
+    );
+    assert!(
+        enhanced_ops
+            .iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
+    );
+    // Normal has no post-routing resynthesis, so CX survives until DeviceLowerer
+    // and expands on the CZ-only edge (more total ops than direct 3×CZ).
+    assert!(
+        normal_ops
+            .iter()
+            .filter(|gate| matches!(gate, StandardGate::CX | StandardGate::CZ))
+            .count()
+            >= 3
+    );
+    assert!(
+        enhanced.circuit.operations().len() < normal.circuit.operations().len(),
+        "enhanced={} normal={}",
+        enhanced.circuit.operations().len(),
+        normal.circuit.operations().len()
+    );
+    assert!(!step_changed(
+        &normal,
+        "resynthesize.two_qubit_blocks.post_routing"
+    ));
+    assert!(step_changed(
+        &enhanced,
+        "resynthesize.two_qubit_blocks.post_routing"
+    ));
+    let mut physical_expected = Circuit::new(4);
+    physical_expected
+        .swap(Qubit::new(1), Qubit::new(2))
+        .unwrap();
+    assert_compiled_circuit_equivalent(&enhanced.circuit, &physical_expected);
+    device.validate_circuit(&enhanced.circuit).unwrap();
+}
+
+#[test]
 fn workflow_runs_two_qubit_resynthesis_after_decomposition() {
     let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
         .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
