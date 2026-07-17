@@ -59,6 +59,7 @@ pub mod canonicalize;
 pub mod decompose;
 pub mod device_lowering;
 pub mod layout;
+pub(crate) mod native_optimization;
 pub mod rebuild;
 pub mod resynthesis;
 pub mod rewrite;

@@ -24,8 +24,9 @@
 //! canonicalize again, optimize the decomposed circuit, optionally lower to a
 //! routing-compatible basis, optionally route on a device, optionally translate
 //! to the resolved target basis, and canonicalize the output representation. A
-//! device workflow then lowers every gate to exact ordered native capabilities
-//! and validates the completed physical circuit before returning it.
+//! device workflow then lowers every gate to exact ordered native capabilities,
+//! closes a bounded native-optimization loop, and validates the completed
+//! physical circuit before returning it.
 //!
 //! The enhanced workflow uses the same required correctness stages but raises
 //! rewrite budgets, uses stronger SABRE trial settings, performs a
@@ -39,7 +40,8 @@
 //! high-level gate decomposition remove operations that routing cannot accept,
 //! routing runs before final target-basis cleanup because it may insert SWAPs,
 //! and output canonicalization removes representation noise before exact device
-//! lowering. Device validation is terminal: no circuit transform runs after it.
+//! lowering. Native optimization is re-legalized and costed on exact physical
+//! qargs; device validation remains terminal, with no transform after it.
 
 use crate::circuit::{Circuit, Instruction};
 use crate::compile::CompilerError;
@@ -53,6 +55,7 @@ use crate::compile::transform::decompose::{
     UnitaryDecomposeConfig,
 };
 use crate::compile::transform::layout::build_physical_layout_graph;
+use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, DeviceLowerer, KnowledgeRewriter, LayoutObjective,
     LowerToRoutingBasis, ResynthesizeTwoQubitBlocks, RewriteConfig, TargetBasisLowerer,
@@ -139,6 +142,8 @@ impl CompilerWorkflow {
         self.lower_target(&mut state)?;
         self.lower_output(&mut state)?;
         self.lower_device_instructions(&mut state)?;
+        self.canonicalize_native_input(&mut state)?;
+        self.optimize_native_instructions(&mut state)?;
         self.validate_device(&mut state)?;
 
         Ok(CompileResult {
@@ -272,6 +277,78 @@ impl CompilerWorkflow {
             "lower.device_instructions",
             |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
         )
+    }
+
+    fn canonicalize_native_input(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        if self.device_target().is_none() {
+            record_skipped(
+                state,
+                "optimization",
+                "canonicalize.native_input",
+                "no target device configured",
+            );
+            return Ok(());
+        }
+        apply_circuit_transform(
+            state,
+            "optimization",
+            "canonicalize.native_input",
+            |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
+        )
+    }
+
+    fn optimize_native_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        let Some(target) = self.device_target() else {
+            record_skipped(
+                state,
+                "optimization",
+                "optimize.native_fixed_point",
+                "no target device configured",
+            );
+            return Ok(());
+        };
+        let (max_rounds, max_stale_rounds) = match self.config.mode {
+            CompileMode::Normal => (2, 1),
+            CompileMode::Enhanced => (8, 3),
+        };
+        let optimizer = NativeOptimizer::new(
+            &target.device,
+            self.two_qubit_resynthesis_config_for_state(state),
+            max_rounds,
+            max_stale_rounds,
+        );
+        let result = optimizer.run(&state.current)?;
+        if result.changed {
+            state.analysis = CircuitAnalysis::analyze(&result.circuit);
+        }
+        state.current = result.circuit;
+        state.changed |= result.changed;
+        state.steps.push(WorkflowStepReport {
+            stage: "optimization",
+            name: "optimize.native_fixed_point",
+            changed: result.changed,
+            skipped: false,
+            reason: Some(format!(
+                "rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}",
+                result.rounds,
+                result.restored_best,
+                result.before.native_two_qubit_ops,
+                result.after.native_two_qubit_ops,
+                result.before.native_two_qubit_depth,
+                result.after.native_two_qubit_depth,
+                result.before.total_native_depth,
+                result.after.total_native_depth,
+                result.before.native_total_ops,
+                result.after.native_total_ops,
+                result.before.predicted_log_error,
+                result.after.predicted_log_error,
+                result.before.unavailable_error_count,
+                result.after.unavailable_error_count,
+                result.before.imputed_error_count,
+                result.after.imputed_error_count,
+            )),
+        });
+        Ok(())
     }
 
     fn validate_device(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {

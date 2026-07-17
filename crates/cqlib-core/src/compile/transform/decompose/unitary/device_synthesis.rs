@@ -137,11 +137,11 @@ impl DeviceTwoQubitSynthesisContext {
         };
         let root_qubits = match placement {
             DeviceSynthesisPlacement::PreLayoutEnvelope => physical_qubits.clone(),
-            DeviceSynthesisPlacement::ExactPhysical => ordered_pairs
+            DeviceSynthesisPlacement::ExactPhysical => circuit
+                .qubits()
                 .iter()
-                .flat_map(|pair| pair.iter().copied())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
+                .copied()
+                .map(PhysicalQubit::from_qubit)
                 .collect(),
         };
         let source_gates = collect_source_standard_gates(circuit.operations());
@@ -263,6 +263,48 @@ impl DeviceTwoQubitSynthesisContext {
         }
         let pair = physical_qubits.map(PhysicalQubit::from_qubit);
         self.cost_on_pair(operations, physical_qubits, pair)
+    }
+
+    /// Costs one flat operation sequence on the physical qargs carried by the
+    /// operations themselves.
+    ///
+    /// Every gate-like operation is expanded through the same selected native
+    /// plan used by [`DeviceLowerer`](crate::compile::transform::DeviceLowerer).
+    /// Control flow and non-gate instructions are deliberately outside this
+    /// sequence-level API and make the sequence unavailable for costing.
+    pub(crate) fn exact_sequence_cost(
+        &self,
+        operations: &[ValueOperation],
+    ) -> Option<DevicePhysicalCost> {
+        if self.data.placement != DeviceSynthesisPlacement::ExactPhysical {
+            return None;
+        }
+
+        let mut leaves = Vec::new();
+        let mut aggregate = self.data.estimator.identity_cost();
+        for operation in operations {
+            let ValueInstruction::Instruction(instruction) = &operation.instruction else {
+                return None;
+            };
+            if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
+                continue;
+            }
+            let ordered_qargs = operation
+                .qubits
+                .iter()
+                .copied()
+                .map(PhysicalQubit::from_qubit)
+                .collect();
+            let state = DeviceGateState::from_instruction(instruction, ordered_qargs)?;
+            let summary = self.data.catalog.summary(&state)?;
+            aggregate = aggregate.combine(self.data.estimator.cost(summary));
+            leaves.extend(summary.leaves.iter().cloned());
+        }
+        Some(schedule_physical_cost(
+            &leaves,
+            aggregate,
+            &self.data.estimator,
+        ))
     }
 
     fn coverage_key(&self, domain: &OrderedPairDomain) -> DeviceCoverageKey {
@@ -692,5 +734,39 @@ mod tests {
         };
 
         assert!(!cost.strictly_better_than(cost));
+    }
+
+    #[test]
+    fn exact_sequence_cost_supports_one_qubit_only_circuits() {
+        let device = Device::line("one-qubit-sequence", 1)
+            .unwrap()
+            .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+            .unwrap()
+            .with_default_single_qubit_error(0.001);
+        let q0 = Qubit::new(0);
+        let mut circuit = Circuit::new(1);
+        circuit.u(q0, 0.3, -0.2, 0.7).unwrap();
+        let context = DeviceTwoQubitSynthesisContext::build(
+            &device,
+            &circuit,
+            DeviceSynthesisPlacement::ExactPhysical,
+        )
+        .unwrap();
+        let operations = vec![ValueOperation {
+            instruction: ValueInstruction::from_instruction(Instruction::Standard(StandardGate::U)),
+            qubits: smallvec![q0],
+            params: smallvec![
+                ParameterValue::Fixed(0.3),
+                ParameterValue::Fixed(-0.2),
+                ParameterValue::Fixed(0.7),
+            ],
+            label: None,
+        }];
+
+        let cost = context.exact_sequence_cost(&operations).unwrap();
+
+        assert_eq!(cost.native_two_qubit_ops, 0);
+        assert_eq!(cost.native_total_ops, 1);
+        assert_eq!(cost.total_native_depth, 1);
     }
 }

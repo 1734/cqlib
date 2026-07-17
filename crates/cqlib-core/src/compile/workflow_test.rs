@@ -181,6 +181,8 @@ fn normal_workflow_reports_staged_order() {
             "translate.target_basis",
             "canonicalize.output",
             "lower.device_instructions",
+            "canonicalize.native_input",
+            "optimize.native_fixed_point",
             "validate.device",
         ]
     );
@@ -189,6 +191,8 @@ fn normal_workflow_reports_staged_order() {
     assert!(result.steps[12].skipped);
     assert!(result.steps[14].skipped);
     assert!(result.steps[15].skipped);
+    assert!(result.steps[16].skipped);
+    assert!(result.steps[17].skipped);
 }
 
 #[test]
@@ -260,6 +264,8 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "optimize.target_cleanup",
             "canonicalize.output",
             "lower.device_instructions",
+            "canonicalize.native_input",
+            "optimize.native_fixed_point",
             "validate.device",
         ]
     );
@@ -427,11 +433,12 @@ fn workflow_uses_three_native_cz_for_device_targeted_swap_unitary() {
 }
 
 #[test]
-fn enhanced_exact_pair_resynthesis_removes_local_family_lowering_overhead() {
+fn native_fixed_point_recovers_exact_pair_lowering_in_both_modes() {
     // Pre-layout prefers the broad CX family when CZ is only native on one edge
     // (see device_synthesis pre_layout coverage test). Force the routed pair onto
-    // that CZ-only edge so Enhanced post-routing ExactPhysical resynthesis can
-    // rewrite CX → native CZ and avoid per-CX H-CZ-H lowering overhead.
+    // that CZ-only edge. Enhanced can recover the exact-pair implementation in
+    // its post-routing step, while Normal recovers it in the shared native
+    // fixed-point closure.
     let p1 = PhysicalQubit::new(1);
     let p2 = PhysicalQubit::new(2);
     let mut device = Device::bidirectional_line("heterogeneous-exact-pair", 4)
@@ -497,20 +504,17 @@ fn enhanced_exact_pair_resynthesis_removes_local_family_lowering_overhead() {
             .iter()
             .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
     );
-    // Normal has no post-routing resynthesis, so CX survives until DeviceLowerer
-    // and expands on the CZ-only edge (more total ops than direct 3×CZ).
+    assert_eq!(
+        normal_ops
+            .iter()
+            .filter(|gate| **gate == StandardGate::CZ)
+            .count(),
+        3
+    );
     assert!(
         normal_ops
             .iter()
-            .filter(|gate| matches!(gate, StandardGate::CX | StandardGate::CZ))
-            .count()
-            >= 3
-    );
-    assert!(
-        enhanced.circuit.operations().len() < normal.circuit.operations().len(),
-        "enhanced={} normal={}",
-        enhanced.circuit.operations().len(),
-        normal.circuit.operations().len()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
     );
     assert!(!step_changed(
         &normal,
@@ -520,12 +524,15 @@ fn enhanced_exact_pair_resynthesis_removes_local_family_lowering_overhead() {
         &enhanced,
         "resynthesize.two_qubit_blocks.post_routing"
     ));
+    assert!(step_changed(&normal, "optimize.native_fixed_point"));
     let mut physical_expected = Circuit::new(4);
     physical_expected
         .swap(Qubit::new(1), Qubit::new(2))
         .unwrap();
     assert_compiled_circuit_equivalent(&enhanced.circuit, &physical_expected);
+    assert_compiled_circuit_equivalent(&normal.circuit, &physical_expected);
     device.validate_circuit(&enhanced.circuit).unwrap();
+    device.validate_circuit(&normal.circuit).unwrap();
 }
 
 #[test]

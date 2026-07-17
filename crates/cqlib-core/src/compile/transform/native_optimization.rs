@@ -1,0 +1,1264 @@
+// This code is part of Cqlib.
+//
+// (C) Copyright China Telecom Quantum Group 2026
+//
+// This code is licensed under the Apache License, Version 2.0. You may
+// obtain a copy of this license in the LICENSE.txt file in the root directory
+// of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
+//
+// Any modifications or derivative works of this code must retain this
+// copyright notice, and modified files need to carry a notice indicating
+// that they have been altered from the originals.
+
+//! Exact physical optimization after device instruction lowering.
+//!
+//! [`NativeOptimizer`] closes a bounded loop over exact-physical two-qubit
+//! resynthesis, local phase/frame optimization, device re-legalization, and
+//! canonicalization. Every transform recursively visits structured control-flow
+//! bodies, while the loop itself advances all scopes synchronously.
+//!
+//! Candidate circuits are accepted only when their `DevicePhysicalCost`
+//! (represented internally by the exact sequence evaluator) is non-worse in
+//! every corresponding control-flow scope and strictly better in at least one.
+//! This conservative Pareto rule avoids assigning an arbitrary execution count
+//! to conditional or loop bodies. The optimizer restores the best whole-circuit
+//! point seen; it does not splice independently optimal bodies from different
+//! rounds.
+
+use crate::circuit::{
+    Circuit, ClassicalControlOp, Directive, Instruction, Operation, Parameter, ParameterValue,
+    Qubit, StandardGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction,
+    ValueOperation, ValueSwitchCase,
+};
+use crate::compile::CompilerError;
+use crate::compile::sabre::MetricAvailability;
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, OneQubitUnitaryDecomposition,
+    synthesize_numeric_1q_unitary,
+};
+use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
+use crate::compile::transform::resynthesis::TwoQubitBlockResynthesisConfig;
+use crate::compile::transform::{
+    Canonicalizer, CircuitAnalysis, DeviceLowerer, ResynthesizeTwoQubitBlocks, TransformResult,
+    Transformer,
+};
+use crate::device::Device;
+use ndarray::Array2;
+use num_complex::Complex64;
+use smallvec::{SmallVec, smallvec};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+
+const PHASE_EPS: f64 = 1e-12;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct NativeOptimizationSummary {
+    pub(crate) native_two_qubit_ops: u64,
+    pub(crate) native_two_qubit_depth: u64,
+    pub(crate) total_native_depth: u64,
+    pub(crate) native_total_ops: u64,
+    pub(crate) predicted_log_error: Option<f64>,
+    pub(crate) unavailable_error_count: u64,
+    pub(crate) imputed_error_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NativeOptimizationResult {
+    pub(crate) circuit: Circuit,
+    pub(crate) changed: bool,
+    pub(crate) rounds: u8,
+    pub(crate) restored_best: bool,
+    pub(crate) before: NativeOptimizationSummary,
+    pub(crate) after: NativeOptimizationSummary,
+}
+
+/// Bounded native optimization loop with minimum-point restoration.
+pub(crate) struct NativeOptimizer<'a> {
+    device: &'a Device,
+    resynthesis: TwoQubitBlockResynthesisConfig,
+    max_rounds: u8,
+    max_stale_rounds: u8,
+}
+
+impl<'a> NativeOptimizer<'a> {
+    pub(crate) fn new(
+        device: &'a Device,
+        resynthesis: TwoQubitBlockResynthesisConfig,
+        max_rounds: u8,
+        max_stale_rounds: u8,
+    ) -> Self {
+        Self {
+            device,
+            resynthesis,
+            max_rounds,
+            max_stale_rounds,
+        }
+    }
+
+    pub(crate) fn run(&self, circuit: &Circuit) -> Result<NativeOptimizationResult, CompilerError> {
+        let initial = Canonicalizer::production()
+            .transform(circuit, None)?
+            .circuit;
+        self.device.validate_circuit(&initial)?;
+        let mut current = initial.clone();
+        let mut best = initial;
+        let mut best_costs = scope_costs(self.device, &best)?;
+        let before = summarize_scope_costs(&best_costs);
+        let mut rounds = 0;
+        let mut stale = 0;
+        let mut restored_best = false;
+
+        while rounds < self.max_rounds && stale < self.max_stale_rounds {
+            rounds += 1;
+            let context = DeviceTwoQubitSynthesisContext::build(
+                self.device,
+                &current,
+                DeviceSynthesisPlacement::ExactPhysical,
+            )?;
+            let resynthesized =
+                ResynthesizeTwoQubitBlocks::new_device_aware(self.resynthesis.clone(), context)
+                    .transform(&current, None)?
+                    .circuit;
+            let local_context = DeviceTwoQubitSynthesisContext::build(
+                self.device,
+                &resynthesized,
+                DeviceSynthesisPlacement::ExactPhysical,
+            )?;
+            let locally_optimized = OptimizeNativeLocalGates::new(local_context)
+                .transform(&resynthesized, None)?
+                .circuit;
+            let legalized =
+                match DeviceLowerer::new(self.device).transform(&locally_optimized, None) {
+                    Ok(result) => result.circuit,
+                    // Frame propagation is speculative: materializing a combined
+                    // phase as RZ may be impossible on devices whose discrete
+                    // phase gates cannot synthesize arbitrary RZ. Discard only
+                    // that local candidate and retain this round's 2Q result.
+                    Err(CompilerError::DeviceLoweringFailed(_)) => {
+                        DeviceLowerer::new(self.device)
+                            .transform(&resynthesized, None)?
+                            .circuit
+                    }
+                    Err(error) => return Err(error),
+                };
+            let candidate = Canonicalizer::production()
+                .transform(&legalized, None)?
+                .circuit;
+            self.device.validate_circuit(&candidate)?;
+
+            if candidate == current {
+                current = candidate;
+                break;
+            }
+            let candidate_costs = scope_costs(self.device, &candidate)?;
+            if scope_costs_dominate(&candidate_costs, &best_costs) {
+                best = candidate.clone();
+                best_costs = candidate_costs;
+                stale = 0;
+            } else {
+                stale = stale.saturating_add(1);
+            }
+            current = candidate;
+        }
+
+        if current != best {
+            restored_best = true;
+        }
+        let after = summarize_scope_costs(&best_costs);
+        Ok(NativeOptimizationResult {
+            changed: best != *circuit,
+            circuit: best,
+            rounds,
+            restored_best,
+            before,
+            after,
+        })
+    }
+}
+
+fn scope_costs(
+    device: &Device,
+    circuit: &Circuit,
+) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, CompilerError> {
+    let context = DeviceTwoQubitSynthesisContext::build(
+        device,
+        circuit,
+        DeviceSynthesisPlacement::ExactPhysical,
+    )?;
+    let mut costs = Vec::new();
+    collect_scope_costs(circuit.operations(), circuit, &context, &mut costs)?;
+    Ok(costs)
+}
+
+fn collect_scope_costs(
+    operations: &[Operation],
+    circuit: &Circuit,
+    context: &DeviceTwoQubitSynthesisContext,
+    output: &mut Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>,
+) -> Result<(), CompilerError> {
+    let mut gate_operations = Vec::new();
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(_) | Instruction::McGate(_) => {
+                gate_operations.push(ValueOperation {
+                    instruction: ValueInstruction::from_instruction(operation.instruction.clone()),
+                    qubits: operation.qubits.clone(),
+                    params: CircuitRebuildContext::resolve_source_params(
+                        circuit,
+                        &operation.params,
+                    )?,
+                    label: operation.label.clone(),
+                });
+            }
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    collect_scope_costs(op.then_body().operations(), circuit, context, output)?;
+                    if let Some(body) = op.else_body() {
+                        collect_scope_costs(body.operations(), circuit, context, output)?;
+                    }
+                }
+                ClassicalControlOp::While(op) => {
+                    collect_scope_costs(op.body().operations(), circuit, context, output)?;
+                }
+                ClassicalControlOp::For(op) => {
+                    collect_scope_costs(op.body().operations(), circuit, context, output)?;
+                }
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        collect_scope_costs(case.body().operations(), circuit, context, output)?;
+                    }
+                    if let Some(body) = op.default() {
+                        collect_scope_costs(body.operations(), circuit, context, output)?;
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            Instruction::UnitaryGate(_)
+            | Instruction::CircuitGate(_)
+            | Instruction::ClassicalData(_)
+            | Instruction::Directive(_)
+            | Instruction::Delay => {}
+        }
+    }
+    let cost = context
+        .exact_sequence_cost(&gate_operations)
+        .ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "native optimizer could not cost a legalized control-flow scope".to_string(),
+            )
+        })?;
+    output.push(cost);
+    Ok(())
+}
+
+fn scope_costs_dominate(
+    candidate: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
+    current: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
+) -> bool {
+    if candidate.len() != current.len() {
+        return false;
+    }
+    let mut improved = false;
+    for (candidate, current) in candidate.iter().zip(current) {
+        match candidate.compare(*current) {
+            std::cmp::Ordering::Less => improved = true,
+            std::cmp::Ordering::Equal => {}
+            std::cmp::Ordering::Greater => return false,
+        }
+    }
+    improved
+}
+
+fn summarize_scope_costs(
+    costs: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
+) -> NativeOptimizationSummary {
+    let mut predicted_log_error = Some(0.0);
+    let mut unavailable_error_count = 0;
+    let mut imputed_error_count = 0;
+    for cost in costs {
+        match cost.error {
+            MetricAvailability::Available(error) => {
+                if let Some(total) = &mut predicted_log_error {
+                    *total += error.log_error;
+                }
+                unavailable_error_count += u64::from(error.unavailable_count);
+                imputed_error_count += u64::from(error.imputed_count);
+            }
+            MetricAvailability::Disabled | MetricAvailability::Inconsistent => {
+                predicted_log_error = None;
+            }
+        }
+    }
+    NativeOptimizationSummary {
+        native_two_qubit_ops: costs
+            .iter()
+            .map(|cost| u64::from(cost.native_two_qubit_ops))
+            .sum(),
+        native_two_qubit_depth: costs
+            .iter()
+            .map(|cost| u64::from(cost.native_two_qubit_depth))
+            .sum(),
+        total_native_depth: costs
+            .iter()
+            .map(|cost| u64::from(cost.total_native_depth))
+            .sum(),
+        native_total_ops: costs
+            .iter()
+            .map(|cost| u64::from(cost.native_total_ops))
+            .sum(),
+        predicted_log_error,
+        unavailable_error_count,
+        imputed_error_count,
+    }
+}
+
+/// Performs target-costed one-qubit fusion and exact frame propagation.
+#[derive(Debug, Clone)]
+pub(crate) struct OptimizeNativeLocalGates {
+    device_context: DeviceTwoQubitSynthesisContext,
+}
+
+impl OptimizeNativeLocalGates {
+    pub(crate) fn new(device_context: DeviceTwoQubitSynthesisContext) -> Self {
+        Self { device_context }
+    }
+}
+
+impl Transformer for OptimizeNativeLocalGates {
+    fn name(&self) -> &'static str {
+        "optimize.native_local_gates"
+    }
+
+    fn transform(
+        &self,
+        circuit: &Circuit,
+        _analysis: Option<&CircuitAnalysis>,
+    ) -> Result<TransformResult, CompilerError> {
+        NativeLocalPass::run(circuit, &self.device_context)
+    }
+}
+
+struct NativeLocalPass<'a> {
+    source: &'a Circuit,
+    context: &'a DeviceTwoQubitSynthesisContext,
+    rebuild: CircuitRebuildContext,
+}
+
+struct SequenceRewrite {
+    operations: Vec<ValueOperation>,
+    phase_delta: f64,
+    changed: bool,
+}
+
+impl<'a> NativeLocalPass<'a> {
+    fn run(
+        source: &'a Circuit,
+        context: &'a DeviceTwoQubitSynthesisContext,
+    ) -> Result<TransformResult, CompilerError> {
+        let rebuild = CircuitRebuildContext::new(source);
+        let root_classical = rebuild.root_classical().clone();
+        let mut pass = Self {
+            source,
+            context,
+            rebuild,
+        };
+        let rewrite = pass.process_sequence(source.operations(), &root_classical)?;
+        let mut global_phase = source.global_phase();
+        if rewrite.phase_delta.abs() > PHASE_EPS {
+            global_phase = global_phase + Parameter::from(rewrite.phase_delta);
+        }
+        let circuit = pass
+            .rebuild
+            .finish(source.qubits(), rewrite.operations, global_phase)?;
+        Ok(TransformResult {
+            circuit,
+            changed: rewrite.changed,
+        })
+    }
+
+    fn process_sequence(
+        &mut self,
+        operations: &[Operation],
+        classical_remap: &ClassicalRemap,
+    ) -> Result<SequenceRewrite, CompilerError> {
+        let mut values = Vec::with_capacity(operations.len());
+        let mut nested_changed = false;
+        for operation in operations {
+            if let Instruction::ClassicalControl(control) = &operation.instruction {
+                let (instruction, changed) = self.rebuild_control_flow(control, classical_remap)?;
+                values.push(ValueOperation {
+                    qubits: instruction.used_qubits().into_iter().collect(),
+                    instruction: ValueInstruction::ClassicalControl(instruction),
+                    params: CircuitRebuildContext::resolve_source_params(
+                        self.source,
+                        &operation.params,
+                    )?,
+                    label: operation.label.clone(),
+                });
+                nested_changed |= changed;
+            } else {
+                values.push(self.rebuild.remap_preserved_operation(
+                    self.source,
+                    operation,
+                    classical_remap,
+                )?);
+            }
+        }
+
+        let framed = propagate_frames(values)?;
+        let fused = fuse_one_qubit_runs(framed.operations, self.context)?;
+        Ok(SequenceRewrite {
+            operations: fused.operations,
+            phase_delta: framed.phase_delta + fused.phase_delta,
+            changed: nested_changed || framed.changed || fused.changed,
+        })
+    }
+
+    fn rebuild_body(
+        &mut self,
+        operations: &[Operation],
+        classical_remap: &ClassicalRemap,
+    ) -> Result<(ValueControlBody, bool), CompilerError> {
+        let mut rewrite = self.process_sequence(operations, classical_remap)?;
+        if rewrite.phase_delta.abs() > PHASE_EPS {
+            rewrite.operations.insert(
+                0,
+                ValueOperation {
+                    instruction: ValueInstruction::from_instruction(Instruction::Standard(
+                        StandardGate::GPhase,
+                    )),
+                    qubits: SmallVec::new(),
+                    params: smallvec![ParameterValue::Fixed(rewrite.phase_delta)],
+                    label: None,
+                },
+            );
+            rewrite.changed = true;
+        }
+        Ok((ValueControlBody::new(rewrite.operations), rewrite.changed))
+    }
+
+    fn rebuild_control_flow(
+        &mut self,
+        control: &ClassicalControlOp,
+        classical_remap: &ClassicalRemap,
+    ) -> Result<(ValueClassicalControlOp, bool), CompilerError> {
+        Ok(match control {
+            ClassicalControlOp::If(op) => {
+                let (then_body, then_changed) =
+                    self.rebuild_body(op.then_body().operations(), classical_remap)?;
+                let else_rewrite = op
+                    .else_body()
+                    .map(|body| self.rebuild_body(body.operations(), classical_remap))
+                    .transpose()?;
+                let else_changed = else_rewrite.as_ref().is_some_and(|(_, changed)| *changed);
+                (
+                    ValueClassicalControlOp::If {
+                        condition: classical_remap.remap_expr(op.condition())?,
+                        then_body,
+                        else_body: else_rewrite.map(|(body, _)| body),
+                    },
+                    then_changed || else_changed,
+                )
+            }
+            ClassicalControlOp::While(op) => {
+                let (body, changed) = self.rebuild_body(op.body().operations(), classical_remap)?;
+                (
+                    ValueClassicalControlOp::While {
+                        condition: classical_remap.remap_expr(op.condition())?,
+                        body,
+                    },
+                    changed,
+                )
+            }
+            ClassicalControlOp::For(op) => {
+                let (body, changed) = self.rebuild_body(op.body().operations(), classical_remap)?;
+                (
+                    ValueClassicalControlOp::For {
+                        var: classical_remap.remap_var(op.var())?,
+                        start: classical_remap.remap_expr(op.start())?,
+                        stop: classical_remap.remap_expr(op.stop())?,
+                        step: classical_remap.remap_expr(op.step())?,
+                        body,
+                    },
+                    changed,
+                )
+            }
+            ClassicalControlOp::Switch(op) => {
+                let mut changed = false;
+                let cases = op
+                    .cases()
+                    .iter()
+                    .map(|case| {
+                        let (body, body_changed) =
+                            self.rebuild_body(case.body().operations(), classical_remap)?;
+                        changed |= body_changed;
+                        Ok(ValueSwitchCase::new(case.value(), body))
+                    })
+                    .collect::<Result<Vec<_>, CompilerError>>()?;
+                let default_rewrite = op
+                    .default()
+                    .map(|body| self.rebuild_body(body.operations(), classical_remap))
+                    .transpose()?;
+                changed |= default_rewrite
+                    .as_ref()
+                    .is_some_and(|(_, body_changed)| *body_changed);
+                (
+                    ValueClassicalControlOp::Switch {
+                        target: classical_remap.remap_expr(op.target())?,
+                        cases,
+                        default: default_rewrite.map(|(body, _)| body),
+                    },
+                    changed,
+                )
+            }
+            ClassicalControlOp::Break => (ValueClassicalControlOp::Break, false),
+            ClassicalControlOp::Continue => (ValueClassicalControlOp::Continue, false),
+        })
+    }
+}
+
+struct ValueRewrite {
+    operations: Vec<ValueOperation>,
+    phase_delta: f64,
+    changed: bool,
+}
+
+/// Replaces fixed numeric 1Q runs only when the synthesized unitary has a
+/// strictly better exact-physical device cost than the original run.
+fn fuse_one_qubit_runs(
+    operations: Vec<ValueOperation>,
+    context: &DeviceTwoQubitSynthesisContext,
+) -> Result<ValueRewrite, CompilerError> {
+    let runs = collect_one_qubit_runs(&operations);
+    let mut replacements = HashMap::<usize, (Vec<usize>, Vec<ValueOperation>)>::new();
+    let mut phase_delta = 0.0;
+
+    for run in runs.into_iter().filter(|run| run.len() >= 2) {
+        let source_ops = run
+            .iter()
+            .map(|order| operations[*order].clone())
+            .collect::<Vec<_>>();
+        let Some(before_cost) = context.exact_sequence_cost(&source_ops) else {
+            continue;
+        };
+        let Some(matrix) = one_qubit_run_matrix(&source_ops) else {
+            continue;
+        };
+        let Ok(decomposition) = synthesize_numeric_1q_unitary(&matrix) else {
+            continue;
+        };
+        let qubit = source_ops[0].qubits[0];
+        let mut candidate = Vec::new();
+        if decomposition.theta.abs() > PHASE_EPS
+            || decomposition.phi.abs() > PHASE_EPS
+            || decomposition.lambda.abs() > PHASE_EPS
+        {
+            candidate.push(u_operation(qubit, decomposition));
+        }
+        let Some(after_cost) = context.exact_sequence_cost(&candidate) else {
+            continue;
+        };
+        if !after_cost.strictly_better_than(before_cost) {
+            continue;
+        }
+        phase_delta += decomposition.global_phase;
+        replacements.insert(run[0], (run, candidate));
+    }
+
+    if replacements.is_empty() {
+        return Ok(ValueRewrite {
+            operations,
+            phase_delta: 0.0,
+            changed: false,
+        });
+    }
+
+    let mut skipped = HashSet::new();
+    for (first, (orders, _)) in &replacements {
+        skipped.extend(orders.iter().copied().filter(|order| order != first));
+    }
+    let mut output = Vec::with_capacity(operations.len());
+    for (order, operation) in operations.into_iter().enumerate() {
+        if let Some((_, replacement)) = replacements.remove(&order) {
+            output.extend(replacement);
+        } else if !skipped.contains(&order) {
+            output.push(operation);
+        }
+    }
+    Ok(ValueRewrite {
+        operations: output,
+        phase_delta,
+        changed: true,
+    })
+}
+
+fn collect_one_qubit_runs(operations: &[ValueOperation]) -> Vec<Vec<usize>> {
+    let mut active = BTreeMap::<Qubit, Vec<usize>>::new();
+    let mut runs = Vec::new();
+    for (order, operation) in operations.iter().enumerate() {
+        if is_fixed_numeric_one_qubit_gate(operation) {
+            active.entry(operation.qubits[0]).or_default().push(order);
+            continue;
+        }
+
+        let global_boundary = operation.qubits.is_empty()
+            || matches!(operation.instruction, ValueInstruction::ClassicalControl(_))
+            || matches!(
+                operation.instruction,
+                ValueInstruction::Instruction(Instruction::Directive(Directive::Barrier))
+            );
+        if global_boundary {
+            runs.extend(std::mem::take(&mut active).into_values());
+        } else {
+            for qubit in &operation.qubits {
+                if let Some(run) = active.remove(qubit) {
+                    runs.push(run);
+                }
+            }
+        }
+    }
+    runs.extend(active.into_values());
+    runs
+}
+
+fn is_fixed_numeric_one_qubit_gate(operation: &ValueOperation) -> bool {
+    matches!(
+        &operation.instruction,
+        ValueInstruction::Instruction(Instruction::Standard(gate))
+            if gate.num_qubits() == 1
+                && operation.qubits.len() == 1
+                && operation.label.is_none()
+                && operation.params.iter().all(|param| {
+                    matches!(param, ParameterValue::Fixed(value) if value.is_finite())
+                })
+                && gate.matrix(&fixed_params(operation).unwrap_or_default()).is_ok()
+    )
+}
+
+fn fixed_params(operation: &ValueOperation) -> Option<Vec<f64>> {
+    operation
+        .params
+        .iter()
+        .map(|param| match param {
+            ParameterValue::Fixed(value) if value.is_finite() => Some(*value),
+            ParameterValue::Fixed(_) | ParameterValue::Param(_) => None,
+        })
+        .collect()
+}
+
+fn one_qubit_run_matrix(operations: &[ValueOperation]) -> Option<Array2<Complex64>> {
+    let mut matrix = Array2::<Complex64>::eye(2);
+    for operation in operations {
+        let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction
+        else {
+            return None;
+        };
+        let gate_matrix = gate.matrix(&fixed_params(operation)?).ok()?;
+        matrix = gate_matrix.dot(&matrix);
+    }
+    Some(matrix)
+}
+
+fn u_operation(qubit: Qubit, decomposition: OneQubitUnitaryDecomposition) -> ValueOperation {
+    ValueOperation {
+        instruction: ValueInstruction::from_instruction(Instruction::Standard(StandardGate::U)),
+        qubits: smallvec![qubit],
+        params: smallvec![
+            ParameterValue::Fixed(decomposition.theta),
+            ParameterValue::Fixed(decomposition.phi),
+            ParameterValue::Fixed(decomposition.lambda),
+        ],
+        label: None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct QubitFrame {
+    z_angle: f64,
+    pauli_x: bool,
+    pauli_z: bool,
+}
+
+impl QubitFrame {
+    fn is_empty(self) -> bool {
+        self.z_angle.abs() <= PHASE_EPS && !self.pauli_x && !self.pauli_z
+    }
+}
+
+/// Ejects pending Z/Pauli frames forward through a closed table of proven gate
+/// identities and materializes a frame at the first unsupported boundary.
+///
+/// A pending frame occurs earlier in circuit time than the operation currently
+/// being visited. Moving it forward therefore conjugates it by that operation.
+/// Frames never cross structured control flow, labels, barriers, or resets.
+fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, CompilerError> {
+    let mut frames = BTreeMap::<Qubit, QubitFrame>::new();
+    let mut output = Vec::with_capacity(operations.len());
+    let mut phase_delta = 0.0;
+    let mut changed = false;
+
+    for mut operation in operations {
+        if operation.label.is_none()
+            && let Some((qubit, z_angle, phase)) = z_carrier(&operation)
+        {
+            flush_pauli(qubit, &mut frames, &mut output, &mut phase_delta);
+            frames.entry(qubit).or_default().z_angle += z_angle;
+            phase_delta += phase;
+            changed = true;
+            continue;
+        }
+        if operation.label.is_none()
+            && let Some((qubit, x, z, phase)) = pauli_carrier(&operation)
+        {
+            flush_z(qubit, &mut frames, &mut output);
+            let frame = frames.entry(qubit).or_default();
+            let extra_phase = multiply_local_pauli(frame, x, z);
+            phase_delta += phase + f64::from(extra_phase) * FRAC_PI_2;
+            changed = true;
+            continue;
+        }
+
+        let instruction = match &operation.instruction {
+            ValueInstruction::Instruction(instruction) => Some(instruction.clone()),
+            ValueInstruction::ClassicalControl(_) => None,
+        };
+
+        if operation.label.is_none()
+            && matches!(
+                instruction.as_ref(),
+                Some(Instruction::Standard(StandardGate::SWAP))
+            )
+            && operation.qubits.len() == 2
+        {
+            let left = frames.remove(&operation.qubits[0]).unwrap_or_default();
+            let right = frames.remove(&operation.qubits[1]).unwrap_or_default();
+            frames.insert(operation.qubits[0], right);
+            frames.insert(operation.qubits[1], left);
+            output.push(operation);
+            changed |= !left.is_empty() || !right.is_empty();
+            continue;
+        }
+
+        if operation.label.is_none()
+            && let Some(gate @ (StandardGate::CX | StandardGate::CZ)) =
+                instruction.as_ref().and_then(|i| {
+                    let Instruction::Standard(gate @ (StandardGate::CX | StandardGate::CZ)) = i
+                    else {
+                        return None;
+                    };
+                    Some(*gate)
+                })
+            && operation.qubits.len() == 2
+        {
+            let pair = [operation.qubits[0], operation.qubits[1]];
+            if gate == StandardGate::CX {
+                flush_z(pair[1], &mut frames, &mut output);
+            }
+            if pair.iter().any(|qubit| {
+                frames
+                    .get(qubit)
+                    .is_some_and(|frame| frame.pauli_x || frame.pauli_z)
+            }) {
+                for qubit in pair {
+                    flush_z(qubit, &mut frames, &mut output);
+                }
+                phase_delta += propagate_clifford_paulis(gate, pair, &mut frames);
+                changed = true;
+            }
+            output.push(operation);
+            continue;
+        }
+
+        if operation.label.is_none()
+            && let Some(Instruction::Standard(gate)) = instruction.as_ref()
+            && is_z_diagonal(*gate)
+        {
+            let blocked = operation
+                .qubits
+                .iter()
+                .any(|qubit| frames.get(qubit).is_some_and(|frame| frame.pauli_x));
+            if !blocked {
+                output.push(operation);
+                continue;
+            }
+        }
+
+        if operation.label.is_none() && absorb_z_into_xy_axis(&mut operation, &frames) {
+            output.push(operation);
+            changed = true;
+            continue;
+        }
+
+        if instruction
+            .as_ref()
+            .is_some_and(|instruction| instruction.has_measurement())
+        {
+            for qubit in &operation.qubits {
+                if frames.get(qubit).is_some_and(|frame| frame.pauli_x) {
+                    flush_frame(*qubit, &mut frames, &mut output, &mut phase_delta);
+                } else {
+                    changed |= frames.remove(qubit).is_some_and(|frame| !frame.is_empty());
+                }
+            }
+            output.push(operation);
+            continue;
+        }
+
+        let global_boundary = operation.qubits.is_empty()
+            || operation.label.is_some()
+            || matches!(operation.instruction, ValueInstruction::ClassicalControl(_))
+            || matches!(
+                instruction.as_ref(),
+                Some(Instruction::Directive(
+                    Directive::Barrier | Directive::Reset
+                ))
+            );
+        if global_boundary {
+            flush_all(&mut frames, &mut output, &mut phase_delta);
+        } else {
+            for qubit in &operation.qubits {
+                flush_frame(*qubit, &mut frames, &mut output, &mut phase_delta);
+            }
+        }
+        output.push(operation);
+    }
+    flush_all(&mut frames, &mut output, &mut phase_delta);
+
+    Ok(ValueRewrite {
+        operations: output,
+        phase_delta,
+        changed,
+    })
+}
+
+fn z_carrier(operation: &ValueOperation) -> Option<(Qubit, f64, f64)> {
+    let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction else {
+        return None;
+    };
+    let qubit = *operation.qubits.first()?;
+    Some(match gate {
+        StandardGate::RZ => (qubit, *fixed_params(operation)?.first()?, 0.0),
+        StandardGate::Phase => {
+            let angle = *fixed_params(operation)?.first()?;
+            (qubit, angle, angle / 2.0)
+        }
+        StandardGate::S => (qubit, FRAC_PI_2, FRAC_PI_4),
+        StandardGate::SDG => (qubit, -FRAC_PI_2, -FRAC_PI_4),
+        StandardGate::T => (qubit, FRAC_PI_4, FRAC_PI_4 / 2.0),
+        StandardGate::TDG => (qubit, -FRAC_PI_4, -FRAC_PI_4 / 2.0),
+        _ => return None,
+    })
+}
+
+fn pauli_carrier(operation: &ValueOperation) -> Option<(Qubit, bool, bool, f64)> {
+    let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction else {
+        return None;
+    };
+    let qubit = *operation.qubits.first()?;
+    Some(match gate {
+        StandardGate::X => (qubit, true, false, 0.0),
+        StandardGate::Y => (qubit, true, true, FRAC_PI_2),
+        StandardGate::Z => (qubit, false, true, 0.0),
+        _ => return None,
+    })
+}
+
+fn multiply_local_pauli(frame: &mut QubitFrame, x: bool, z: bool) -> u8 {
+    // The new gate is later in circuit order, so the accumulated matrix is
+    // P_new * P_pending. In canonical X^x Z^z order this contributes -1 when
+    // the new Z anticommutes with a pending X.
+    let phase = if z && frame.pauli_x { 2 } else { 0 };
+    frame.pauli_x ^= x;
+    frame.pauli_z ^= z;
+    phase
+}
+
+fn absorb_z_into_xy_axis(
+    operation: &mut ValueOperation,
+    frames: &BTreeMap<Qubit, QubitFrame>,
+) -> bool {
+    let Some(&qubit) = operation.qubits.first() else {
+        return false;
+    };
+    if operation.qubits.len() != 1 {
+        return false;
+    }
+    let Some(frame) = frames.get(&qubit) else {
+        return false;
+    };
+    if frame.z_angle.abs() <= PHASE_EPS || frame.pauli_x || frame.pauli_z {
+        return false;
+    }
+    let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction else {
+        return false;
+    };
+    let axis_index = match gate {
+        StandardGate::RXY => 1,
+        StandardGate::XY | StandardGate::XY2P | StandardGate::XY2M => 0,
+        _ => return false,
+    };
+    let Some(ParameterValue::Fixed(axis)) = operation.params.get_mut(axis_index) else {
+        return false;
+    };
+    // G(phi) RZ(a) = RZ(a) G(phi-a), so the pending frame can stay virtual.
+    *axis -= frame.z_angle;
+    true
+}
+
+fn is_z_diagonal(gate: StandardGate) -> bool {
+    matches!(
+        gate,
+        StandardGate::CZ | StandardGate::CRZ | StandardGate::RZZ
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct TwoQubitPauli {
+    phase: u8,
+    x: [bool; 2],
+    z: [bool; 2],
+}
+
+fn multiply_pauli(left: TwoQubitPauli, right: TwoQubitPauli) -> TwoQubitPauli {
+    let anti = left
+        .z
+        .iter()
+        .zip(right.x)
+        .filter(|(z, x)| **z && *x)
+        .count() as u8;
+    TwoQubitPauli {
+        phase: (left.phase + right.phase + 2 * anti) % 4,
+        x: [left.x[0] ^ right.x[0], left.x[1] ^ right.x[1]],
+        z: [left.z[0] ^ right.z[0], left.z[1] ^ right.z[1]],
+    }
+}
+
+/// Conjugates a two-qubit Pauli frame through CX or CZ using their stabilizer
+/// generator images in canonical `X0 X1 Z0 Z1` multiplication order.
+fn propagate_clifford_paulis(
+    gate: StandardGate,
+    qubits: [Qubit; 2],
+    frames: &mut BTreeMap<Qubit, QubitFrame>,
+) -> f64 {
+    let input = TwoQubitPauli {
+        phase: 0,
+        x: qubits.map(|qubit| frames.get(&qubit).is_some_and(|frame| frame.pauli_x)),
+        z: qubits.map(|qubit| frames.get(&qubit).is_some_and(|frame| frame.pauli_z)),
+    };
+    let generators = match gate {
+        StandardGate::CX => [
+            TwoQubitPauli {
+                x: [true, true],
+                ..Default::default()
+            },
+            TwoQubitPauli {
+                x: [false, true],
+                ..Default::default()
+            },
+            TwoQubitPauli {
+                z: [true, false],
+                ..Default::default()
+            },
+            TwoQubitPauli {
+                z: [true, true],
+                ..Default::default()
+            },
+        ],
+        StandardGate::CZ => [
+            TwoQubitPauli {
+                x: [true, false],
+                z: [false, true],
+                ..Default::default()
+            },
+            TwoQubitPauli {
+                x: [false, true],
+                z: [true, false],
+                ..Default::default()
+            },
+            TwoQubitPauli {
+                z: [true, false],
+                ..Default::default()
+            },
+            TwoQubitPauli {
+                z: [false, true],
+                ..Default::default()
+            },
+        ],
+        _ => unreachable!("only Clifford propagation gates are passed here"),
+    };
+    let enabled = [input.x[0], input.x[1], input.z[0], input.z[1]];
+    let result = generators
+        .into_iter()
+        .zip(enabled)
+        .filter(|(_, enabled)| *enabled)
+        .fold(TwoQubitPauli::default(), |acc, (generator, _)| {
+            multiply_pauli(acc, generator)
+        });
+    for (index, qubit) in qubits.into_iter().enumerate() {
+        let frame = frames.entry(qubit).or_default();
+        frame.pauli_x = result.x[index];
+        frame.pauli_z = result.z[index];
+    }
+    f64::from(result.phase) * FRAC_PI_2
+}
+
+fn flush_all(
+    frames: &mut BTreeMap<Qubit, QubitFrame>,
+    output: &mut Vec<ValueOperation>,
+    phase_delta: &mut f64,
+) {
+    let qubits = frames.keys().copied().collect::<Vec<_>>();
+    for qubit in qubits {
+        flush_frame(qubit, frames, output, phase_delta);
+    }
+}
+
+fn flush_frame(
+    qubit: Qubit,
+    frames: &mut BTreeMap<Qubit, QubitFrame>,
+    output: &mut Vec<ValueOperation>,
+    phase_delta: &mut f64,
+) {
+    flush_pauli(qubit, frames, output, phase_delta);
+    flush_z(qubit, frames, output);
+    if frames.get(&qubit).is_some_and(|frame| frame.is_empty()) {
+        frames.remove(&qubit);
+    }
+}
+
+fn flush_pauli(
+    qubit: Qubit,
+    frames: &mut BTreeMap<Qubit, QubitFrame>,
+    output: &mut Vec<ValueOperation>,
+    phase_delta: &mut f64,
+) {
+    let Some(frame) = frames.get_mut(&qubit) else {
+        return;
+    };
+    let gate = match (frame.pauli_x, frame.pauli_z) {
+        (false, false) => None,
+        (true, false) => Some(StandardGate::X),
+        (false, true) => Some(StandardGate::Z),
+        (true, true) => {
+            *phase_delta -= FRAC_PI_2;
+            Some(StandardGate::Y)
+        }
+    };
+    if let Some(gate) = gate {
+        output.push(ValueOperation {
+            instruction: ValueInstruction::from_instruction(Instruction::Standard(gate)),
+            qubits: smallvec![qubit],
+            params: SmallVec::new(),
+            label: None,
+        });
+    }
+    frame.pauli_x = false;
+    frame.pauli_z = false;
+}
+
+fn flush_z(
+    qubit: Qubit,
+    frames: &mut BTreeMap<Qubit, QubitFrame>,
+    output: &mut Vec<ValueOperation>,
+) {
+    let Some(frame) = frames.get_mut(&qubit) else {
+        return;
+    };
+    if frame.z_angle.abs() > PHASE_EPS {
+        output.push(ValueOperation {
+            instruction: ValueInstruction::from_instruction(Instruction::Standard(
+                StandardGate::RZ,
+            )),
+            qubits: smallvec![qubit],
+            params: smallvec![ParameterValue::Fixed(frame.z_angle)],
+            label: None,
+        });
+    }
+    frame.z_angle = 0.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_optimizer_stops_after_one_stable_round() {
+        let device = Device::line("native-fixed-point", 1)
+            .unwrap()
+            .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+            .unwrap();
+        let q0 = Qubit::new(0);
+        let mut circuit = Circuit::new(1);
+        circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
+        let optimizer = NativeOptimizer::new(
+            &device,
+            TwoQubitBlockResynthesisConfig::normal(Default::default()),
+            8,
+            3,
+        );
+
+        let result = optimizer.run(&circuit).unwrap();
+
+        assert_eq!(result.rounds, 1);
+        assert!(!result.changed);
+        assert!(!result.restored_best);
+        assert_eq!(result.circuit, circuit);
+    }
+
+    #[test]
+    fn one_qubit_fusion_requires_exact_physical_improvement() {
+        let device = Device::line("native-fusion", 1)
+            .unwrap()
+            .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+            .unwrap()
+            .with_default_single_qubit_error(0.001);
+        let q0 = Qubit::new(0);
+        let mut circuit = Circuit::new(1);
+        circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
+        circuit.u(q0, -0.1, 0.5, -0.2).unwrap();
+        let context = DeviceTwoQubitSynthesisContext::build(
+            &device,
+            &circuit,
+            DeviceSynthesisPlacement::ExactPhysical,
+        )
+        .unwrap();
+
+        let result = OptimizeNativeLocalGates::new(context)
+            .transform(&circuit, None)
+            .unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.circuit.operations().len(), 1);
+        assert!(matches!(
+            result.circuit.operations()[0].instruction,
+            Instruction::Standard(StandardGate::U)
+        ));
+    }
+
+    #[test]
+    fn cx_propagates_target_z_to_both_qubits() {
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        let operations = vec![
+            ValueOperation::from_standard(StandardGate::Z, [q1], []),
+            ValueOperation::from_standard(StandardGate::CX, [q0, q1], []),
+        ];
+
+        let rewrite = propagate_frames(operations).unwrap();
+        let gates = rewrite
+            .operations
+            .iter()
+            .filter_map(|operation| match operation.instruction {
+                ValueInstruction::Instruction(Instruction::Standard(gate)) => Some(gate),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            gates,
+            vec![StandardGate::CX, StandardGate::Z, StandardGate::Z]
+        );
+    }
+
+    #[test]
+    fn swap_exchanges_pending_frames() {
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+        let rewrite = propagate_frames(vec![
+            ValueOperation::from_standard(StandardGate::Z, [q0], []),
+            ValueOperation::from_standard(StandardGate::SWAP, [q0, q1], []),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            rewrite.operations[0].instruction,
+            ValueInstruction::Instruction(Instruction::Standard(StandardGate::SWAP))
+        ));
+        assert!(matches!(
+            rewrite.operations[1].instruction,
+            ValueInstruction::Instruction(Instruction::Standard(StandardGate::Z))
+        ));
+        assert_eq!(rewrite.operations[1].qubits.as_slice(), &[q1]);
+    }
+
+    #[test]
+    fn measurement_drops_a_pending_z_frame() {
+        let q0 = Qubit::new(0);
+        let measurement = ValueOperation {
+            instruction: ValueInstruction::from_instruction(Instruction::Directive(
+                Directive::Measure,
+            )),
+            qubits: smallvec![q0],
+            params: SmallVec::new(),
+            label: None,
+        };
+
+        let rewrite = propagate_frames(vec![
+            ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.4)]),
+            measurement,
+        ])
+        .unwrap();
+
+        assert_eq!(rewrite.operations.len(), 1);
+        assert!(matches!(
+            rewrite.operations[0].instruction,
+            ValueInstruction::Instruction(Instruction::Directive(Directive::Measure))
+        ));
+    }
+
+    #[test]
+    fn phase_carrier_records_rz_global_phase_difference() {
+        let q0 = Qubit::new(0);
+        let rewrite = propagate_frames(vec![ValueOperation::from_standard(
+            StandardGate::Phase,
+            [q0],
+            [ParameterValue::Fixed(0.6)],
+        )])
+        .unwrap();
+
+        assert!((rewrite.phase_delta - 0.3).abs() < PHASE_EPS);
+        assert!(matches!(
+            rewrite.operations[0].instruction,
+            ValueInstruction::Instruction(Instruction::Standard(StandardGate::RZ))
+        ));
+    }
+
+    #[test]
+    fn z_frame_is_absorbed_into_xy_axis() {
+        let q0 = Qubit::new(0);
+        let rewrite = propagate_frames(vec![
+            ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.2)]),
+            ValueOperation::from_standard(StandardGate::XY, [q0], [ParameterValue::Fixed(0.7)]),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            rewrite.operations[0].instruction,
+            ValueInstruction::Instruction(Instruction::Standard(StandardGate::XY))
+        ));
+        let ParameterValue::Fixed(axis) = rewrite.operations[0].params[0] else {
+            panic!("XY axis must remain numeric");
+        };
+        assert!((axis - 0.5).abs() < PHASE_EPS);
+        assert!(matches!(
+            rewrite.operations[1].instruction,
+            ValueInstruction::Instruction(Instruction::Standard(StandardGate::RZ))
+        ));
+    }
+
+    #[test]
+    fn pauli_product_uses_circuit_time_order() {
+        let q0 = Qubit::new(0);
+        let rewrite = propagate_frames(vec![
+            ValueOperation::from_standard(StandardGate::X, [q0], []),
+            ValueOperation::from_standard(StandardGate::Z, [q0], []),
+        ])
+        .unwrap();
+
+        assert!((rewrite.phase_delta - FRAC_PI_2).abs() < PHASE_EPS);
+        assert!(matches!(
+            rewrite.operations[0].instruction,
+            ValueInstruction::Instruction(Instruction::Standard(StandardGate::Y))
+        ));
+    }
+}
