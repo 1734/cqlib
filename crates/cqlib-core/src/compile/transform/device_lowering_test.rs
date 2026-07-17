@@ -18,7 +18,7 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::transform::Transformer;
-use crate::device::{Device, PhysicalQubit};
+use crate::device::{Device, EdgeProp, InstructionProp, PhysicalQubit, QubitProp};
 use crate::util::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -42,6 +42,65 @@ fn exact_native_circuit_is_unchanged() {
         .unwrap();
 
     assert!(!result.changed);
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn lowerer_prefers_lower_error_reverse_cx_realization() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::bidirectional_line("calibrated-direction", 2).unwrap();
+    for physical in [p0, p1] {
+        device
+            .add_qubit_properties(
+                physical,
+                QubitProp::new(0.0)
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::H),
+                        0.001,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    for (control, target, error) in [(p0, p1, 0.20), (p1, p0, 0.01)] {
+        device
+            .add_edge_properties(
+                control,
+                target,
+                EdgeProp::new()
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::CX),
+                        error,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let result = DeviceLowerer::new(&device)
+        .transform(&circuit, None)
+        .unwrap();
+
+    assert!(result.changed);
+    let gates = standard_ops(&result.circuit);
+    assert_eq!(
+        gates,
+        vec![
+            StandardGate::H,
+            StandardGate::H,
+            StandardGate::CX,
+            StandardGate::H,
+            StandardGate::H,
+        ]
+    );
+    assert_eq!(
+        result.circuit.operations()[2].qubits.as_slice(),
+        &[Qubit::new(1), Qubit::new(0)]
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
     device.validate_circuit(&result.circuit).unwrap();
 }
 

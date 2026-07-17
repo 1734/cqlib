@@ -23,13 +23,11 @@
 
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
-use crate::compile::device_planning::{DeviceGateState, NativePlanCatalog, NativePlanLeaf};
-use crate::compile::sabre::{
-    CalibrationEstimator, MetricAvailability, NativePlanCost, RobustDurationKey, RobustErrorKey,
+use crate::compile::device_planning::{
+    CalibrationEstimator, DeviceGateState, NativePlanCatalog, schedule_physical_cost,
 };
 use crate::device::{Device, PhysicalQubit};
 use smallvec::smallvec;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -42,47 +40,7 @@ pub(crate) enum DeviceSynthesisPlacement {
     ExactPhysical,
 }
 
-/// Physical quality of one fully device-lowered operation sequence.
-///
-/// Deterministic backend and direction preferences intentionally do not live
-/// here: equal physical costs must not make block resynthesis rewrite source.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct DevicePhysicalCost {
-    pub(crate) native_two_qubit_ops: u32,
-    pub(crate) native_two_qubit_depth: u32,
-    pub(crate) error: MetricAvailability<RobustErrorKey>,
-    pub(crate) total_native_depth: u32,
-    pub(crate) native_total_ops: u32,
-    pub(crate) duration: MetricAvailability<RobustDurationKey>,
-    pub(crate) makespan: MetricAvailability<f64>,
-}
-
-impl DevicePhysicalCost {
-    /// Orders real physical quality only. Lower is better.
-    pub(crate) fn compare(self, other: Self) -> Ordering {
-        self.native_two_qubit_ops
-            .cmp(&other.native_two_qubit_ops)
-            .then_with(|| {
-                self.native_two_qubit_depth
-                    .cmp(&other.native_two_qubit_depth)
-            })
-            .then_with(|| self.error.compare_by(other.error, RobustErrorKey::compare))
-            .then_with(|| self.total_native_depth.cmp(&other.total_native_depth))
-            .then_with(|| self.native_total_ops.cmp(&other.native_total_ops))
-            .then_with(|| {
-                self.duration
-                    .compare_by(other.duration, RobustDurationKey::compare)
-            })
-            .then_with(|| {
-                self.makespan
-                    .compare_by(other.makespan, |left, right| left.total_cmp(&right))
-            })
-    }
-
-    pub(crate) fn strictly_better_than(self, other: Self) -> bool {
-        self.compare(other).is_lt()
-    }
-}
+pub(crate) use crate::compile::device_planning::DevicePhysicalCost;
 
 /// Placement coverage compared before pre-layout physical costs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -365,85 +323,6 @@ impl DeviceTwoQubitSynthesisContext {
     }
 }
 
-fn schedule_physical_cost(
-    leaves: &[NativePlanLeaf],
-    aggregate: NativePlanCost,
-    estimator: &CalibrationEstimator,
-) -> DevicePhysicalCost {
-    let mut total_depths = HashMap::<PhysicalQubit, u32>::new();
-    let mut two_qubit_depths = HashMap::<PhysicalQubit, u32>::new();
-    let mut total_native_depth = 0;
-    let mut native_two_qubit_depth = 0;
-    let mut availability = HashMap::<PhysicalQubit, f64>::new();
-    let mut makespan = 0.0_f64;
-    let mut timing_complete = estimator.duration_enabled();
-
-    for leaf in leaves {
-        let next_depth = leaf
-            .ordered_qargs
-            .iter()
-            .filter_map(|qubit| total_depths.get(qubit))
-            .copied()
-            .max()
-            .unwrap_or(0)
-            + 1;
-        for qubit in &leaf.ordered_qargs {
-            total_depths.insert(*qubit, next_depth);
-        }
-        total_native_depth = total_native_depth.max(next_depth);
-
-        if leaf.ordered_qargs.len() == 2 {
-            let next_two_qubit_depth = leaf
-                .ordered_qargs
-                .iter()
-                .filter_map(|qubit| two_qubit_depths.get(qubit))
-                .copied()
-                .max()
-                .unwrap_or(0)
-                + 1;
-            for qubit in &leaf.ordered_qargs {
-                two_qubit_depths.insert(*qubit, next_two_qubit_depth);
-            }
-            native_two_qubit_depth = native_two_qubit_depth.max(next_two_qubit_depth);
-        }
-
-        if timing_complete {
-            if let Some(duration) = estimator.leaf_duration(leaf) {
-                let start = leaf
-                    .ordered_qargs
-                    .iter()
-                    .filter_map(|qubit| availability.get(qubit))
-                    .copied()
-                    .max_by(f64::total_cmp)
-                    .unwrap_or(0.0);
-                let finish = start + duration;
-                for qubit in &leaf.ordered_qargs {
-                    availability.insert(*qubit, finish);
-                }
-                makespan = makespan.max(finish);
-            } else {
-                timing_complete = false;
-            }
-        }
-    }
-
-    DevicePhysicalCost {
-        native_two_qubit_ops: aggregate.native_two_qubit_ops,
-        native_two_qubit_depth,
-        error: aggregate.error,
-        total_native_depth,
-        native_total_ops: aggregate.native_total_ops,
-        duration: aggregate.duration,
-        makespan: if !estimator.duration_enabled() {
-            MetricAvailability::Disabled
-        } else if timing_complete {
-            MetricAvailability::Available(makespan)
-        } else {
-            MetricAvailability::Inconsistent
-        },
-    }
-}
-
 fn ordered_topology_pairs(
     device: &Device,
     physical_qubits: &[PhysicalQubit],
@@ -657,6 +536,7 @@ fn movement_components(
 mod tests {
     use super::*;
     use crate::circuit::{ParameterValue, UnitaryGate};
+    use crate::compile::device_planning::cost::MetricAvailability;
     use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
     use crate::compile::transform::decompose::unitary::unitary_2q::{
         plan_numeric_2q_unitary_for_device, select_device_unitary_candidate,

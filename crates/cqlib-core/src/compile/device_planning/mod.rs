@@ -13,6 +13,7 @@
 
 //! Shared exact-qargs device planning used by routing and final lowering.
 
+pub(crate) mod cost;
 mod planner;
 mod templates;
 
@@ -24,9 +25,10 @@ use crate::device::{Device, PhysicalQubit};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
-pub(crate) use planner::{
-    DevicePlanner, NativePlanLeaf, NativePlanSummary, PlanChoice, PlanTemplate,
+pub(crate) use cost::{
+    CalibrationEstimator, DevicePhysicalCost, NativePlanSummary, schedule_physical_cost,
 };
+pub(crate) use planner::{DevicePlanner, DevicePlannerError, PlanChoice, PlanId, PlanTemplate};
 pub(crate) use templates::DirectionTemplate;
 
 /// A parameter-independent gate state on exact ordered physical qargs.
@@ -156,12 +158,12 @@ impl NativePlanCatalog {
         roots.sort_by_key(DeviceGateState::stable_sort_key);
         roots.dedup();
         let planner = DevicePlanner::build(device, library, roots.iter().cloned())
-            .map_err(CompilerError::InvariantViolation)?;
+            .map_err(DevicePlannerError::into_compiler_error)?;
         let mut availability = HashMap::with_capacity(roots.len());
         for root in roots {
             let planned = if let Some(summary) = planner
                 .summary_for(&root)
-                .map_err(CompilerError::InvariantViolation)?
+                .map_err(DevicePlannerError::into_compiler_error)?
             {
                 NativePlanAvailability::Feasible(summary)
             } else {

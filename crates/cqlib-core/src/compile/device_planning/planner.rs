@@ -14,6 +14,10 @@
 //! Finite exact-qargs hypergraph planning for device instruction lowering.
 
 use super::DeviceGateState;
+use super::cost::{
+    CalibrationEstimator, DevicePhysicalCost, DeviceScheduleProfile, NativePlanLeaf,
+    NativePlanSummary,
+};
 use super::templates::{self, DirectionTemplate};
 use crate::circuit::{Instruction, ParameterValue, StandardGate};
 use crate::compile::error::{
@@ -22,16 +26,80 @@ use crate::compile::error::{
 use crate::compile::knowledge::{KnowledgeInstructionKey, RuleId, RuleKind, RuleLibrary};
 use crate::device::Device;
 use smallvec::SmallVec;
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 const MAX_DIAGNOSTIC_CANDIDATES: usize = 16;
+const MAX_FRONTIER_SIZE_PER_STATE: usize = 64;
+const MAX_TOTAL_PLAN_NODES: usize = 100_000;
+const MAX_TOTAL_GENERATED_CANDIDATES: usize = 1_000_000;
 
 type StateId = usize;
-type EdgeId = usize;
+#[derive(Debug, Clone, Copy)]
+struct PlannerBudget {
+    max_frontier_size_per_state: usize,
+    max_total_plan_nodes: usize,
+    max_total_generated_candidates: usize,
+}
+
+impl Default for PlannerBudget {
+    fn default() -> Self {
+        Self {
+            max_frontier_size_per_state: MAX_FRONTIER_SIZE_PER_STATE,
+            max_total_plan_nodes: MAX_TOTAL_PLAN_NODES,
+            max_total_generated_candidates: MAX_TOTAL_GENERATED_CANDIDATES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DevicePlannerError {
+    Invariant(String),
+    ComplexityExceeded {
+        resource: &'static str,
+        limit: usize,
+        observed: usize,
+    },
+}
+
+impl fmt::Display for DevicePlannerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invariant(message) => f.write_str(message),
+            Self::ComplexityExceeded {
+                resource,
+                limit,
+                observed,
+            } => write!(
+                f,
+                "device planning exceeded {resource} budget {limit} at {observed}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DevicePlannerError {}
+
+impl DevicePlannerError {
+    pub(crate) fn into_compiler_error(self) -> crate::compile::CompilerError {
+        match self {
+            Self::Invariant(message) => crate::compile::CompilerError::InvariantViolation(message),
+            error @ Self::ComplexityExceeded { .. } => {
+                crate::compile::CompilerError::TransformFailed {
+                    name: "device_planning",
+                    reason: error.to_string(),
+                }
+            }
+        }
+    }
+}
+
+/// Stable identifier for one exact plan tree in the planner arena.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PlanId(usize);
 
 /// The physical cost minimized by device lowering.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DevicePlanCost {
     pub(crate) two_qubit_ops: u32,
     pub(crate) total_ops: u32,
@@ -60,49 +128,17 @@ struct HyperEdge {
     stable_name: String,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct PendingEdge {
-    remaining_children: usize,
-    accumulated_cost: DevicePlanCost,
-}
-
 #[derive(Debug, Clone)]
-struct QueueEntry {
+struct DevicePlanCandidate {
     state: StateId,
-    cost: DevicePlanCost,
     choice: PlanChoice,
-    priority: u8,
-    stable_name: String,
-}
-
-impl PartialEq for QueueEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.state == other.state
-            && self.cost == other.cost
-            && self.priority == other.priority
-            && self.stable_name == other.stable_name
-    }
-}
-
-impl Eq for QueueEntry {}
-
-impl PartialOrd for QueueEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for QueueEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap; reverse every comparison for a stable
-        // minimum queue. Native leaves win an exact tie.
-        other
-            .cost
-            .cmp(&self.cost)
-            .then_with(|| other.priority.cmp(&self.priority))
-            .then_with(|| other.stable_name.cmp(&self.stable_name))
-            .then_with(|| other.state.cmp(&self.state))
-    }
+    children: Vec<PlanId>,
+    leaves: Vec<NativePlanLeaf>,
+    physical_cost: DevicePhysicalCost,
+    schedule_profile: DeviceScheduleProfile,
+    derivation_steps: u32,
+    stable_key: String,
+    ancestry: HashSet<StateId>,
 }
 
 /// One solved plan table for the finite closure reachable from circuit roots.
@@ -111,8 +147,14 @@ pub(crate) struct DevicePlanner<'a> {
     states: Vec<DeviceGateState>,
     state_ids: HashMap<DeviceGateState, StateId>,
     edges: Vec<HyperEdge>,
+    nodes: Vec<DevicePlanCandidate>,
+    frontiers: Vec<Vec<PlanId>>,
+    selected: Vec<Option<PlanId>>,
     plans: Vec<Option<PlanChoice>>,
     costs: Vec<Option<DevicePlanCost>>,
+    estimator: CalibrationEstimator,
+    budget: PlannerBudget,
+    generated_candidates: usize,
 }
 
 impl<'a> DevicePlanner<'a> {
@@ -120,120 +162,88 @@ impl<'a> DevicePlanner<'a> {
         device: &'a Device,
         library: &RuleLibrary,
         roots: impl IntoIterator<Item = DeviceGateState>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, DevicePlannerError> {
+        Self::build_with_budget(device, library, roots, PlannerBudget::default())
+    }
+
+    fn build_with_budget(
+        device: &'a Device,
+        library: &RuleLibrary,
+        roots: impl IntoIterator<Item = DeviceGateState>,
+        budget: PlannerBudget,
+    ) -> Result<Self, DevicePlannerError> {
         let mut builder = GraphBuilder::new(library);
         for root in roots {
             builder.intern(root);
         }
-        builder.expand()?;
+        builder.expand().map_err(DevicePlannerError::Invariant)?;
+
+        let state_count = builder.states.len();
+        let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
 
         let mut planner = Self {
             device,
-            plans: vec![None; builder.states.len()],
-            costs: vec![None; builder.states.len()],
+            plans: vec![None; state_count],
+            costs: vec![None; state_count],
+            nodes: Vec::new(),
+            frontiers: vec![Vec::new(); state_count],
+            selected: vec![None; state_count],
             states: builder.states,
             state_ids: builder.state_ids,
             edges: builder.edges,
+            estimator: CalibrationEstimator::from_device(device, &physical_qubits),
+            budget,
+            generated_candidates: 0,
         };
-        planner.solve();
+        planner.solve()?;
         Ok(planner)
     }
 
-    pub(crate) fn plan_for(&self, state: &DeviceGateState) -> Option<PlanChoice> {
-        self.state_ids.get(state).and_then(|id| self.plans[*id])
+    pub(crate) fn selected_plan_for(&self, state: &DeviceGateState) -> Option<PlanId> {
+        self.state_ids.get(state).and_then(|id| self.selected[*id])
+    }
+
+    pub(crate) fn choice_for_plan(&self, plan: PlanId) -> Option<PlanChoice> {
+        self.nodes.get(plan.0).map(|node| node.choice)
+    }
+
+    pub(crate) fn children_for_plan(&self, plan: PlanId) -> Option<&[PlanId]> {
+        self.nodes.get(plan.0).map(|node| node.children.as_slice())
+    }
+
+    pub(crate) fn state_for_plan(&self, plan: PlanId) -> Option<&DeviceGateState> {
+        self.nodes.get(plan.0).map(|node| &self.states[node.state])
     }
 
     /// Summarizes the exact native leaves selected by this planner.
     ///
-    /// This is observational: it deliberately does not add calibration values
-    /// to the planner's optimization key, so DeviceLowerer keeps selecting the
-    /// same plans while routing can score the plan that lowering will use.
     pub(crate) fn summary_for(
         &self,
         state: &DeviceGateState,
-    ) -> Result<Option<NativePlanSummary>, String> {
-        let Some(&state_id) = self.state_ids.get(state) else {
+    ) -> Result<Option<NativePlanSummary>, DevicePlannerError> {
+        let Some(plan) = self.selected_plan_for(state) else {
             return Ok(None);
         };
-        if self.plans[state_id].is_none() {
-            return Ok(None);
-        }
-        let mut leaves = Vec::new();
-        let mut visiting = HashSet::new();
-        self.collect_native_leaves(state_id, &mut visiting, &mut leaves)?;
+        self.summary_for_plan(plan).map(Some)
+    }
+
+    pub(crate) fn summary_for_plan(
+        &self,
+        plan: PlanId,
+    ) -> Result<NativePlanSummary, DevicePlannerError> {
+        let node = self.nodes.get(plan.0).ok_or_else(|| {
+            DevicePlannerError::Invariant(format!("unknown device plan id {plan:?}"))
+        })?;
+        let leaves = node.leaves.clone();
         let native_two_qubit_ops = leaves
             .iter()
             .filter(|leaf| leaf.ordered_qargs.len() == 2)
             .count() as u32;
-        Ok(Some(NativePlanSummary {
+        Ok(NativePlanSummary {
             native_two_qubit_ops,
             native_total_ops: leaves.len() as u32,
             leaves,
-        }))
-    }
-
-    fn collect_native_leaves(
-        &self,
-        state_id: StateId,
-        visiting: &mut HashSet<StateId>,
-        output: &mut Vec<NativePlanLeaf>,
-    ) -> Result<(), String> {
-        if !visiting.insert(state_id) {
-            return Err(format!(
-                "device plan summary encountered a cycle at state {:?}",
-                self.states[state_id]
-            ));
-        }
-
-        match self.plans[state_id] {
-            Some(PlanChoice::Native) => {
-                let state = &self.states[state_id];
-                let instruction = instruction_from_key(&state.instruction);
-                let calibration = self
-                    .device
-                    .native_instruction_calibration(&instruction, &state.ordered_qargs)
-                    .ok_or_else(|| {
-                        format!(
-                            "selected native plan leaf {instruction} on {:?} is no longer supported",
-                            state.ordered_qargs
-                        )
-                    })?;
-                validate_leaf_calibration(
-                    &instruction,
-                    calibration.error_rate,
-                    calibration.duration,
-                )?;
-                output.push(NativePlanLeaf {
-                    instruction,
-                    ordered_qargs: state.ordered_qargs.clone(),
-                    error_rate: calibration.error_rate,
-                    duration: calibration.duration,
-                });
-            }
-            Some(PlanChoice::Template(template)) => {
-                let edge = self
-                    .edges
-                    .iter()
-                    .find(|edge| edge.parent == state_id && edge.template == template)
-                    .ok_or_else(|| {
-                        format!(
-                            "selected device plan template {template:?} has no hyperedge for {:?}",
-                            self.states[state_id]
-                        )
-                    })?;
-                for &child in &edge.children {
-                    self.collect_native_leaves(child, visiting, output)?;
-                }
-            }
-            None => {
-                return Err(format!(
-                    "device plan summary reached an unsolved state {:?}",
-                    self.states[state_id]
-                ));
-            }
-        }
-        visiting.remove(&state_id);
-        Ok(())
+        })
     }
 
     pub(crate) fn failure_for(&self, state: &DeviceGateState) -> DeviceLoweringFailure {
@@ -274,100 +284,268 @@ impl<'a> DevicePlanner<'a> {
         }
     }
 
-    fn solve(&mut self) {
-        let mut reverse_incidence = vec![Vec::<(EdgeId, u32)>::new(); self.states.len()];
-        let mut pending = Vec::with_capacity(self.edges.len());
-        let mut queue = BinaryHeap::new();
-
-        for (state_id, state) in self.states.iter().enumerate() {
+    fn solve(&mut self) -> Result<(), DevicePlannerError> {
+        for state_id in 0..self.states.len() {
+            let state = self.states[state_id].clone();
             let instruction = instruction_from_key(&state.instruction);
             if self
                 .device
                 .supports_native_instruction(&instruction, &state.ordered_qargs)
             {
-                queue.push(QueueEntry {
+                let calibration = self
+                    .device
+                    .native_instruction_calibration(&instruction, &state.ordered_qargs)
+                    .ok_or_else(|| {
+                        DevicePlannerError::Invariant(format!(
+                            "supported native instruction {instruction} on {:?} has no calibration record",
+                            state.ordered_qargs
+                        ))
+                    })?;
+                validate_leaf_calibration(
+                    &instruction,
+                    calibration.error_rate,
+                    calibration.duration,
+                )
+                .map_err(DevicePlannerError::Invariant)?;
+                let leaf = NativePlanLeaf {
+                    instruction,
+                    ordered_qargs: state.ordered_qargs.clone(),
+                    error_rate: calibration.error_rate,
+                    duration: calibration.duration,
+                };
+                let leaves = vec![leaf];
+                let mut ancestry = HashSet::new();
+                ancestry.insert(state_id);
+                self.insert_candidate(DevicePlanCandidate {
                     state: state_id,
-                    cost: DevicePlanCost {
-                        two_qubit_ops: u32::from(state.ordered_qargs.len() == 2),
-                        total_ops: 1,
-                        derivation_steps: 0,
-                    },
                     choice: PlanChoice::Native,
-                    priority: 0,
-                    stable_name: String::new(),
-                });
+                    children: Vec::new(),
+                    physical_cost: self.estimator.physical_cost(&leaves),
+                    schedule_profile: self
+                        .estimator
+                        .schedule_profile(&leaves, &state.ordered_qargs)
+                        .map_err(DevicePlannerError::Invariant)?,
+                    leaves,
+                    derivation_steps: 0,
+                    stable_key: format!("native:{}", state.stable_sort_key()),
+                    ancestry,
+                })?;
             }
         }
 
-        for (edge_id, edge) in self.edges.iter().enumerate() {
-            let mut multiplicities = HashMap::<StateId, u32>::new();
-            for child in &edge.children {
-                *multiplicities.entry(*child).or_default() += 1;
-            }
-            pending.push(PendingEdge {
-                remaining_children: multiplicities.len(),
-                accumulated_cost: DevicePlanCost::default(),
-            });
-            for (child, multiplicity) in multiplicities {
-                reverse_incidence[child].push((edge_id, multiplicity));
-            }
-            if edge.children.is_empty() {
-                queue.push(QueueEntry {
-                    state: edge.parent,
-                    cost: DevicePlanCost {
-                        derivation_steps: 1,
-                        ..DevicePlanCost::default()
-                    },
-                    choice: PlanChoice::Template(edge.template),
-                    priority: 1,
-                    stable_name: edge.stable_name.clone(),
-                });
-            }
-        }
+        let mut explored = vec![HashSet::<Vec<PlanId>>::new(); self.edges.len()];
+        loop {
+            let mut changed = false;
+            for edge_id in 0..self.edges.len() {
+                let edge = self.edges[edge_id].clone();
+                let child_frontiers = edge
+                    .children
+                    .iter()
+                    .map(|child| self.frontiers[*child].clone())
+                    .collect::<Vec<_>>();
+                if child_frontiers.iter().any(Vec::is_empty) {
+                    continue;
+                }
+                for children in PlanCombinations::new(&child_frontiers) {
+                    if !explored[edge_id].insert(children.clone()) {
+                        continue;
+                    }
+                    self.generated_candidates += 1;
+                    if self.generated_candidates > self.budget.max_total_generated_candidates {
+                        return Err(DevicePlannerError::ComplexityExceeded {
+                            resource: "total generated candidates",
+                            limit: self.budget.max_total_generated_candidates,
+                            observed: self.generated_candidates,
+                        });
+                    }
 
-        while let Some(entry) = queue.pop() {
-            if self.plans[entry.state].is_some() {
-                continue;
-            }
-            self.plans[entry.state] = Some(entry.choice);
-            self.costs[entry.state] = Some(entry.cost);
-
-            for &(edge_id, multiplicity) in &reverse_incidence[entry.state] {
-                let edge_state = &mut pending[edge_id];
-                edge_state.accumulated_cost += entry.cost.scaled(multiplicity);
-                edge_state.remaining_children -= 1;
-                if edge_state.remaining_children == 0 {
-                    let edge = &self.edges[edge_id];
-                    let mut cost = edge_state.accumulated_cost;
-                    cost.derivation_steps = cost.derivation_steps.saturating_add(1);
-                    queue.push(QueueEntry {
+                    let mut ancestry = HashSet::new();
+                    let mut leaves = Vec::new();
+                    let mut derivation_steps = 1_u32;
+                    let mut child_keys = Vec::with_capacity(children.len());
+                    let mut cyclic = false;
+                    for child in &children {
+                        let node = &self.nodes[child.0];
+                        if node.ancestry.contains(&edge.parent) {
+                            cyclic = true;
+                            break;
+                        }
+                        ancestry.extend(node.ancestry.iter().copied());
+                        leaves.extend(node.leaves.iter().cloned());
+                        derivation_steps = derivation_steps.saturating_add(node.derivation_steps);
+                        child_keys.push(node.stable_key.as_str());
+                    }
+                    if cyclic {
+                        continue;
+                    }
+                    ancestry.insert(edge.parent);
+                    let stable_key = format!("{}({})", edge.stable_name, child_keys.join(","));
+                    let physical_cost = self.estimator.physical_cost(&leaves);
+                    let schedule_profile = self
+                        .estimator
+                        .schedule_profile(&leaves, &self.states[edge.parent].ordered_qargs)
+                        .map_err(DevicePlannerError::Invariant)?;
+                    changed |= self.insert_candidate(DevicePlanCandidate {
                         state: edge.parent,
-                        cost,
                         choice: PlanChoice::Template(edge.template),
-                        priority: 1,
-                        stable_name: edge.stable_name.clone(),
-                    });
+                        children,
+                        leaves,
+                        physical_cost,
+                        schedule_profile,
+                        derivation_steps,
+                        stable_key,
+                        ancestry,
+                    })?;
                 }
             }
+            if !changed {
+                break;
+            }
+        }
+
+        for state in 0..self.states.len() {
+            let selected = self.frontiers[state].iter().copied().min_by(|left, right| {
+                let left = &self.nodes[left.0];
+                let right = &self.nodes[right.0];
+                left.physical_cost
+                    .compare(right.physical_cost)
+                    .then_with(|| left.derivation_steps.cmp(&right.derivation_steps))
+                    .then_with(|| left.stable_key.cmp(&right.stable_key))
+            });
+            self.selected[state] = selected;
+            if let Some(plan) = selected {
+                let node = &self.nodes[plan.0];
+                self.plans[state] = Some(node.choice);
+                self.costs[state] = Some(DevicePlanCost {
+                    two_qubit_ops: node.physical_cost.native_two_qubit_ops,
+                    total_ops: node.physical_cost.native_total_ops,
+                    derivation_steps: node.derivation_steps,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_candidate(
+        &mut self,
+        candidate: DevicePlanCandidate,
+    ) -> Result<bool, DevicePlannerError> {
+        let frontier = &self.frontiers[candidate.state];
+        for existing in frontier.iter().copied() {
+            let existing = &self.nodes[existing.0];
+            if candidate_dominates(existing, &candidate)
+                || (existing.physical_cost == candidate.physical_cost
+                    && existing.schedule_profile == candidate.schedule_profile
+                    && (existing.derivation_steps, &existing.stable_key)
+                        <= (candidate.derivation_steps, &candidate.stable_key))
+            {
+                return Ok(false);
+            }
+        }
+
+        let retained = frontier
+            .iter()
+            .filter(|existing| {
+                let existing = &self.nodes[existing.0];
+                !candidate_dominates(&candidate, existing)
+                    && !(candidate.physical_cost == existing.physical_cost
+                        && candidate.schedule_profile == existing.schedule_profile
+                        && (candidate.derivation_steps, &candidate.stable_key)
+                            < (existing.derivation_steps, &existing.stable_key))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if retained.len() + 1 > self.budget.max_frontier_size_per_state {
+            return Err(DevicePlannerError::ComplexityExceeded {
+                resource: "frontier size per state",
+                limit: self.budget.max_frontier_size_per_state,
+                observed: retained.len() + 1,
+            });
+        }
+        if self.nodes.len() + 1 > self.budget.max_total_plan_nodes {
+            return Err(DevicePlannerError::ComplexityExceeded {
+                resource: "total plan nodes",
+                limit: self.budget.max_total_plan_nodes,
+                observed: self.nodes.len() + 1,
+            });
+        }
+
+        let state = candidate.state;
+        let id = PlanId(self.nodes.len());
+        self.nodes.push(candidate);
+        self.frontiers[state] = retained;
+        self.frontiers[state].push(id);
+        self.frontiers[state].sort_by(|left, right| {
+            self.nodes[left.0]
+                .stable_key
+                .cmp(&self.nodes[right.0].stable_key)
+        });
+        Ok(true)
+    }
+}
+
+struct PlanCombinations<'a> {
+    frontiers: &'a [Vec<PlanId>],
+    indices: Vec<usize>,
+    done: bool,
+}
+
+impl<'a> PlanCombinations<'a> {
+    fn new(frontiers: &'a [Vec<PlanId>]) -> Self {
+        Self {
+            frontiers,
+            indices: vec![0; frontiers.len()],
+            done: frontiers.iter().any(Vec::is_empty),
         }
     }
 }
 
-/// One exact native leaf in the selected lowering plan.
-#[derive(Debug, Clone)]
-pub(crate) struct NativePlanLeaf {
-    pub(crate) instruction: Instruction,
-    pub(crate) ordered_qargs: SmallVec<[crate::device::PhysicalQubit; 2]>,
-    pub(crate) error_rate: Option<f64>,
-    pub(crate) duration: Option<f64>,
+impl Iterator for PlanCombinations<'_> {
+    type Item = Vec<PlanId>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let combination = self
+            .frontiers
+            .iter()
+            .zip(&self.indices)
+            .map(|(frontier, index)| frontier[*index])
+            .collect();
+
+        if self.frontiers.is_empty() {
+            self.done = true;
+            return Some(combination);
+        }
+        for position in (0..self.indices.len()).rev() {
+            self.indices[position] += 1;
+            if self.indices[position] < self.frontiers[position].len() {
+                return Some(combination);
+            }
+            self.indices[position] = 0;
+        }
+        self.done = true;
+        Some(combination)
+    }
 }
 
-/// Exact native resource summary for the plan selected by DevicePlanner.
-#[derive(Debug, Clone)]
-pub(crate) struct NativePlanSummary {
-    pub(crate) native_two_qubit_ops: u32,
-    pub(crate) native_total_ops: u32,
-    pub(crate) leaves: Vec<NativePlanLeaf>,
+fn candidate_dominates(left: &DevicePlanCandidate, right: &DevicePlanCandidate) -> bool {
+    let Some(schedule_strict) = left.schedule_profile.dominance(&right.schedule_profile) else {
+        return false;
+    };
+    let left = left.physical_cost;
+    let right = right.physical_cost;
+    let comparisons = [
+        left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops),
+        left.error
+            .compare_by(right.error, |left, right| left.compare(right)),
+        left.native_total_ops.cmp(&right.native_total_ops),
+        left.duration
+            .compare_by(right.duration, |left, right| left.compare(right)),
+    ];
+    comparisons.iter().all(|ordering| !ordering.is_gt())
+        && (schedule_strict || comparisons.iter().any(|ordering| ordering.is_lt()))
 }
 
 fn validate_leaf_calibration(
@@ -390,24 +568,6 @@ fn validate_leaf_calibration(
         ));
     }
     Ok(())
-}
-
-impl DevicePlanCost {
-    fn scaled(self, count: u32) -> Self {
-        Self {
-            two_qubit_ops: self.two_qubit_ops.saturating_mul(count),
-            total_ops: self.total_ops.saturating_mul(count),
-            derivation_steps: self.derivation_steps.saturating_mul(count),
-        }
-    }
-}
-
-impl std::ops::AddAssign for DevicePlanCost {
-    fn add_assign(&mut self, rhs: Self) {
-        self.two_qubit_ops = self.two_qubit_ops.saturating_add(rhs.two_qubit_ops);
-        self.total_ops = self.total_ops.saturating_add(rhs.total_ops);
-        self.derivation_steps = self.derivation_steps.saturating_add(rhs.derivation_steps);
-    }
 }
 
 struct GraphBuilder<'a> {
@@ -573,225 +733,5 @@ pub(crate) fn instruction_from_key(key: &KnowledgeInstructionKey) -> Instruction
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::compile::knowledge::rule::{Rule, RuleItem};
-    use crate::device::PhysicalQubit;
-
-    fn item(gate: StandardGate, qubits: &[u32]) -> RuleItem {
-        RuleItem::standard(gate, qubits, Vec::new())
-    }
-
-    fn rule(
-        name: &str,
-        source: StandardGate,
-        source_qubits: &[u32],
-        target: Vec<RuleItem>,
-    ) -> Rule {
-        Rule::new(name, vec![item(source, source_qubits)], target)
-    }
-
-    fn state(gate: StandardGate, qargs: &[u32]) -> DeviceGateState {
-        DeviceGateState::standard(
-            gate,
-            qargs.iter().copied().map(PhysicalQubit::new).collect(),
-        )
-    }
-
-    fn library(rules: Vec<Rule>) -> RuleLibrary {
-        RuleLibrary::from_rules(rules, RuleKind::Decompose).unwrap()
-    }
-
-    #[test]
-    fn dead_two_state_cycle_terminates_without_a_plan() {
-        let library = library(vec![
-            rule(
-                "x_to_h",
-                StandardGate::X,
-                &[0],
-                vec![item(StandardGate::H, &[0])],
-            ),
-            rule(
-                "h_to_x",
-                StandardGate::H,
-                &[0],
-                vec![item(StandardGate::X, &[0])],
-            ),
-        ]);
-        let device = Device::line("dead-cycle", 1).unwrap();
-        let root = state(StandardGate::X, &[0]);
-
-        let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
-
-        assert!(planner.plan_for(&root).is_none());
-    }
-
-    #[test]
-    fn cycle_with_native_exit_propagates_a_finite_plan() {
-        let library = library(vec![
-            rule(
-                "x_to_h",
-                StandardGate::X,
-                &[0],
-                vec![item(StandardGate::H, &[0])],
-            ),
-            rule(
-                "h_to_x",
-                StandardGate::H,
-                &[0],
-                vec![item(StandardGate::X, &[0])],
-            ),
-        ]);
-        let device = Device::line("cycle-exit", 1)
-            .unwrap()
-            .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
-            .unwrap();
-        let root = state(StandardGate::X, &[0]);
-
-        let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
-
-        assert!(matches!(
-            planner.plan_for(&root),
-            Some(PlanChoice::Template(PlanTemplate::Rule(_)))
-        ));
-    }
-
-    #[test]
-    fn repeated_child_occurrences_contribute_multiplicity_to_cost() {
-        let library = library(vec![rule(
-            "swap_to_three_cx",
-            StandardGate::SWAP,
-            &[0, 1],
-            vec![
-                item(StandardGate::CX, &[0, 1]),
-                item(StandardGate::CX, &[0, 1]),
-                item(StandardGate::CX, &[0, 1]),
-            ],
-        )]);
-        let device = Device::line("multiplicity", 2)
-            .unwrap()
-            .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
-            .unwrap();
-        let root = state(StandardGate::SWAP, &[0, 1]);
-
-        let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
-        let root_id = planner.state_ids[&root];
-
-        assert_eq!(
-            planner.costs[root_id],
-            Some(DevicePlanCost {
-                two_qubit_ops: 3,
-                total_ops: 3,
-                derivation_steps: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn ordered_qargs_have_independent_capability_states() {
-        let library = RuleLibrary::new();
-        let device = Device::line("one-qubit", 1)
-            .unwrap()
-            .with_native_gates(vec![Instruction::Standard(StandardGate::X)])
-            .unwrap();
-        let supported = state(StandardGate::X, &[0]);
-        let unsupported = state(StandardGate::X, &[1]);
-
-        let planner =
-            DevicePlanner::build(&device, &library, [supported.clone(), unsupported.clone()])
-                .unwrap();
-
-        assert_eq!(planner.plan_for(&supported), Some(PlanChoice::Native));
-        assert!(planner.plan_for(&unsupported).is_none());
-    }
-
-    #[test]
-    fn cost_prefers_fewer_two_qubit_leaves_before_total_gate_count() {
-        let library = library(vec![
-            rule(
-                "swap_to_cx",
-                StandardGate::SWAP,
-                &[0, 1],
-                vec![item(StandardGate::CX, &[0, 1])],
-            ),
-            rule(
-                "swap_to_h_pair",
-                StandardGate::SWAP,
-                &[0, 1],
-                vec![item(StandardGate::H, &[0]), item(StandardGate::H, &[1])],
-            ),
-        ]);
-        let device = Device::line("cost-order", 2)
-            .unwrap()
-            .with_native_gates(vec![
-                Instruction::Standard(StandardGate::H),
-                Instruction::Standard(StandardGate::CX),
-            ])
-            .unwrap();
-        let root = state(StandardGate::SWAP, &[0, 1]);
-
-        let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
-        let Some(PlanChoice::Template(PlanTemplate::Rule(rule_id))) = planner.plan_for(&root)
-        else {
-            panic!("expected a rule plan");
-        };
-
-        assert_eq!(library.get(rule_id).unwrap().name, "swap_to_h_pair");
-    }
-
-    #[test]
-    fn equal_cost_rule_choice_is_stable_across_library_order() {
-        let make_rules = || {
-            vec![
-                rule(
-                    "a_x_to_h",
-                    StandardGate::X,
-                    &[0],
-                    vec![item(StandardGate::H, &[0])],
-                ),
-                rule(
-                    "b_x_to_z",
-                    StandardGate::X,
-                    &[0],
-                    vec![item(StandardGate::Z, &[0])],
-                ),
-            ]
-        };
-        let mut reversed = make_rules();
-        reversed.reverse();
-        let libraries = [library(make_rules()), library(reversed)];
-        let device = Device::line("stable-tie", 1)
-            .unwrap()
-            .with_native_gates(vec![
-                Instruction::Standard(StandardGate::H),
-                Instruction::Standard(StandardGate::Z),
-            ])
-            .unwrap();
-        let root = state(StandardGate::X, &[0]);
-
-        for library in &libraries {
-            let planner = DevicePlanner::build(&device, library, [root.clone()]).unwrap();
-            let Some(PlanChoice::Template(PlanTemplate::Rule(rule_id))) = planner.plan_for(&root)
-            else {
-                panic!("expected a rule plan");
-            };
-            assert_eq!(library.get(rule_id).unwrap().name, "a_x_to_h");
-        }
-    }
-
-    #[test]
-    fn direction_template_preserves_exact_ordered_qargs() {
-        let parent = state(StandardGate::CX, &[0, 1]);
-        let children = DirectionTemplate::Cx.child_states(&parent);
-
-        assert_eq!(children[2], state(StandardGate::CX, &[1, 0]));
-        assert_eq!(
-            children[0].ordered_qargs.as_slice(),
-            &[PhysicalQubit::new(0)]
-        );
-        assert_eq!(
-            children[1].ordered_qargs.as_slice(),
-            &[PhysicalQubit::new(1)]
-        );
-    }
-}
+#[path = "planner_test.rs"]
+mod planner_test;

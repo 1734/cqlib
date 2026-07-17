@@ -27,7 +27,8 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::device_planning::{
-    DeviceGateState, DevicePlanner, DirectionTemplate, PlanChoice, PlanTemplate,
+    DeviceGateState, DevicePlanner, DevicePlannerError, DirectionTemplate, PlanChoice, PlanId,
+    PlanTemplate,
 };
 use crate::compile::knowledge::{
     ConcreteOperationView, KnowledgeInstructionKey, RuleLibrary, instantiate_target,
@@ -93,7 +94,7 @@ impl Transformer for DeviceLowerer<'_> {
         roots.sort_by_key(DeviceGateState::stable_sort_key);
         roots.dedup();
         let planner = DevicePlanner::build(self.device, library, roots)
-            .map_err(CompilerError::InvariantViolation)?;
+            .map_err(DevicePlannerError::into_compiler_error)?;
         DeviceCircuitLowerer::run(circuit, self.device, library, &planner)
     }
 }
@@ -234,12 +235,33 @@ impl<'a> DeviceCircuitLowerer<'a> {
                     operation.instruction
                 ))
             })?;
-        let Some(plan) = self.planner.plan_for(&state) else {
+        let Some(plan) = self.planner.selected_plan_for(&state) else {
             return Err(CompilerError::DeviceLoweringFailed(
                 self.planner.failure_for(&state),
             ));
         };
-        match plan {
+        self.lower_gate_like_with_plan(operation, state, plan, target)
+    }
+
+    fn lower_gate_like_with_plan(
+        &mut self,
+        operation: LowerableOperation,
+        state: DeviceGateState,
+        plan: PlanId,
+        target: &mut LoweringTarget<'_>,
+    ) -> Result<(), CompilerError> {
+        let planned_state = self.planner.state_for_plan(plan).ok_or_else(|| {
+            CompilerError::InvariantViolation(format!("unknown selected device plan {plan:?}"))
+        })?;
+        if planned_state != &state {
+            return Err(CompilerError::InvariantViolation(format!(
+                "device plan {plan:?} targets {planned_state:?}, but lowering requested {state:?}"
+            )));
+        }
+        let choice = self.planner.choice_for_plan(plan).ok_or_else(|| {
+            CompilerError::InvariantViolation(format!("device plan {plan:?} has no choice"))
+        })?;
+        match choice {
             PlanChoice::Native => {
                 if !self
                     .device
@@ -262,6 +284,15 @@ impl<'a> DeviceCircuitLowerer<'a> {
             }
             PlanChoice::Template(template) => {
                 self.changed = true;
+                let child_plans = self
+                    .planner
+                    .children_for_plan(plan)
+                    .ok_or_else(|| {
+                        CompilerError::InvariantViolation(format!(
+                            "device plan {plan:?} has no child plan list"
+                        ))
+                    })?
+                    .to_vec();
                 let replacements = match template {
                     PlanTemplate::Rule(rule_id) => {
                         let rule = self.library.get(rule_id).ok_or_else(|| {
@@ -275,8 +306,40 @@ impl<'a> DeviceCircuitLowerer<'a> {
                         instantiate_direction_template(template, &operation)
                     }
                 };
+                let mut children = child_plans.into_iter();
                 for replacement in replacements {
-                    self.lower_gate_like(replacement, target)?;
+                    if matches!(
+                        replacement.instruction,
+                        Instruction::Standard(StandardGate::GPhase)
+                    ) {
+                        self.lower_gate_like(replacement, target)?;
+                        continue;
+                    }
+                    let child = children.next().ok_or_else(|| {
+                        CompilerError::InvariantViolation(format!(
+                            "device plan {plan:?} emitted more non-phase children than planned"
+                        ))
+                    })?;
+                    let ordered_qargs = replacement
+                        .qubits
+                        .iter()
+                        .copied()
+                        .map(PhysicalQubit::from_qubit)
+                        .collect();
+                    let child_state =
+                        DeviceGateState::from_instruction(&replacement.instruction, ordered_qargs)
+                            .ok_or_else(|| {
+                                CompilerError::InvariantViolation(format!(
+                                    "missing device-lowering key for planned child {}",
+                                    replacement.instruction
+                                ))
+                            })?;
+                    self.lower_gate_like_with_plan(replacement, child_state, child, target)?;
+                }
+                if children.next().is_some() {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "device plan {plan:?} emitted fewer non-phase children than planned"
+                    )));
                 }
             }
         }
