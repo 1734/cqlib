@@ -98,6 +98,65 @@ fn uses_symbol_ignores_registered_but_unreferenced_symbols() {
 }
 
 #[test]
+fn used_symbols_filters_removed_operations_without_mutating_registry_order() {
+    let mut circuit = Circuit::new(1);
+    circuit.add_parameter(Parameter::symbol("registered_first"));
+    circuit
+        .rx(Qubit::new(0), Parameter::symbol("used_second"))
+        .unwrap();
+    circuit
+        .rz(Qubit::new(0), Parameter::symbol("removed_third"))
+        .unwrap();
+    circuit.remove_operation(1).unwrap();
+
+    assert_eq!(
+        circuit
+            .symbols()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["registered_first", "used_second", "removed_third"]
+    );
+    assert_eq!(
+        circuit
+            .used_symbols()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["used_second"]
+    );
+}
+
+#[test]
+fn used_symbols_drops_replaced_symbolic_global_phase_but_registry_retains_it() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::symbol("phase"));
+    assert!(circuit.used_symbols().contains("phase"));
+
+    circuit.set_global_phase(Parameter::from(0.25));
+
+    assert!(circuit.symbols().contains("phase"));
+    assert!(!circuit.used_symbols().contains("phase"));
+    assert!(!circuit.uses_symbol("phase"));
+}
+
+#[test]
+fn to_gate_does_not_promote_removed_operation_symbols_to_signature_params() {
+    let mut circuit = Circuit::new(1);
+    circuit
+        .rx(Qubit::new(0), Parameter::symbol("ghost"))
+        .unwrap();
+    circuit.remove_operation(0).unwrap();
+
+    let Instruction::CircuitGate(gate) = circuit.to_gate("empty").unwrap() else {
+        panic!("Circuit::to_gate must return a circuit-gate instruction");
+    };
+    assert_eq!(gate.num_params(), 0);
+    assert!(gate.signature_params().is_empty());
+    assert!(gate.used_symbols().is_empty());
+}
+
+#[test]
 fn uses_symbol_recurses_through_all_control_flow_bodies() {
     let mut circuit = Circuit::new(1);
     let q0 = Qubit::new(0);
@@ -147,6 +206,7 @@ fn uses_symbol_recurses_through_all_control_flow_bodies() {
     ] {
         assert!(circuit.uses_symbol(symbol), "missing symbol {symbol}");
     }
+    assert_eq!(circuit.used_symbols(), circuit.symbols().clone());
 }
 
 #[test]

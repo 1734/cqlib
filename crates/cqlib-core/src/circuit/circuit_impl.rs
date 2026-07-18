@@ -629,9 +629,36 @@ impl Circuit {
         &self.parameters
     }
 
-    /// Returns all symbolic variable names referenced by interned parameters.
+    /// Returns all symbolic variable names present in the parameter registry.
+    ///
+    /// The registry is stable and is not compacted when operations stop using a
+    /// parameter, so this set may include symbols that are no longer referenced
+    /// by the executable IR. Use [`Circuit::used_symbols`] when only live
+    /// dependencies are needed.
     pub fn symbols(&self) -> &IndexSet<String> {
         &self.symbols
+    }
+
+    /// Returns symbolic variable names referenced by the executable IR.
+    ///
+    /// This includes the global phase and operation parameters in top-level and
+    /// nested structured control-flow bodies. The result preserves the stable
+    /// insertion order of [`Circuit::symbols`] while filtering out interned but
+    /// unreferenced symbols.
+    pub fn used_symbols(&self) -> IndexSet<String> {
+        let referenced_indices = self.referenced_parameter_indices();
+        let mut referenced_symbols = HashSet::new();
+        for index in referenced_indices {
+            if let Some(parameter) = self.parameters.get_index(index as usize) {
+                referenced_symbols.extend(parameter.get_symbols());
+            }
+        }
+
+        self.symbols
+            .iter()
+            .filter(|symbol| referenced_symbols.contains(symbol.as_str()))
+            .cloned()
+            .collect()
     }
 
     /// Returns whether `symbol` is referenced by the circuit's executable IR.
@@ -641,49 +668,63 @@ impl Circuit {
     /// does not use the circuit's symbol registry because that registry may
     /// retain symbols that are interned but no longer referenced.
     pub fn uses_symbol(&self, symbol: &str) -> bool {
-        self.parameter_uses_symbol(&self.global_phase, symbol)
-            || self.operations_use_symbol(&self.data, symbol)
+        self.referenced_parameter_indices()
+            .into_iter()
+            .any(|index| {
+                self.parameters
+                    .get_index(index as usize)
+                    .is_some_and(|parameter| parameter.get_symbols().contains(symbol))
+            })
     }
 
-    fn parameter_uses_symbol(&self, param: &CircuitParam, symbol: &str) -> bool {
-        let CircuitParam::Index(index) = param else {
-            return false;
-        };
-
-        self.parameters
-            .get_index(*index as usize)
-            .is_some_and(|parameter| parameter.get_symbols().contains(symbol))
+    fn referenced_parameter_indices(&self) -> HashSet<u32> {
+        let mut indices = HashSet::new();
+        if let CircuitParam::Index(index) = self.global_phase {
+            indices.insert(index);
+        }
+        Self::collect_operation_parameter_indices(&self.data, &mut indices);
+        indices
     }
 
-    fn operations_use_symbol(&self, operations: &[Operation], symbol: &str) -> bool {
-        operations.iter().any(|operation| {
-            operation
-                .params
-                .iter()
-                .any(|param| self.parameter_uses_symbol(param, symbol))
-                || match &operation.instruction {
-                    Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
-                        self.operations_use_symbol(op.then_body().operations(), symbol)
-                            || op.else_body().is_some_and(|body| {
-                                self.operations_use_symbol(body.operations(), symbol)
-                            })
+    fn collect_operation_parameter_indices(operations: &[Operation], indices: &mut HashSet<u32>) {
+        for operation in operations {
+            indices.extend(operation.params.iter().filter_map(|param| match param {
+                CircuitParam::Index(index) => Some(*index),
+                CircuitParam::Fixed(_) => None,
+            }));
+
+            if let Instruction::ClassicalControl(control) = &operation.instruction {
+                match control {
+                    ClassicalControlOp::If(op) => {
+                        Self::collect_operation_parameter_indices(
+                            op.then_body().operations(),
+                            indices,
+                        );
+                        if let Some(body) = op.else_body() {
+                            Self::collect_operation_parameter_indices(body.operations(), indices);
+                        }
                     }
-                    Instruction::ClassicalControl(ClassicalControlOp::While(op)) => {
-                        self.operations_use_symbol(op.body().operations(), symbol)
+                    ClassicalControlOp::While(op) => {
+                        Self::collect_operation_parameter_indices(op.body().operations(), indices);
                     }
-                    Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
-                        self.operations_use_symbol(op.body().operations(), symbol)
+                    ClassicalControlOp::For(op) => {
+                        Self::collect_operation_parameter_indices(op.body().operations(), indices);
                     }
-                    Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => {
-                        op.cases().iter().any(|case| {
-                            self.operations_use_symbol(case.body().operations(), symbol)
-                        }) || op.default().is_some_and(|body| {
-                            self.operations_use_symbol(body.operations(), symbol)
-                        })
+                    ClassicalControlOp::Switch(op) => {
+                        for case in op.cases() {
+                            Self::collect_operation_parameter_indices(
+                                case.body().operations(),
+                                indices,
+                            );
+                        }
+                        if let Some(body) = op.default() {
+                            Self::collect_operation_parameter_indices(body.operations(), indices);
+                        }
                     }
-                    _ => false,
+                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
                 }
-        })
+            }
+        }
     }
 
     /// Returns a vector of all qubits in the circuit, preserving their insertion order.
@@ -1928,8 +1969,9 @@ impl Circuit {
     /// Converts the circuit into a `CircuitGate` instruction.
     ///
     /// This method "freezes" the current circuit and wraps it into an instruction that can be
-    /// appended to another circuit. The provided `params` are bound to the circuit's free symbols
-    /// in the order they were defined.
+    /// appended to another circuit. Its positional parameter signature is
+    /// inferred from symbols currently referenced by the executable IR, in
+    /// stable registry order.
     ///
     /// # Arguments
     ///

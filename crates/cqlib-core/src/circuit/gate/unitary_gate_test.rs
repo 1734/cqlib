@@ -236,6 +236,22 @@ fn test_matrix_for_params_circuit_backed_parameterized() {
 }
 
 #[test]
+fn test_circuit_backed_parameter_binding_ignores_unreferenced_interned_symbols() {
+    let mut inner = Circuit::new(1);
+    inner.add_parameter(Parameter::symbol("stale"));
+    inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let frozen = Arc::new(FrozenCircuit::new(inner));
+
+    let gate = UnitaryGate::new("RxCircuit", 1, 1)
+        .with_circuit(frozen)
+        .unwrap();
+    let result = gate.matrix_for_params(&[PI]).unwrap();
+
+    assert!((result[[0, 1]].im + 1.0).abs() < 1e-10);
+    assert!((result[[1, 0]].im + 1.0).abs() < 1e-10);
+}
+
+#[test]
 fn test_matrix_for_params_wrong_param_count() {
     let matrix = Array2::eye(2).mapv(|v| c(v, 0.0));
     let gate = UnitaryGate::new("Id", 1, 0).with_matrix(matrix).unwrap();

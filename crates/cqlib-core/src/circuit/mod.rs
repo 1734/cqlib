@@ -36,9 +36,9 @@
 //! | [`classical`] | Runtime classical storage and type system | [`ClassicalVar`], [`ClassicalValue`], [`ClassicalType`], [`Measurement`] |
 //! | [`classical_expr`] | Side-effect-free typed classical expression AST | [`ClassicalExpr`], [`ClassicalBinaryOp`], [`ClassicalCompareOp`] |
 //! | [`control_flow`] | Structured classical control-flow IR | [`IfOp`], [`WhileOp`], [`ForOp`], [`SwitchOp`], [`ClassicalControlOp`] |
-//! | [`cfg`] | Structured control-flow graph view | [`CircuitCFG`] |
+//! | [`mod@cfg`] | Structured control-flow graph view | [`CircuitCFG`] |
 //! | [`circuit_verify`] | Classical-data and control-flow validation | [`Circuit::validate`] |
-//! | [`circuit_to_matrix`] | Dense unitary matrix computation | [`circuit_to_matrix()`] |
+//! | [`mod@circuit_to_matrix`] | Dense unitary matrix computation | [`fn@circuit_to_matrix`] |
 //! | [`ansatz`] | Variational circuit templates | `Ansatz` trait, `TwoLocal`, `QAOAAnsatz` |
 //! | [`symbolic_matrix`] | Dense symbolic unitary for small subcircuits | Symbolic gate and matrix types |
 //! | [`error`] | Unified error type catalog | [`CircuitError`] |
@@ -103,11 +103,11 @@
 //! | **Construction IR** | [`ValueOperation`] / [`ValueInstruction`] | [`ParameterValue`] | Self-contained, pre-insertion builder |
 //! | **Storage IR** | [`Operation`] / [`Instruction`] | [`CircuitParam`] | Compact, interned, post-insertion storage |
 //!
-//! [`Circuit::from_operations`] is the sole bridge: it recursively interns
-//! symbolic [`Parameter`] values into the circuit's [`IndexSet`] parameter
-//! table and replaces them with stable [`CircuitParam::Index`] references.
-//! Indexed parameters are never exposed to construction-IR callers, preventing
-//! dangling references.
+//! [`Circuit::from_operations`] and [`Circuit::append_value_operation`] are the
+//! public lowering entry points. They recursively intern symbolic [`Parameter`]
+//! values into the circuit's [`indexmap::IndexSet`] parameter table and replace
+//! them with stable [`CircuitParam::Index`] references. Indexed parameters are
+//! never exposed to construction-IR callers, preventing dangling references.
 //!
 //! ### Validation
 //!

@@ -315,7 +315,7 @@ impl UnitaryGate {
 
         if let Some(circuit) = self.circuit.as_ref() {
             let inner = circuit.circuit();
-            let symbols = inner.symbols();
+            let symbols = circuit.used_symbols();
             let mut bindings = HashMap::new();
             for (symbol, value) in symbols.iter().zip(params.iter()) {
                 bindings.insert(symbol.as_str(), *value);
@@ -392,7 +392,7 @@ impl UnitaryGate {
             });
         }
 
-        let actual_params = circuit.circuit().symbols().len();
+        let actual_params = circuit.used_symbols().len();
         if actual_params != self.num_params as usize {
             return Err(CircuitError::ParameterCountMismatch {
                 expected: self.num_params as usize,

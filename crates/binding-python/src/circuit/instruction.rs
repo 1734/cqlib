@@ -158,10 +158,9 @@ impl PyInstruction {
 
     #[getter]
     fn standard_gate(&self) -> Option<PyStandardGate> {
-        match &self.inner {
-            Instruction::Standard(gate) => Some(PyStandardGate::from(*gate, vec![])),
-            _ => None,
-        }
+        self.inner
+            .standard_gate()
+            .map(|gate| PyStandardGate::from(gate, vec![]))
     }
 
     #[getter]
