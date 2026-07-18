@@ -29,7 +29,7 @@
 
 use crate::circuit::{ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
+use crate::compile::transform::decompose::mc_gate::validation::find_duplicate_qubit;
 use std::f64::consts::PI;
 
 use super::{

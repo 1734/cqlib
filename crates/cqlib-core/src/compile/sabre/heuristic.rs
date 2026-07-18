@@ -183,6 +183,26 @@ impl SabreConfig {
             },
         }
     }
+
+    /// Validates the routing fields used by SABRE.
+    ///
+    /// This check intentionally ignores layout-refinement fields such as
+    /// [`SabreConfig::layout_trials`] and [`SabreConfig::layout_scoring_trials`].
+    /// Routing starts from a concrete initial layout and does not depend on
+    /// those layout-only knobs.
+    pub fn validate(&self) -> Result<(), CompilerError> {
+        if self.routing_trials == 0 {
+            return Err(CompilerError::InvalidInput(
+                "sabre routing_trials must be greater than zero".to_string(),
+            ));
+        }
+        if !(self.swap_regret_ratio.is_finite() && self.swap_regret_ratio >= 0.0) {
+            return Err(CompilerError::InvalidInput(
+                "sabre swap_regret_ratio must be finite and non-negative".to_string(),
+            ));
+        }
+        self.heuristic.validate()
+    }
 }
 
 impl SabreHeuristicConfig {

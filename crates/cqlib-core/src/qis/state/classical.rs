@@ -31,7 +31,6 @@ use crate::circuit::{
 };
 use crate::device::Outcome;
 use crate::qis::QisError;
-use smallvec::SmallVec;
 
 /// A typed runtime classical value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +68,7 @@ impl RuntimeValue {
     pub(crate) fn bit_vec_from_lsb(bits: &[bool]) -> Self {
         Self::BitVec {
             width: bits.len() as u32,
-            bits: outcome_from_lsb(bits),
+            bits: Outcome::from_lsb_bits(bits),
         }
     }
 
@@ -254,7 +253,7 @@ impl ClassicalState {
             }),
             ClassicalExprKind::BitVecLiteral { width, value } => Ok(RuntimeValue::BitVec {
                 width: width.get(),
-                bits: outcome_from_lsb(
+                bits: Outcome::from_lsb_bits(
                     &(0..width.get())
                         .map(|index| (value >> index) & 1 == 1)
                         .collect::<Vec<_>>(),
@@ -396,16 +395,6 @@ fn evaluate_compare(
         },
     };
     Ok(RuntimeValue::Bool(result))
-}
-
-fn outcome_from_lsb(bits: &[bool]) -> Outcome {
-    let mut chunks = vec![0u64; bits.len().div_ceil(64)];
-    for (index, value) in bits.iter().copied().enumerate() {
-        if value {
-            chunks[index / 64] |= 1u64 << (index % 64);
-        }
-    }
-    Outcome::new(SmallVec::from_vec(chunks))
 }
 
 fn qis_unsupported(message: impl Into<String>) -> QisError {

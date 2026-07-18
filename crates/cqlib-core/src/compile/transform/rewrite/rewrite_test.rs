@@ -17,7 +17,7 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::knowledge::library::RuleKind;
-use crate::util::test_utils::standard_ops;
+use crate::compile::test_utils::standard_ops;
 
 #[test]
 fn cancels_adjacent_self_inverse_gates() {

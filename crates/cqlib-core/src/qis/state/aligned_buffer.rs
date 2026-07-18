@@ -28,18 +28,6 @@
 //! - Index arithmetic stays within `len` elements.
 //! - No aliasing between concurrent mutable references (the usual Rust rules).
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use cqlib_core::util::aligned::AlignedBuffer;
-//!
-//! let mut buf: AlignedBuffer<u64> = AlignedBuffer::new_zeroed(128);
-//! buf[0] = 42;
-//! assert_eq!(buf[0], 42);
-//! // Alignment verified:
-//! assert_eq!(buf.as_ptr() as usize % 64, 0);
-//! ```
-
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::ptr::NonNull;
 
@@ -49,7 +37,7 @@ use std::ptr::NonNull;
 /// slice in most contexts. All SIMD intrinsics that require aligned memory
 /// (e.g. `_mm256_load_si256`, `_mm256_load_pd`) are safe to use on the raw
 /// pointer returned by `as_ptr()`.
-pub(crate) struct AlignedBuffer<T> {
+pub(super) struct AlignedBuffer<T> {
     ptr: NonNull<T>,
     len: usize,
     layout: Layout,
@@ -64,7 +52,7 @@ impl<T: Copy + Default> AlignedBuffer<T> {
     ///
     /// # Panics
     /// Panics (via `handle_alloc_error`) if the allocation fails.
-    pub(crate) fn new_zeroed(len: usize) -> Self {
+    pub(super) fn new_zeroed(len: usize) -> Self {
         let size = len * size_of::<T>();
         // SAFETY: size > 0 for len > 0; align is a valid power-of-two.
         let layout = Layout::from_size_align(size.max(1), 64).expect("valid layout");
@@ -76,20 +64,20 @@ impl<T: Copy + Default> AlignedBuffer<T> {
     /// Returns the raw pointer to the first element (64-byte aligned).
     #[allow(dead_code)]
     #[inline(always)]
-    pub(crate) fn as_ptr(&self) -> *const T {
+    pub(super) fn as_ptr(&self) -> *const T {
         self.ptr.as_ptr()
     }
 
     /// Returns a shared slice view of the buffer.
     #[inline(always)]
-    pub(crate) fn as_slice(&self) -> &[T] {
+    pub(super) fn as_slice(&self) -> &[T] {
         // SAFETY: ptr valid for `len` elements, allocated and initialised.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
     /// Returns a mutable slice view of the buffer.
     #[inline(always)]
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+    pub(super) fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: ptr valid for `len` elements, unique (we hold &mut self).
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }

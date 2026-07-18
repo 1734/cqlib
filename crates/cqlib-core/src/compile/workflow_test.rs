@@ -18,6 +18,9 @@ use crate::circuit::{
     StandardGate, UnitaryGate,
 };
 use crate::compile::resource::ResourcePolicy;
+use crate::compile::test_utils::{
+    assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
+};
 use crate::compile::transform::CircuitAnalysis;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::{
@@ -25,10 +28,6 @@ use crate::compile::{
     SabreRoutingFailure, compile,
 };
 use crate::device::{Device, EdgeProp, InstructionProp, Layout, PhysicalQubit};
-use crate::util::test_utils::{
-    assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, step_changed,
-    two_qubit_device,
-};
 use ndarray::array;
 use num_complex::Complex64;
 use std::collections::HashMap;
@@ -87,19 +86,6 @@ fn operation_parameter(circuit: &Circuit, param: &CircuitParam) -> Parameter {
             .cloned()
             .expect("parameter index should exist in rebuilt workflow circuit"),
     }
-}
-
-fn circuit_contains_symbol(circuit: &Circuit, symbol: &str) -> bool {
-    if circuit.global_phase().get_symbols().contains(symbol) {
-        return true;
-    }
-
-    circuit
-        .operations()
-        .iter()
-        .flat_map(|operation| operation.params.iter())
-        .map(|param| operation_parameter(circuit, param))
-        .any(|parameter| parameter.get_symbols().contains(symbol))
 }
 
 #[test]
@@ -291,7 +277,7 @@ fn workflow_expands_circuit_gate_definitions_before_optimization() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.definitions"));
+    assert!(result.step_changed("decompose.definitions"));
     assert_eq!(standard_ops(&result.circuit), vec![StandardGate::H]);
     assert!(!contains_high_level_gate(&result.circuit));
 }
@@ -311,7 +297,7 @@ fn workflow_synthesizes_matrix_backed_unitary_gates() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert!(!contains_high_level_gate(&result.circuit));
     assert!(!result.circuit.operations().is_empty());
 }
@@ -336,7 +322,7 @@ fn workflow_uses_cx_kak_for_cx_target() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert_eq!(
         ops.iter().filter(|gate| **gate == StandardGate::CX).count(),
         3
@@ -516,15 +502,9 @@ fn native_fixed_point_recovers_exact_pair_lowering_in_both_modes() {
             .iter()
             .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
     );
-    assert!(!step_changed(
-        &normal,
-        "resynthesize.two_qubit_blocks.post_routing"
-    ));
-    assert!(step_changed(
-        &enhanced,
-        "resynthesize.two_qubit_blocks.post_routing"
-    ));
-    assert!(step_changed(&normal, "optimize.native_fixed_point"));
+    assert!(!normal.step_changed("resynthesize.two_qubit_blocks.post_routing"));
+    assert!(enhanced.step_changed("resynthesize.two_qubit_blocks.post_routing"));
+    assert!(normal.step_changed("optimize.native_fixed_point"));
     let mut physical_expected = Circuit::new(4);
     physical_expected
         .swap(Qubit::new(1), Qubit::new(2))
@@ -558,7 +538,7 @@ fn workflow_runs_two_qubit_resynthesis_after_decomposition() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "resynthesize.two_qubit_blocks"));
+    assert!(result.step_changed("resynthesize.two_qubit_blocks"));
     assert!(
         ops.iter().filter(|gate| **gate == StandardGate::CX).count() < 6,
         "resynthesis should reduce the six-CX decomposition of two SWAPs"
@@ -586,7 +566,7 @@ fn workflow_uses_cz_kak_for_cz_target() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert_eq!(
         ops.iter().filter(|gate| **gate == StandardGate::CZ).count(),
         3
@@ -618,7 +598,7 @@ fn workflow_uses_cy_kak_for_cy_target() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert_eq!(
         ops.iter().filter(|gate| **gate == StandardGate::CY).count(),
         3
@@ -653,7 +633,7 @@ fn workflow_uses_rzz_kak_for_rzz_only_entangler_target() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert_eq!(
         ops.iter()
             .filter(|gate| **gate == StandardGate::RZZ)
@@ -690,7 +670,7 @@ fn workflow_keeps_pauli_kak_for_full_ising_target() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert!(!ops.contains(&StandardGate::CX));
     assert!(!ops.contains(&StandardGate::CY));
     assert!(!ops.contains(&StandardGate::CZ));
@@ -726,7 +706,7 @@ fn workflow_keeps_pauli_kak_for_partial_ising_target() {
     let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert!(ops.contains(&StandardGate::RZZ));
     assert!(!ops.contains(&StandardGate::RXX));
     assert!(!ops.contains(&StandardGate::RYY));
@@ -749,7 +729,7 @@ fn workflow_keeps_pauli_kak_without_target() {
     let result = run_workflow(&circuit, CompileMode::Normal);
     let ops = standard_ops(&result.circuit);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert!(!ops.contains(&StandardGate::CX));
     assert!(!ops.contains(&StandardGate::CY));
     assert!(!ops.contains(&StandardGate::CZ));
@@ -776,7 +756,7 @@ fn workflow_decomposes_multi_controlled_gates() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
 }
 
@@ -791,8 +771,8 @@ fn workflow_reports_rewrite_change_for_symbolic_merge() {
     let result = run_workflow(&circuit, CompileMode::Normal);
 
     assert!(
-        step_changed(&result, "optimize.pre_decomposition")
-            || step_changed(&result, "optimize.post_decomposition")
+        result.step_changed("optimize.pre_decomposition")
+            || result.step_changed("optimize.post_decomposition")
     );
     assert_eq!(result.circuit.operations().len(), 1);
     let merged = operation_parameter(&result.circuit, &result.circuit.operations()[0].params[0]);
@@ -824,9 +804,9 @@ fn workflow_decomposes_parameterized_mc_gate() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
+    assert!(result.circuit.uses_symbol("theta"));
     assert_bindings_preserve_semantics(
         &circuit,
         &result.circuit,
@@ -869,9 +849,9 @@ fn workflow_routes_parameterized_circuit_when_device_present() {
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
-    assert!(circuit_contains_symbol(&result.circuit, "phi"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.circuit.uses_symbol("theta"));
+    assert!(result.circuit.uses_symbol("phi"));
     assert!(result.circuit.operations().iter().any(|operation| {
         matches!(
             operation.instruction,
@@ -1067,7 +1047,7 @@ fn device_workflow_reports_reversed_native_gate_as_changed() {
     .unwrap();
 
     device.validate_circuit(&result.circuit).unwrap();
-    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert_eq!(result.circuit.operations()[0].qubits.as_slice(), &[q1, q0]);
 }
 
@@ -1164,7 +1144,7 @@ fn device_workflow_uses_local_native_capabilities_without_global_defaults() {
     .run(&circuit)
     .unwrap();
 
-    assert!(!step_changed(&result, "lower.device_instructions"));
+    assert!(!result.step_changed("lower.device_instructions"));
     device.validate_circuit(&result.circuit).unwrap();
 }
 
@@ -1242,7 +1222,7 @@ fn device_workflow_legalizes_control_flow_bodies_and_returns_layout_metadata() {
     .unwrap();
 
     device.validate_circuit(&result.circuit).unwrap();
-    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(result.step_changed("lower.device_instructions"));
     let metadata = result.device_metadata.expect("device compilation metadata");
     assert_eq!(metadata.initial_layout, layout);
     assert_eq!(metadata.final_layout, layout);
@@ -1273,8 +1253,8 @@ fn workflow_target_translation_keeps_parameterized_semantics() {
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "translate.target_basis"));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
+    assert!(result.step_changed("translate.target_basis"));
+    assert!(result.circuit.uses_symbol("theta"));
     assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
         gate,
         StandardGate::RZ
@@ -1319,8 +1299,8 @@ fn target_basis_translation_runs_after_definition_decomposition() {
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "decompose.definitions"));
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("decompose.definitions"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_eq!(
         standard_ops(&result.circuit),
         vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
@@ -1426,7 +1406,7 @@ fn device_native_gates_are_legalized_against_ordered_capabilities() {
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(result.step_changed("lower.device_instructions"));
     device.validate_circuit(&result.circuit).unwrap();
     assert!(standard_ops(&result.circuit).contains(&StandardGate::CZ));
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::CX));
@@ -1461,8 +1441,8 @@ fn device_workflow_routes_circuit_before_native_legalization() {
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::SWAP));
     device.validate_circuit(&result.circuit).unwrap();
     assert!(
@@ -1503,8 +1483,8 @@ fn routed_swaps_are_lowered_to_device_native_basis() {
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert!(
         standard_ops(&result.circuit)
             .iter()
@@ -1549,8 +1529,8 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
         .expect("workflow should report routing-basis decomposition");
     assert!(!routing_basis_step.skipped);
     assert!(!routing_basis_step.changed);
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "lower.device_instructions"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
         gate,
         StandardGate::RZ | StandardGate::X2P | StandardGate::CZ
@@ -1639,7 +1619,7 @@ fn device_capacity_blocks_clean_ancilla_allocation_but_allows_no_aux_fallback() 
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert_eq!(result.circuit.qubits().len(), 4);
     assert!(!contains_high_level_gate(&result.circuit));
 }

@@ -592,7 +592,7 @@ fn sabre_layout_reports_fidelity_scoring() {
                 .unwrap(),
         )
         .unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
     let config = SabreConfig::deterministic_seeded(7);
     let mut circuit = Circuit::new(2);

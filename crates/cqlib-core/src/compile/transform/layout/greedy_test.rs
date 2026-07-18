@@ -176,7 +176,7 @@ fn greedy_layout_uses_fidelity_objective_for_ties() {
                 .unwrap(),
         )
         .unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
 
     let mut circuit = Circuit::new(2);

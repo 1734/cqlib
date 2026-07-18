@@ -24,17 +24,16 @@
 use super::{
     CircuitLayoutAnalysis, GreedyCandidateOutcome, LayoutDiagnostics, LayoutObjective,
     LayoutResult, LayoutScore, PhysicalLayoutGraph, Vf2EdgeRequirement, Vf2LayoutConfig,
-    Vf2PreparedOutcome, analyze_circuit_for_layout, build_physical_layout_graph,
-    greedy_layout_candidate_prepared, is_perfect_layout, try_vf2_perfect_layout_prepared,
+    Vf2PreparedOutcome, analyze_circuit_for_layout, greedy_layout_candidate_prepared,
+    is_perfect_layout, try_vf2_perfect_layout_prepared,
 };
 use crate::circuit::Circuit;
 use crate::compile::sabre::{
     ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata,
     RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialQuality,
-    abstract_trial_quality, compare_trial_quality, finalize_trial_quality,
     interaction_reachability_for_target, movement_component_assignment,
     normalize_initial_layout_for_target, route_unscored_trial_with_metadata,
-    trial_heuristic_profile, trial_seeds, trial_swap_limit, validate_native_trial_operations,
+    trial_heuristic_profile, trial_seeds, validate_native_trial_operations,
 };
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
@@ -133,7 +132,7 @@ pub fn prepare_sabre_device_target(
     prepared: &PreparedSabreCircuit,
     device: &Device,
 ) -> Result<PreparedSabreDeviceTarget, CompilerError> {
-    let physical = build_physical_layout_graph(device)?;
+    let physical = PhysicalLayoutGraph::from_device(device)?;
     let routing = RoutingTarget::from_device(device, &physical, &prepared.routing_dag)?;
     let routing_metadata = PreparedRouteMetadata::new(&prepared.routing_dag, &routing)?;
     let refinement_metadata = PreparedRouteMetadata::new(&prepared.refinement_dag, &routing)?;
@@ -388,8 +387,7 @@ pub fn sabre_layout_prepared(
         }
     }
 
-    let swap_limit = trial_swap_limit(
-        config.trial_objective,
+    let swap_limit = config.trial_objective.swap_limit(
         config.swap_regret_ratio,
         evaluations
             .iter()
@@ -399,15 +397,11 @@ pub fn sabre_layout_prepared(
         .into_iter()
         .filter(|evaluation| evaluation.route_quality.abstract_quality.swap_count <= swap_limit)
         .min_by(|left, right| {
-            compare_trial_quality(
-                config.trial_objective,
-                left.route_quality,
-                0,
-                right.route_quality,
-                0,
-            )
-            .then_with(|| left.score.total.total_cmp(&right.score.total))
-            .then_with(|| left.index.cmp(&right.index))
+            config
+                .trial_objective
+                .compare(left.route_quality, 0, right.route_quality, 0)
+                .then_with(|| left.score.total.total_cmp(&right.score.total))
+                .then_with(|| left.index.cmp(&right.index))
         })
         .ok_or_else(|| {
             CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoFeasibleLayoutCandidate {
@@ -525,7 +519,7 @@ fn validate_layout_config(config: &SabreConfig) -> Result<(), CompilerError> {
             ));
         }
     }
-    crate::compile::sabre::validate_config(config)
+    config.validate()
 }
 
 struct InitialLayoutCandidates {
@@ -776,8 +770,7 @@ fn best_route_quality(
     unscored
         .iter()
         .try_for_each(|(_, trial)| validate_native_trial_operations(&trial.operations, target))?;
-    let swap_limit = trial_swap_limit(
-        config.trial_objective,
+    let swap_limit = config.trial_objective.swap_limit(
         config.swap_regret_ratio,
         unscored.iter().map(|(_, trial)| trial.swap_count),
     );
@@ -788,20 +781,17 @@ fn best_route_quality(
             .into_iter()
             .filter(|(_, trial)| trial.swap_count <= swap_limit)
             .map(|(index, trial)| {
-                let abstract_quality = abstract_trial_quality(&trial);
-                finalize_trial_quality(trial, abstract_quality, target)
+                let abstract_quality = trial.abstract_quality();
+                trial
+                    .finalize(abstract_quality, target)
                     .map(|trial| (index, trial.quality))
             })
             .collect::<Result<Vec<_>, CompilerError>>()?
             .into_iter()
             .min_by(|(left_index, left), (right_index, right)| {
-                compare_trial_quality(
-                    config.trial_objective,
-                    *left,
-                    *left_index,
-                    *right,
-                    *right_index,
-                )
+                config
+                    .trial_objective
+                    .compare(*left, *left_index, *right, *right_index)
             })
             .expect("layout_scoring_trials is validated to be non-zero")
             .1)
@@ -809,12 +799,11 @@ fn best_route_quality(
         let (_, trial, abstract_quality) = unscored
             .into_iter()
             .map(|(index, trial)| {
-                let abstract_quality = abstract_trial_quality(&trial);
+                let abstract_quality = trial.abstract_quality();
                 (index, trial, abstract_quality)
             })
             .min_by(|(left_index, _, left), (right_index, _, right)| {
-                compare_trial_quality(
-                    config.trial_objective,
+                config.trial_objective.compare(
                     TrialQuality::from_abstract(*left),
                     *left_index,
                     TrialQuality::from_abstract(*right),
@@ -822,6 +811,6 @@ fn best_route_quality(
                 )
             })
             .expect("layout_scoring_trials is validated to be non-zero");
-        Ok(finalize_trial_quality(trial, abstract_quality, target)?.quality)
+        Ok(trial.finalize(abstract_quality, target)?.quality)
     }
 }

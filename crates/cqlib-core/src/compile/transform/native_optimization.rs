@@ -683,6 +683,16 @@ impl QubitFrame {
     fn is_empty(self) -> bool {
         self.z_angle.abs() <= PHASE_EPS && !self.pauli_x && !self.pauli_z
     }
+
+    fn multiply_pauli(&mut self, x: bool, z: bool) -> u8 {
+        // The new gate is later in circuit order, so the accumulated matrix is
+        // P_new * P_pending. In canonical X^x Z^z order this contributes -1 when
+        // the new Z anticommutes with a pending X.
+        let phase = if z && self.pauli_x { 2 } else { 0 };
+        self.pauli_x ^= x;
+        self.pauli_z ^= z;
+        phase
+    }
 }
 
 /// Ejects pending Z/Pauli frames forward through a closed table of proven gate
@@ -712,7 +722,7 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         {
             flush_z(qubit, &mut frames, &mut output);
             let frame = frames.entry(qubit).or_default();
-            let extra_phase = multiply_local_pauli(frame, x, z);
+            let extra_phase = frame.multiply_pauli(x, z);
             phase_delta += phase + f64::from(extra_phase) * FRAC_PI_2;
             changed = true;
             continue;
@@ -863,16 +873,6 @@ fn pauli_carrier(operation: &ValueOperation) -> Option<(Qubit, bool, bool, f64)>
     })
 }
 
-fn multiply_local_pauli(frame: &mut QubitFrame, x: bool, z: bool) -> u8 {
-    // The new gate is later in circuit order, so the accumulated matrix is
-    // P_new * P_pending. In canonical X^x Z^z order this contributes -1 when
-    // the new Z anticommutes with a pending X.
-    let phase = if z && frame.pauli_x { 2 } else { 0 };
-    frame.pauli_x ^= x;
-    frame.pauli_z ^= z;
-    phase
-}
-
 fn absorb_z_into_xy_axis(
     operation: &mut ValueOperation,
     frames: &BTreeMap<Qubit, QubitFrame>,
@@ -919,17 +919,19 @@ struct TwoQubitPauli {
     z: [bool; 2],
 }
 
-fn multiply_pauli(left: TwoQubitPauli, right: TwoQubitPauli) -> TwoQubitPauli {
-    let anti = left
-        .z
-        .iter()
-        .zip(right.x)
-        .filter(|(z, x)| **z && *x)
-        .count() as u8;
-    TwoQubitPauli {
-        phase: (left.phase + right.phase + 2 * anti) % 4,
-        x: [left.x[0] ^ right.x[0], left.x[1] ^ right.x[1]],
-        z: [left.z[0] ^ right.z[0], left.z[1] ^ right.z[1]],
+impl TwoQubitPauli {
+    fn multiply(self, right: Self) -> Self {
+        let anti = self
+            .z
+            .iter()
+            .zip(right.x)
+            .filter(|(z, x)| **z && *x)
+            .count() as u8;
+        Self {
+            phase: (self.phase + right.phase + 2 * anti) % 4,
+            x: [self.x[0] ^ right.x[0], self.x[1] ^ right.x[1]],
+            z: [self.z[0] ^ right.z[0], self.z[1] ^ right.z[1]],
+        }
     }
 }
 
@@ -992,7 +994,7 @@ fn propagate_clifford_paulis(
         .zip(enabled)
         .filter(|(_, enabled)| *enabled)
         .fold(TwoQubitPauli::default(), |acc, (generator, _)| {
-            multiply_pauli(acc, generator)
+            acc.multiply(generator)
         });
     for (index, qubit) in qubits.into_iter().enumerate() {
         let frame = frames.entry(qubit).or_default();

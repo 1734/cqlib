@@ -75,6 +75,20 @@ pub struct ResultPlotOptions {
     pub title: Option<String>,
 }
 
+impl ResultPlotOptions {
+    /// Resolve user colors or fall back to Cqlib's built-in qualitative palette.
+    pub(super) fn resolved_colors(&self) -> Vec<String> {
+        if self.color.is_empty() {
+            DEFAULT_COLORS
+                .iter()
+                .map(|color| color.to_string())
+                .collect()
+        } else {
+            self.color.clone()
+        }
+    }
+}
+
 impl Default for ResultPlotOptions {
     fn default() -> Self {
         Self {

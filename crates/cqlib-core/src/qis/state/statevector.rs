@@ -40,6 +40,7 @@
 //! assert!((probs[3] - 0.5).abs() < 1e-10);
 //! ```
 
+use super::aligned_buffer::AlignedBuffer;
 use crate::circuit::Measurement;
 use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
@@ -50,7 +51,6 @@ use crate::circuit::gate::instruction::Instruction;
 use crate::device::{ExecutionResult, Outcome};
 use crate::qis::error::QisError;
 use crate::qis::observable::Observable;
-use crate::util::aligned::AlignedBuffer;
 use num_complex::Complex64;
 use rand::Rng;
 use rayon::prelude::*;

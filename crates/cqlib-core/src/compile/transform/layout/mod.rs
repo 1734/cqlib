@@ -22,7 +22,7 @@
 //!
 //! 1. [`analyze_circuit_for_layout`] extracts weighted logical interactions
 //!    from a [`Circuit`](crate::circuit::Circuit).
-//! 2. [`build_physical_layout_graph`] turns a [`Device`](crate::device::Device)
+//! 2. [`PhysicalLayoutGraph::from_device`] turns a [`Device`](crate::device::Device)
 //!    into a compiler-local physical topology and calibration view.
 //! 3. A concrete algorithm, such as [`trivial_layout`], [`greedy_layout`],
 //!    [`vf2_perfect_layout`], or [`sabre_layout`], returns a [`LayoutResult`].
@@ -57,9 +57,7 @@ mod trivial;
 mod vf2;
 mod vf2_engine;
 
-pub use crate::compile::physical_target::{
-    DistanceTable, PhysicalLayoutGraph, build_physical_layout_graph,
-};
+pub use crate::compile::physical_target::{DistanceTable, PhysicalLayoutGraph};
 pub use analysis::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, analyze_circuit_for_layout,
 };

@@ -22,8 +22,7 @@ use super::analysis::GateInteraction;
 use super::scoring::score_adjacent_interaction;
 use super::{
     CircuitLayoutAnalysis, Interaction, LayoutDiagnostics, LayoutObjective, LayoutResult,
-    PhysicalLayoutGraph, analyze_circuit_for_layout, build_physical_layout_graph,
-    is_perfect_layout,
+    PhysicalLayoutGraph, analyze_circuit_for_layout, is_perfect_layout,
 };
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
@@ -75,7 +74,7 @@ pub fn greedy_layout(
     objective: &LayoutObjective,
 ) -> Result<LayoutResult, CompilerError> {
     let analysis = analyze_circuit_for_layout(circuit)?;
-    let physical = build_physical_layout_graph(device)?;
+    let physical = PhysicalLayoutGraph::from_device(device)?;
     greedy_layout_prepared(&analysis, &physical, objective)
 }
 

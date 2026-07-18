@@ -13,7 +13,6 @@
 
 use super::*;
 use crate::compile::knowledge::rule::{Rule, RuleItem};
-use crate::compile::knowledge::rule_equivalence::VerifyResult;
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit, QubitProp};
 
 fn plan_for(planner: &DevicePlanner<'_>, state: &DeviceGateState) -> Option<PlanChoice> {
@@ -43,10 +42,7 @@ fn library(rules: Vec<Rule>) -> RuleLibrary {
 }
 
 fn assert_rule_equivalent(rule: &Rule) {
-    assert!(matches!(
-        rule.verify().unwrap(),
-        VerifyResult::Equivalent | VerifyResult::SampledEqual { .. }
-    ));
+    assert!(rule.verify().unwrap().is_verified());
 }
 
 #[test]

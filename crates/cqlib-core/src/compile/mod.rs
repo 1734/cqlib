@@ -252,6 +252,9 @@ pub mod sabre;
 pub mod transform;
 pub mod workflow;
 
+#[cfg(test)]
+mod test_utils;
+
 /// Tolerance for proving equality between compiler parameter expressions.
 pub(crate) const PARAMETER_EQ_TOLERANCE: f64 = 1e-12;
 
@@ -272,7 +275,6 @@ pub use compiler::{
 pub use error::{CompilerError, SabreRoutingFailure};
 pub use sabre::{
     SabreConfig, SabreHeuristicConfig, SabreRoutingDiagnostics, SabreRoutingResult,
-    SabreVf2PrepassConfig, normalize_initial_layout, sabre_route, validate_config,
-    validate_reachable_interactions,
+    SabreVf2PrepassConfig, normalize_initial_layout, sabre_route, validate_reachable_interactions,
 };
 pub use workflow::{CompilerWorkflow, WorkflowStepReport};

@@ -1,7 +1,7 @@
 use super::*;
 use crate::circuit::{ClassicalExpr, Qubit};
+use crate::compile::test_utils::assert_compiled_circuit_equivalent;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
-use crate::util::test_utils::assert_compiled_circuit_equivalent;
 
 fn cx_config() -> TwoQubitBlockResynthesisConfig {
     config_for_native_2q(StandardGate::CX)

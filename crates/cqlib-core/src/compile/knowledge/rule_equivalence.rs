@@ -88,6 +88,13 @@ pub enum VerifyResult {
     Inconclusive { reason: String },
 }
 
+impl VerifyResult {
+    /// Returns whether equivalence verification succeeded.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Equivalent | Self::SampledEqual { .. })
+    }
+}
+
 /// Errors during verification setup (not verification failure).
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {

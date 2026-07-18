@@ -90,7 +90,7 @@ fn gate_specific_errors_do_not_leak_between_native_gates() {
         )
         .unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::fidelity_aware();
     let layout_a = layout_on_pair(&[p0, p1, p2, p3], p0, p1);
     let layout_b = layout_on_pair(&[p0, p1, p2, p3], p2, p3);
@@ -163,7 +163,7 @@ fn unsupported_and_uncalibrated_native_gates_receive_conservative_cost() {
         )
         .unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
     assert_eq!(objective.two_qubit_error_weight, 10.0);
     let mut circuit = Circuit::new(2);
@@ -204,8 +204,9 @@ fn auto_objective_enables_only_available_fidelity_components() {
     readout_only
         .add_qubit_properties(p0, QubitProp::new(0.02))
         .unwrap();
-    let readout_objective =
-        LayoutObjective::auto_from_physical(&build_physical_layout_graph(&readout_only).unwrap());
+    let readout_objective = LayoutObjective::auto_from_physical(
+        &PhysicalLayoutGraph::from_device(&readout_only).unwrap(),
+    );
     assert_eq!(readout_objective.two_qubit_error_weight, 0.0);
     assert_eq!(readout_objective.readout_error_weight, 1.0);
 
@@ -214,8 +215,9 @@ fn auto_objective_enables_only_available_fidelity_components() {
         .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
         .unwrap()
         .with_default_two_qubit_error(0.03);
-    let two_qubit_objective =
-        LayoutObjective::auto_from_physical(&build_physical_layout_graph(&two_qubit_only).unwrap());
+    let two_qubit_objective = LayoutObjective::auto_from_physical(
+        &PhysicalLayoutGraph::from_device(&two_qubit_only).unwrap(),
+    );
     assert_eq!(two_qubit_objective.two_qubit_error_weight, 10.0);
     assert_eq!(two_qubit_objective.readout_error_weight, 0.0);
 }
@@ -229,7 +231,7 @@ fn default_only_error_does_not_invent_gate_capability_or_fidelity_data() {
         .unwrap()
         .with_default_two_qubit_error(0.03);
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     assert!(!physical.has_native_two_qubit_capabilities());
     assert!(!physical.has_two_qubit_error_data());
     assert!(!physical.supports_two_qubit_gate_directed(p0, p1, StandardGate::CX));
@@ -271,7 +273,7 @@ fn symmetric_gates_ignore_topology_direction_and_choose_known_orientation() {
                 .unwrap(),
         )
         .unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
 
     let mut circuit = Circuit::new(2);
     circuit.cz(Qubit::new(0), Qubit::new(1)).unwrap();
@@ -300,7 +302,7 @@ fn reverse_only_asymmetric_native_gates_keep_direction_and_support_penalties() {
     }
     let mut device = Device::new("reverse", HashSet::from([p0, p1]), topology).unwrap();
     device.add_edge_properties(p1, p0, edge).unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::fidelity_aware();
     let layout = layout_on_pair(&[p0, p1], p0, p1);
 
@@ -338,7 +340,7 @@ fn topology_only_fallback_keeps_asymmetric_direction_but_not_symmetric_direction
     let p0 = PhysicalQubit::new(0);
     let p1 = PhysicalQubit::new(1);
     let device = Device::from_edges("topology", 2, &[(1, 0)]).unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::topology_only();
     let layout = layout_on_pair(&[p0, p1], p0, p1);
 
@@ -393,7 +395,7 @@ fn directed_gate_uses_actual_orientation_instead_of_reverse_minimum() {
             .unwrap();
     }
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let score = LayoutObjective::fidelity_aware()
@@ -447,7 +449,7 @@ fn topology_direction_and_local_gate_override_are_distinct_costs() {
         )
         .unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let score = LayoutObjective::fidelity_aware()
@@ -470,7 +472,7 @@ fn device_input_or_physical_target_rejects_every_invalid_two_qubit_probability()
         let default_device = Device::new("default", HashSet::from([p0, p1]), topology.clone())
             .unwrap()
             .with_default_two_qubit_error(error);
-        assert!(build_physical_layout_graph(&default_device).is_err());
+        assert!(PhysicalLayoutGraph::from_device(&default_device).is_err());
 
         let valid = EdgeProp::new()
             .with_native_instruction(InstructionProp::new(
@@ -518,7 +520,7 @@ fn mixed_standard_gates_accumulate_their_own_weighted_calibrations() {
     circuit.cz(Qubit::new(0), Qubit::new(1)).unwrap();
     circuit.cz(Qubit::new(1), Qubit::new(0)).unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let score = LayoutObjective::fidelity_aware()
         .score_layout(
             &analyze_circuit_for_layout(&circuit).unwrap(),
@@ -558,7 +560,7 @@ fn non_standard_two_qubit_operation_contributes_only_distance() {
         )
         .unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let score = LayoutObjective::fidelity_aware()
         .score_layout(
             &analyze_circuit_for_layout(&circuit).unwrap(),

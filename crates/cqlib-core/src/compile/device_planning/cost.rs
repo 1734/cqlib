@@ -506,7 +506,7 @@ impl CalibrationEstimator {
     }
 
     pub(crate) fn physical_cost(&self, leaves: &[NativePlanLeaf]) -> DevicePhysicalCost {
-        schedule_physical_cost(leaves, self.cost_for_leaves(leaves), self)
+        self.schedule_physical_cost(leaves, self.cost_for_leaves(leaves))
     }
 
     pub(crate) fn schedule_profile(
@@ -567,82 +567,84 @@ impl CalibrationEstimator {
     }
 }
 
-pub(crate) fn schedule_physical_cost(
-    leaves: &[NativePlanLeaf],
-    aggregate: NativePlanCost,
-    estimator: &CalibrationEstimator,
-) -> DevicePhysicalCost {
-    let mut total_depths = HashMap::<PhysicalQubit, u32>::new();
-    let mut two_qubit_depths = HashMap::<PhysicalQubit, u32>::new();
-    let mut total_native_depth = 0;
-    let mut native_two_qubit_depth = 0;
-    let mut availability = HashMap::<PhysicalQubit, f64>::new();
-    let mut makespan = 0.0_f64;
-    let mut timing_complete = estimator.duration_enabled();
+impl CalibrationEstimator {
+    pub(crate) fn schedule_physical_cost(
+        &self,
+        leaves: &[NativePlanLeaf],
+        aggregate: NativePlanCost,
+    ) -> DevicePhysicalCost {
+        let mut total_depths = HashMap::<PhysicalQubit, u32>::new();
+        let mut two_qubit_depths = HashMap::<PhysicalQubit, u32>::new();
+        let mut total_native_depth = 0;
+        let mut native_two_qubit_depth = 0;
+        let mut availability = HashMap::<PhysicalQubit, f64>::new();
+        let mut makespan = 0.0_f64;
+        let mut timing_complete = self.duration_enabled();
 
-    for leaf in leaves {
-        let next_depth = leaf
-            .ordered_qargs
-            .iter()
-            .filter_map(|qubit| total_depths.get(qubit))
-            .copied()
-            .max()
-            .unwrap_or(0)
-            + 1;
-        for qubit in &leaf.ordered_qargs {
-            total_depths.insert(*qubit, next_depth);
-        }
-        total_native_depth = total_native_depth.max(next_depth);
-
-        if leaf.ordered_qargs.len() == 2 {
-            let next_two_qubit_depth = leaf
+        for leaf in leaves {
+            let next_depth = leaf
                 .ordered_qargs
                 .iter()
-                .filter_map(|qubit| two_qubit_depths.get(qubit))
+                .filter_map(|qubit| total_depths.get(qubit))
                 .copied()
                 .max()
                 .unwrap_or(0)
                 + 1;
             for qubit in &leaf.ordered_qargs {
-                two_qubit_depths.insert(*qubit, next_two_qubit_depth);
+                total_depths.insert(*qubit, next_depth);
             }
-            native_two_qubit_depth = native_two_qubit_depth.max(next_two_qubit_depth);
-        }
+            total_native_depth = total_native_depth.max(next_depth);
 
-        if timing_complete {
-            if let Some(duration) = estimator.leaf_duration(leaf) {
-                let start = leaf
+            if leaf.ordered_qargs.len() == 2 {
+                let next_two_qubit_depth = leaf
                     .ordered_qargs
                     .iter()
-                    .filter_map(|qubit| availability.get(qubit))
+                    .filter_map(|qubit| two_qubit_depths.get(qubit))
                     .copied()
-                    .max_by(f64::total_cmp)
-                    .unwrap_or(0.0);
-                let finish = start + duration;
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
                 for qubit in &leaf.ordered_qargs {
-                    availability.insert(*qubit, finish);
+                    two_qubit_depths.insert(*qubit, next_two_qubit_depth);
                 }
-                makespan = makespan.max(finish);
-            } else {
-                timing_complete = false;
+                native_two_qubit_depth = native_two_qubit_depth.max(next_two_qubit_depth);
+            }
+
+            if timing_complete {
+                if let Some(duration) = self.leaf_duration(leaf) {
+                    let start = leaf
+                        .ordered_qargs
+                        .iter()
+                        .filter_map(|qubit| availability.get(qubit))
+                        .copied()
+                        .max_by(f64::total_cmp)
+                        .unwrap_or(0.0);
+                    let finish = start + duration;
+                    for qubit in &leaf.ordered_qargs {
+                        availability.insert(*qubit, finish);
+                    }
+                    makespan = makespan.max(finish);
+                } else {
+                    timing_complete = false;
+                }
             }
         }
-    }
 
-    DevicePhysicalCost {
-        native_two_qubit_ops: aggregate.native_two_qubit_ops,
-        native_two_qubit_depth,
-        error: aggregate.error,
-        total_native_depth,
-        native_total_ops: aggregate.native_total_ops,
-        duration: aggregate.duration,
-        makespan: if !estimator.duration_enabled() {
-            MetricAvailability::Disabled
-        } else if timing_complete {
-            MetricAvailability::Available(makespan)
-        } else {
-            MetricAvailability::Inconsistent
-        },
+        DevicePhysicalCost {
+            native_two_qubit_ops: aggregate.native_two_qubit_ops,
+            native_two_qubit_depth,
+            error: aggregate.error,
+            total_native_depth,
+            native_total_ops: aggregate.native_total_ops,
+            duration: aggregate.duration,
+            makespan: if !self.duration_enabled() {
+                MetricAvailability::Disabled
+            } else if timing_complete {
+                MetricAvailability::Available(makespan)
+            } else {
+                MetricAvailability::Inconsistent
+            },
+        }
     }
 }
 

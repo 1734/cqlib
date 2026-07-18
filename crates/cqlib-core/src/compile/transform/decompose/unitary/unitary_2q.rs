@@ -31,6 +31,7 @@
 //! whose reconstructed matrix matches the input matrix within exact numerical
 //! tolerance.
 
+use super::matrix::{c, dagger, mat2};
 use super::two_qubit_kak::{KakDecomposition, kak_decompose};
 use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 use super::{
@@ -43,7 +44,6 @@ use crate::compile::CompilerError;
 use crate::compile::transform::target_basis::{
     TargetBasisCost, TargetBasisCostModel, TargetBasisSignature,
 };
-use crate::util::matrix::{c, dagger, mat2};
 use ndarray::Array2;
 use ndarray::linalg::kron;
 use num_complex::Complex64;

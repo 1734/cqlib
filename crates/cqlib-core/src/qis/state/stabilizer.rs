@@ -163,6 +163,7 @@
 //! assert!(matches!(result, Err(QisError::NonCliffordGate(_))));
 //! ```
 
+use super::aligned_buffer::AlignedBuffer;
 use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::error::CircuitError;
@@ -174,7 +175,6 @@ use crate::device::{ExecutionResult, Outcome};
 use crate::qis::error::QisError;
 use crate::qis::pauli::{Pauli, PauliString, Phase};
 use crate::qis::state::{ClassicalState, RuntimeValue};
-use crate::util::aligned::AlignedBuffer;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;

@@ -56,7 +56,7 @@ pub use ir::{
 pub use layout::{VisualBuildOptions, build_visual_circuit};
 pub use params::{ParameterDisplayMode, ParameterFormatOptions, ParameterFormatter};
 pub use style::GateStyle;
-pub use text::{TextDrawerOptions, circuit_to_text};
+pub use text::{TextDrawerOptions, circuit_to_text, draw_text_from_visual};
 
 #[cfg(test)]
 #[path = "figure_test.rs"]

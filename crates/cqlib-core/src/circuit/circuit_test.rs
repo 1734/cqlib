@@ -71,6 +71,85 @@ fn test_circuit_basic_construction() {
 }
 
 #[test]
+fn uses_symbol_checks_global_phase_and_top_level_operations() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::symbol("phase"));
+    circuit
+        .rz(
+            Qubit::new(0),
+            Parameter::symbol("theta") + Parameter::symbol("phi"),
+        )
+        .unwrap();
+
+    assert!(circuit.uses_symbol("phase"));
+    assert!(circuit.uses_symbol("theta"));
+    assert!(circuit.uses_symbol("phi"));
+    assert!(!circuit.uses_symbol("missing"));
+}
+
+#[test]
+fn uses_symbol_ignores_registered_but_unreferenced_symbols() {
+    let mut circuit = Circuit::new(1);
+    circuit.add_parameter(Parameter::symbol("unused"));
+    circuit.rx(Qubit::new(0), 0.25).unwrap();
+
+    assert!(circuit.symbols().contains("unused"));
+    assert!(!circuit.uses_symbol("unused"));
+}
+
+#[test]
+fn uses_symbol_recurses_through_all_control_flow_bodies() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let counter = circuit.var(ClassicalType::uint(2).unwrap());
+    let selector = circuit.var(ClassicalType::uint(2).unwrap());
+
+    circuit
+        .if_else(
+            ClassicalExpr::bool_literal(true),
+            |body| body.rx(q0, Parameter::symbol("if_then")),
+            |body| body.ry(q0, Parameter::symbol("if_else")),
+        )
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.rz(q0, Parameter::symbol("while_body"))
+        })
+        .unwrap();
+    circuit
+        .for_uint(
+            counter,
+            ClassicalExpr::uint_literal(2, 0).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            |body, _| body.rx(q0, Parameter::symbol("for_body")),
+        )
+        .unwrap();
+    circuit
+        .switch(selector.expr(), |case| {
+            case.value(0, |body| body.ry(q0, Parameter::symbol("switch_case")))?;
+            case.default(|body| {
+                body.if_(ClassicalExpr::bool_literal(true), |nested| {
+                    nested.rz(q0, Parameter::symbol("nested_default"))
+                })
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    for symbol in [
+        "if_then",
+        "if_else",
+        "while_body",
+        "for_body",
+        "switch_case",
+        "nested_default",
+    ] {
+        assert!(circuit.uses_symbol(symbol), "missing symbol {symbol}");
+    }
+}
+
+#[test]
 fn test_circuit_qubit_validation() {
     let mut circuit = Circuit::new(2);
     let q0 = Qubit::new(0);

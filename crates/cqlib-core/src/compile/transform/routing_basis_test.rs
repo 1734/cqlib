@@ -14,8 +14,8 @@
 use super::LowerToRoutingBasis;
 use crate::circuit::{Circuit, Instruction, MCGate, ParameterValue, Qubit, StandardGate};
 use crate::compile::CompilerError;
+use crate::compile::test_utils::standard_ops;
 use crate::compile::transform::Transformer;
-use crate::util::test_utils::standard_ops;
 
 fn assert_no_gate_like_operation_exceeds_two_qubits(circuit: &Circuit) {
     for operation in circuit.operations() {

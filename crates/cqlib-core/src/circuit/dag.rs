@@ -1426,7 +1426,7 @@ impl CircuitDag {
     }
 
     fn operation_resources(&self, operation: &Operation) -> OperationResources {
-        let mut resources = operation_resources(operation);
+        let mut resources = OperationResources::from_operation(operation);
         if matches!(
             operation.instruction,
             Instruction::Directive(Directive::Barrier)
@@ -1563,26 +1563,77 @@ struct OperationResources {
     writes: IndexSet<DagWire>,
 }
 
-fn operation_resources(operation: &Operation) -> OperationResources {
-    let mut resources = OperationResources::default();
-    resources
-        .writes
-        .extend(operation.qubits.iter().copied().map(DagWire::Qubit));
+impl OperationResources {
+    fn from_operation(operation: &Operation) -> Self {
+        let mut resources = Self::default();
+        resources
+            .writes
+            .extend(operation.qubits.iter().copied().map(DagWire::Qubit));
 
-    match &operation.instruction {
-        Instruction::ClassicalData(op) => match op {
-            ClassicalDataOp::Store { target, value } => {
-                add_expr_reads(value, &mut resources);
-                resources.writes.insert(DagWire::ClassicalVar(*target));
-            }
-            ClassicalDataOp::MeasureBit { result } | ClassicalDataOp::MeasureBits { result } => {
-                resources.writes.insert(DagWire::ClassicalValue(*result));
-            }
-        },
-        Instruction::ClassicalControl(control) => add_control_resources(control, &mut resources),
-        _ => {}
+        match &operation.instruction {
+            Instruction::ClassicalData(op) => match op {
+                ClassicalDataOp::Store { target, value } => {
+                    resources.add_expr_reads(value);
+                    resources.writes.insert(DagWire::ClassicalVar(*target));
+                }
+                ClassicalDataOp::MeasureBit { result }
+                | ClassicalDataOp::MeasureBits { result } => {
+                    resources.writes.insert(DagWire::ClassicalValue(*result));
+                }
+            },
+            Instruction::ClassicalControl(control) => resources.add_control_resources(control),
+            _ => {}
+        }
+        resources
     }
-    resources
+
+    fn add_control_resources(&mut self, control: &ClassicalControlOp) {
+        match control {
+            ClassicalControlOp::If(op) => {
+                self.add_expr_reads(op.condition());
+                self.add_body_resources(op.then_body().operations());
+                if let Some(body) = op.else_body() {
+                    self.add_body_resources(body.operations());
+                }
+            }
+            ClassicalControlOp::While(op) => {
+                self.add_expr_reads(op.condition());
+                self.add_body_resources(op.body().operations());
+            }
+            ClassicalControlOp::For(op) => {
+                self.writes.insert(DagWire::ClassicalVar(op.var()));
+                self.add_expr_reads(op.start());
+                self.add_expr_reads(op.stop());
+                self.add_expr_reads(op.step());
+                self.add_body_resources(op.body().operations());
+            }
+            ClassicalControlOp::Switch(op) => {
+                self.add_expr_reads(op.target());
+                for case in op.cases() {
+                    self.add_body_resources(case.body().operations());
+                }
+                if let Some(body) = op.default() {
+                    self.add_body_resources(body.operations());
+                }
+            }
+            ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+        }
+    }
+
+    fn add_body_resources(&mut self, operations: &[Operation]) {
+        for operation in operations {
+            let nested = Self::from_operation(operation);
+            self.reads.extend(nested.reads);
+            self.writes.extend(nested.writes);
+        }
+    }
+
+    fn add_expr_reads(&mut self, expr: &ClassicalExpr) {
+        self.reads
+            .extend(expr.vars().into_iter().map(DagWire::ClassicalVar));
+        self.reads
+            .extend(expr.values().into_iter().map(DagWire::ClassicalValue));
+    }
 }
 
 fn is_one_qubit_gate(operation: &Operation) -> bool {
@@ -1654,56 +1705,6 @@ fn instruction_name(instruction: &Instruction) -> String {
         Instruction::ClassicalControl(ClassicalControlOp::Continue) => "continue".to_string(),
         Instruction::Delay => "delay".to_string(),
     }
-}
-
-fn add_control_resources(control: &ClassicalControlOp, resources: &mut OperationResources) {
-    match control {
-        ClassicalControlOp::If(op) => {
-            add_expr_reads(op.condition(), resources);
-            add_body_resources(op.then_body().operations(), resources);
-            if let Some(body) = op.else_body() {
-                add_body_resources(body.operations(), resources);
-            }
-        }
-        ClassicalControlOp::While(op) => {
-            add_expr_reads(op.condition(), resources);
-            add_body_resources(op.body().operations(), resources);
-        }
-        ClassicalControlOp::For(op) => {
-            resources.writes.insert(DagWire::ClassicalVar(op.var()));
-            add_expr_reads(op.start(), resources);
-            add_expr_reads(op.stop(), resources);
-            add_expr_reads(op.step(), resources);
-            add_body_resources(op.body().operations(), resources);
-        }
-        ClassicalControlOp::Switch(op) => {
-            add_expr_reads(op.target(), resources);
-            for case in op.cases() {
-                add_body_resources(case.body().operations(), resources);
-            }
-            if let Some(body) = op.default() {
-                add_body_resources(body.operations(), resources);
-            }
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-    }
-}
-
-fn add_body_resources(operations: &[Operation], resources: &mut OperationResources) {
-    for operation in operations {
-        let nested = operation_resources(operation);
-        resources.reads.extend(nested.reads);
-        resources.writes.extend(nested.writes);
-    }
-}
-
-fn add_expr_reads(expr: &ClassicalExpr, resources: &mut OperationResources) {
-    resources
-        .reads
-        .extend(expr.vars().into_iter().map(DagWire::ClassicalVar));
-    resources
-        .reads
-        .extend(expr.values().into_iter().map(DagWire::ClassicalValue));
 }
 
 #[cfg(test)]

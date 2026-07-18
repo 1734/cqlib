@@ -30,7 +30,7 @@ fn validate_config_reports_invalid_trial_counts() {
         ..SabreConfig::deterministic_seeded(7)
     };
 
-    let error = validate_config(&config).unwrap_err();
+    let error = config.validate().unwrap_err();
 
     assert!(
         matches!(error, CompilerError::InvalidInput(message) if message.contains("routing_trials"))
@@ -46,7 +46,7 @@ fn validate_config_rejects_invalid_swap_regret_ratio() {
         };
 
         assert!(matches!(
-            validate_config(&config),
+            config.validate(),
             Err(CompilerError::InvalidInput(message))
                 if message.contains("swap_regret_ratio")
         ));

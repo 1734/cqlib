@@ -289,7 +289,7 @@ impl<'a> DefinitionExpander<'a> {
 
         let mut next_qubit_map = HashMap::with_capacity(definition_qubits.len());
         for (inner, callsite) in definition_qubits.iter().zip(operation.qubits.iter()) {
-            next_qubit_map.insert(*inner, map_qubit(*callsite, qubit_map)?);
+            next_qubit_map.insert(*inner, qubit_map.map_one(*callsite)?);
         }
         let next_qubit_map = QubitMap::Mapped(&next_qubit_map);
         let next_classical_remap = self.rebuild.allocate_classical_instance(definition);
@@ -416,7 +416,7 @@ impl<'a> DefinitionExpander<'a> {
 
         operations.push(ValueOperation {
             instruction: ValueInstruction::ClassicalControl(instruction),
-            qubits: map_qubits(&operation.qubits, qubit_map)?,
+            qubits: qubit_map.map_all(&operation.qubits)?,
             params: smallvec![],
             label: operation.label.clone(),
         });
@@ -484,7 +484,7 @@ impl<'a> DefinitionExpander<'a> {
             instruction: self
                 .rebuild
                 .remap_non_control_instruction(&operation.instruction, classical_remap)?,
-            qubits: map_qubits(&operation.qubits, qubit_map)?,
+            qubits: qubit_map.map_all(&operation.qubits)?,
             params,
             label: operation.label.clone(),
         });
@@ -512,29 +512,28 @@ enum QubitMap<'a> {
     Mapped(&'a HashMap<Qubit, Qubit>),
 }
 
-fn map_qubits(
-    qubits: &[Qubit],
-    qubit_map: &QubitMap<'_>,
-) -> Result<SmallVec<[Qubit; 3]>, CompilerError> {
-    if matches!(qubit_map, QubitMap::Identity) {
-        return Ok(qubits.iter().copied().collect());
+impl QubitMap<'_> {
+    fn map_all(&self, qubits: &[Qubit]) -> Result<SmallVec<[Qubit; 3]>, CompilerError> {
+        if matches!(self, Self::Identity) {
+            return Ok(qubits.iter().copied().collect());
+        }
+
+        let mut mapped = SmallVec::with_capacity(qubits.len());
+        for qubit in qubits {
+            mapped.push(self.map_one(*qubit)?);
+        }
+        Ok(mapped)
     }
 
-    let mut mapped = SmallVec::with_capacity(qubits.len());
-    for qubit in qubits {
-        mapped.push(map_qubit(*qubit, qubit_map)?);
-    }
-    Ok(mapped)
-}
-
-fn map_qubit(qubit: Qubit, qubit_map: &QubitMap<'_>) -> Result<Qubit, CompilerError> {
-    match qubit_map {
-        QubitMap::Identity => Ok(qubit),
-        QubitMap::Mapped(qubit_map) => qubit_map.get(&qubit).copied().ok_or_else(|| {
-            CompilerError::InvalidInput(format!(
-                "definition expansion references unmapped qubit {qubit}"
-            ))
-        }),
+    fn map_one(&self, qubit: Qubit) -> Result<Qubit, CompilerError> {
+        match self {
+            Self::Identity => Ok(qubit),
+            Self::Mapped(qubit_map) => qubit_map.get(&qubit).copied().ok_or_else(|| {
+                CompilerError::InvalidInput(format!(
+                    "definition expansion references unmapped qubit {qubit}"
+                ))
+            }),
+        }
     }
 }
 

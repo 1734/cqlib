@@ -29,8 +29,8 @@ fn route_trial_for_test(
     seed: u64,
 ) -> Result<TrialResult, CompilerError> {
     let unscored = route_unscored_trial_unchecked(sabre, target, layout, heuristic, seed)?;
-    let abstract_quality = abstract_trial_quality(&unscored);
-    finalize_trial_quality(unscored, abstract_quality, target)
+    let abstract_quality = unscored.abstract_quality();
+    unscored.finalize(abstract_quality, target)
 }
 
 fn movement_edge(left: usize, right: usize, cost: NativePlanCost) -> MovementEdge {
@@ -376,7 +376,7 @@ fn pair_state_table_omits_impossible_diagonal_states() {
     let table = PairStateTable::<RouteLowerBound>::new(100);
 
     assert_eq!(table.state_count(), 100 * 99);
-    assert_eq!(pair_state_index(100, 4, 4), None);
+    assert_eq!(PairStateTable::<()>::index(100, 4, 4), None);
 }
 
 #[test]
@@ -1004,57 +1004,34 @@ fn constrained_trial_objective_uses_native_quality_in_declared_order() {
     };
 
     assert!(
-        compare_trial_quality(
-            SabreTrialObjective::NativeQualityWithinSwapBudget,
-            fewer_native_gates,
-            1,
-            baseline,
-            0
-        )
-        .is_lt()
+        SabreTrialObjective::NativeQualityWithinSwapBudget
+            .compare(fewer_native_gates, 1, baseline, 0)
+            .is_lt()
     );
     assert!(
-        compare_trial_quality(
-            SabreTrialObjective::NativeQualityWithinSwapBudget,
-            shallower_native_depth,
-            1,
-            baseline,
-            0
-        )
-        .is_lt()
+        SabreTrialObjective::NativeQualityWithinSwapBudget
+            .compare(shallower_native_depth, 1, baseline, 0)
+            .is_lt()
     );
     assert!(
-        compare_trial_quality(
-            SabreTrialObjective::NativeQualityWithinSwapBudget,
-            better_coverage,
-            1,
-            worse_coverage,
-            0
-        )
-        .is_lt()
+        SabreTrialObjective::NativeQualityWithinSwapBudget
+            .compare(better_coverage, 1, worse_coverage, 0)
+            .is_lt()
     );
 }
 
 #[test]
 fn trial_swap_budget_is_five_percent_with_integer_ceiling() {
     assert_eq!(
-        trial_swap_limit(
-            SabreTrialObjective::NativeQualityWithinSwapBudget,
-            0.05,
-            [20, 25].into_iter()
-        ),
+        SabreTrialObjective::NativeQualityWithinSwapBudget.swap_limit(0.05, [20, 25].into_iter()),
         21
     );
     assert_eq!(
-        trial_swap_limit(
-            SabreTrialObjective::NativeQualityWithinSwapBudget,
-            0.05,
-            [19, 25].into_iter()
-        ),
+        SabreTrialObjective::NativeQualityWithinSwapBudget.swap_limit(0.05, [19, 25].into_iter()),
         20
     );
     assert_eq!(
-        trial_swap_limit(SabreTrialObjective::Depth, 0.05, [2].into_iter()),
+        SabreTrialObjective::Depth.swap_limit(0.05, [2].into_iter()),
         usize::MAX
     );
 }

@@ -14,10 +14,10 @@ use super::*;
 use crate::circuit::{Circuit, Qubit};
 use crate::compile::CompilerError;
 use crate::compile::sabre::SabreConfig;
-use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit, Topology};
-use crate::util::test_utils::{
+use crate::compile::test_utils::{
     assert_two_qubit_operations_supported_by_topology, generated_small_routable_circuit,
 };
+use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit, Topology};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 

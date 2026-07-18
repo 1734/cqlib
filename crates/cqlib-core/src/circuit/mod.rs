@@ -167,6 +167,9 @@ pub mod parameter;
 pub mod symbolic_matrix;
 pub mod value_instruction;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 pub use bit::{Qubit, QubitError};
 pub use cfg::CircuitCFG;
 pub use circuit_classical::SwitchBuilder;

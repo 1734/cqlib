@@ -13,18 +13,23 @@
 use ndarray::{Array2, array};
 use num_complex::Complex64;
 
-pub const fn c(re: f64, im: f64) -> Complex64 {
+pub(super) const fn c(re: f64, im: f64) -> Complex64 {
     Complex64::new(re, im)
 }
 
-pub fn mat2(a00: Complex64, a01: Complex64, a10: Complex64, a11: Complex64) -> Array2<Complex64> {
+pub(super) fn mat2(
+    a00: Complex64,
+    a01: Complex64,
+    a10: Complex64,
+    a11: Complex64,
+) -> Array2<Complex64> {
     array![[a00, a01], [a10, a11]]
 }
 
-pub fn dagger(matrix: &Array2<Complex64>) -> Array2<Complex64> {
+pub(super) fn dagger(matrix: &Array2<Complex64>) -> Array2<Complex64> {
     matrix.t().mapv(|value| value.conj())
 }
 
-pub fn det_2x2(m: &Array2<Complex64>) -> Complex64 {
+pub(super) fn det_2x2(m: &Array2<Complex64>) -> Complex64 {
     m[[0, 0]] * m[[1, 1]] - m[[0, 1]] * m[[1, 0]]
 }

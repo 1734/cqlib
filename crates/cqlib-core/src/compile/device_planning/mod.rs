@@ -25,9 +25,7 @@ use crate::device::{Device, PhysicalQubit};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
-pub(crate) use cost::{
-    CalibrationEstimator, DevicePhysicalCost, NativePlanSummary, schedule_physical_cost,
-};
+pub(crate) use cost::{CalibrationEstimator, DevicePhysicalCost, NativePlanSummary};
 pub(crate) use planner::{DevicePlanner, DevicePlannerError, PlanChoice, PlanId, PlanTemplate};
 pub(crate) use templates::DirectionTemplate;
 

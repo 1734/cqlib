@@ -17,8 +17,8 @@ use crate::circuit::{
     ClassicalExpr, ClassicalType, Directive, Instruction, MCGate, Parameter, ParameterValue, Qubit,
     StandardGate, UnitaryGate, ValueInstruction, ValueOperation, circuit_to_matrix,
 };
+use crate::compile::test_utils::generated_small_matrix_circuit;
 use crate::compile::transform::Transformer;
-use crate::util::test_utils::generated_small_matrix_circuit;
 use ndarray::array;
 use num_complex::Complex64;
 use proptest::prelude::*;

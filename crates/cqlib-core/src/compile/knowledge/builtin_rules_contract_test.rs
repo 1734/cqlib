@@ -15,12 +15,12 @@
 //! Covers parse/validate health, layered [`Rule::verify`], and gate-formula
 //! equivalence for selected decompositions. Does not exercise `transform` passes.
 
+use crate::circuit::test_utils::assert_circuits_equivalent_up_to_global_phase;
 use crate::circuit::{Circuit, Qubit};
 use crate::compile::knowledge::rule::Rule;
 use crate::compile::knowledge::rule_dsl::load::load_rules_from_str;
 use crate::compile::knowledge::rule_equivalence::VerifyResult;
 use crate::compile::knowledge::{RuleKind, RuleLibrary};
-use crate::util::test_utils::assert_circuits_equivalent_up_to_global_phase;
 use std::f64::consts::PI;
 
 const RULE_FILES: &[(&str, &str, RuleKind)] = &[

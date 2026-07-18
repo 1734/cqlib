@@ -491,7 +491,7 @@ impl<'a> McGateDecomposer<'a> {
                 gate,
                 params,
                 controls,
-                one_target(gate, targets)?,
+                Self::one_target(gate, targets)?,
                 &excluded,
             ),
             StandardGate::RX
@@ -500,8 +500,8 @@ impl<'a> McGateDecomposer<'a> {
             | StandardGate::CRX
             | StandardGate::CRY
             | StandardGate::CRZ => {
-                let theta = one_param(gate, params)?;
-                let target = one_target(gate, targets)?;
+                let theta = Self::one_param(gate, params)?;
+                let target = Self::one_target(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -524,8 +524,8 @@ impl<'a> McGateDecomposer<'a> {
             | StandardGate::T
             | StandardGate::TDG
             | StandardGate::Phase => {
-                let theta = phase_param(gate, params)?;
-                let target = one_target(gate, targets)?;
+                let theta = Self::phase_param(gate, params)?;
+                let target = Self::one_target(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -544,7 +544,7 @@ impl<'a> McGateDecomposer<'a> {
                 )
             }
             StandardGate::H => {
-                let target = one_target(gate, targets)?;
+                let target = Self::one_target(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -563,8 +563,8 @@ impl<'a> McGateDecomposer<'a> {
                 )
             }
             StandardGate::U => {
-                let [theta, phi, lambda] = three_params(gate, params)?;
-                let target = one_target(gate, targets)?;
+                let [theta, phi, lambda] = Self::three_params(gate, params)?;
+                let target = Self::one_target(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -585,8 +585,8 @@ impl<'a> McGateDecomposer<'a> {
                 )
             }
             StandardGate::RXX | StandardGate::RYY | StandardGate::RZZ | StandardGate::RZX => {
-                let theta = one_param(gate, params)?;
-                let [first, second] = two_targets(gate, targets)?;
+                let theta = Self::one_param(gate, params)?;
+                let [first, second] = Self::two_targets(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -609,7 +609,7 @@ impl<'a> McGateDecomposer<'a> {
                 )
             }
             StandardGate::SWAP => {
-                let [first, second] = two_targets(gate, targets)?;
+                let [first, second] = Self::two_targets(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -633,7 +633,7 @@ impl<'a> McGateDecomposer<'a> {
             | StandardGate::Y2M
             | StandardGate::XY2P
             | StandardGate::XY2M => {
-                let target = one_target(gate, targets)?;
+                let target = Self::one_target(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -652,7 +652,7 @@ impl<'a> McGateDecomposer<'a> {
                 )
             }
             StandardGate::FSIM => {
-                let [first, second] = two_targets(gate, targets)?;
+                let [first, second] = Self::two_targets(gate, targets)?;
                 self.synthesize_with_optional_clean(
                     McSynthesisContext {
                         gate,
@@ -946,83 +946,91 @@ impl<'a> McGateDecomposer<'a> {
                 }),
         }
     }
+
+    fn one_param(
+        gate: StandardGate,
+        params: &[ParameterValue],
+    ) -> Result<&ParameterValue, CompilerError> {
+        let [param] = params else {
+            return Err(Self::invalid_primitive_signature(
+                gate,
+                "1 parameter",
+                params.len(),
+            ));
+        };
+        Ok(param)
+    }
+
+    fn three_params(
+        gate: StandardGate,
+        params: &[ParameterValue],
+    ) -> Result<[&ParameterValue; 3], CompilerError> {
+        let [theta, phi, lambda] = params else {
+            return Err(Self::invalid_primitive_signature(
+                gate,
+                "3 parameters",
+                params.len(),
+            ));
+        };
+        Ok([theta, phi, lambda])
+    }
+
+    fn phase_param(
+        gate: StandardGate,
+        params: &[ParameterValue],
+    ) -> Result<Option<&ParameterValue>, CompilerError> {
+        match gate {
+            StandardGate::Phase => Ok(Some(Self::one_param(gate, params)?)),
+            StandardGate::S | StandardGate::SDG | StandardGate::T | StandardGate::TDG
+                if params.is_empty() =>
+            {
+                Ok(None)
+            }
+            _ => Err(Self::invalid_primitive_signature(
+                gate,
+                "0 parameters",
+                params.len(),
+            )),
+        }
+    }
+
+    fn one_target(gate: StandardGate, targets: &[Qubit]) -> Result<Qubit, CompilerError> {
+        let [target] = targets else {
+            return Err(Self::invalid_primitive_signature(
+                gate,
+                "1 target",
+                targets.len(),
+            ));
+        };
+        Ok(*target)
+    }
+
+    fn two_targets(gate: StandardGate, targets: &[Qubit]) -> Result<[Qubit; 2], CompilerError> {
+        let [first, second] = targets else {
+            return Err(Self::invalid_primitive_signature(
+                gate,
+                "2 targets",
+                targets.len(),
+            ));
+        };
+        Ok([*first, *second])
+    }
+
+    fn invalid_primitive_signature(
+        gate: StandardGate,
+        expected: &str,
+        actual: usize,
+    ) -> CompilerError {
+        CompilerError::InvariantViolation(format!(
+            "validated multi-controlled {gate} operation requires {expected}, got {actual}"
+        ))
+    }
 }
 
 fn value_operations_use_qubit(operations: &[ValueOperation], qubit: Qubit) -> bool {
     operations
         .iter()
         .any(|operation| operation.qubits.contains(&qubit))
-}
-
-fn one_param(
-    gate: StandardGate,
-    params: &[ParameterValue],
-) -> Result<&ParameterValue, CompilerError> {
-    let [param] = params else {
-        return Err(invalid_primitive_signature(
-            gate,
-            "1 parameter",
-            params.len(),
-        ));
-    };
-    Ok(param)
-}
-
-fn three_params(
-    gate: StandardGate,
-    params: &[ParameterValue],
-) -> Result<[&ParameterValue; 3], CompilerError> {
-    let [theta, phi, lambda] = params else {
-        return Err(invalid_primitive_signature(
-            gate,
-            "3 parameters",
-            params.len(),
-        ));
-    };
-    Ok([theta, phi, lambda])
-}
-
-fn phase_param(
-    gate: StandardGate,
-    params: &[ParameterValue],
-) -> Result<Option<&ParameterValue>, CompilerError> {
-    match gate {
-        StandardGate::Phase => Ok(Some(one_param(gate, params)?)),
-        StandardGate::S | StandardGate::SDG | StandardGate::T | StandardGate::TDG
-            if params.is_empty() =>
-        {
-            Ok(None)
-        }
-        _ => Err(invalid_primitive_signature(
-            gate,
-            "0 parameters",
-            params.len(),
-        )),
-    }
-}
-
-fn one_target(gate: StandardGate, targets: &[Qubit]) -> Result<Qubit, CompilerError> {
-    let [target] = targets else {
-        return Err(invalid_primitive_signature(gate, "1 target", targets.len()));
-    };
-    Ok(*target)
-}
-
-fn two_targets(gate: StandardGate, targets: &[Qubit]) -> Result<[Qubit; 2], CompilerError> {
-    let [first, second] = targets else {
-        return Err(invalid_primitive_signature(
-            gate,
-            "2 targets",
-            targets.len(),
-        ));
-    };
-    Ok([*first, *second])
-}
-
-fn invalid_primitive_signature(gate: StandardGate, expected: &str, actual: usize) -> CompilerError {
-    CompilerError::InvariantViolation(format!(
-        "validated multi-controlled {gate} operation requires {expected}, got {actual}"
-    ))
 }
 
 fn resource_candidate_is_unavailable(error: &ResourceError) -> bool {

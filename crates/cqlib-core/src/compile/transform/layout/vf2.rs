@@ -21,7 +21,7 @@
 use super::vf2_engine::{Vf2Graph, Vf2SearchConfig, find_non_induced_mappings};
 use super::{
     CircuitLayoutAnalysis, Interaction, LayoutDiagnostics, LayoutObjective, LayoutResult,
-    LayoutScore, PhysicalLayoutGraph, analyze_circuit_for_layout, build_physical_layout_graph,
+    LayoutScore, PhysicalLayoutGraph, analyze_circuit_for_layout,
 };
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
@@ -135,7 +135,7 @@ pub fn vf2_perfect_layout(
     config: &Vf2LayoutConfig,
 ) -> Result<LayoutResult, CompilerError> {
     let analysis = analyze_circuit_for_layout(circuit)?;
-    let physical = build_physical_layout_graph(device)?;
+    let physical = PhysicalLayoutGraph::from_device(device)?;
     vf2_perfect_layout_prepared(&analysis, &physical, objective, config)
 }
 

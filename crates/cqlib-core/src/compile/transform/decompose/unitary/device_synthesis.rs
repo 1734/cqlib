@@ -23,9 +23,7 @@
 
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
-use crate::compile::device_planning::{
-    CalibrationEstimator, DeviceGateState, NativePlanCatalog, schedule_physical_cost,
-};
+use crate::compile::device_planning::{CalibrationEstimator, DeviceGateState, NativePlanCatalog};
 use crate::device::{Device, PhysicalQubit};
 use smallvec::smallvec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -258,11 +256,11 @@ impl DeviceTwoQubitSynthesisContext {
             aggregate = aggregate.combine(self.data.estimator.cost(summary));
             leaves.extend(summary.leaves.iter().cloned());
         }
-        Some(schedule_physical_cost(
-            &leaves,
-            aggregate,
-            &self.data.estimator,
-        ))
+        Some(
+            self.data
+                .estimator
+                .schedule_physical_cost(&leaves, aggregate),
+        )
     }
 
     fn coverage_key(&self, domain: &OrderedPairDomain) -> DeviceCoverageKey {
@@ -315,11 +313,11 @@ impl DeviceTwoQubitSynthesisContext {
             aggregate = aggregate.combine(self.data.estimator.cost(summary));
             leaves.extend(summary.leaves.iter().cloned());
         }
-        Some(schedule_physical_cost(
-            &leaves,
-            aggregate,
-            &self.data.estimator,
-        ))
+        Some(
+            self.data
+                .estimator
+                .schedule_physical_cost(&leaves, aggregate),
+        )
     }
 }
 

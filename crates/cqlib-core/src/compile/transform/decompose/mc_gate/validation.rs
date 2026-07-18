@@ -10,7 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! Shared qubit helpers.
+//! Multi-controlled gate qubit validation helpers.
 
 use crate::circuit::Qubit;
 use std::collections::HashSet;
@@ -19,7 +19,7 @@ use std::collections::HashSet;
 /// groups.
 ///
 /// Groups and qubits within each group are inspected in slice order.
-pub fn find_duplicate_qubit(qubit_groups: &[&[Qubit]]) -> Option<Qubit> {
+pub(super) fn find_duplicate_qubit(qubit_groups: &[&[Qubit]]) -> Option<Qubit> {
     let mut seen = HashSet::with_capacity(qubit_groups.iter().map(|qubits| qubits.len()).sum());
     qubit_groups
         .iter()
@@ -48,5 +48,29 @@ mod tests {
         let second = [Qubit::new(2), Qubit::new(3)];
 
         assert_eq!(find_duplicate_qubit(&[&first, &second]), None);
+    }
+
+    #[test]
+    fn finds_duplicate_qubit_within_one_group() {
+        let qubits = [Qubit::new(0), Qubit::new(1), Qubit::new(0)];
+
+        assert_eq!(find_duplicate_qubit(&[&qubits]), Some(Qubit::new(0)));
+    }
+
+    #[test]
+    fn returns_first_duplicate_in_traversal_order() {
+        let first = [Qubit::new(0), Qubit::new(1)];
+        let second = [Qubit::new(2), Qubit::new(1), Qubit::new(0)];
+
+        assert_eq!(
+            find_duplicate_qubit(&[&first, &second]),
+            Some(Qubit::new(1))
+        );
+    }
+
+    #[test]
+    fn accepts_empty_input_and_empty_groups() {
+        assert_eq!(find_duplicate_qubit(&[]), None);
+        assert_eq!(find_duplicate_qubit(&[&[]]), None);
     }
 }

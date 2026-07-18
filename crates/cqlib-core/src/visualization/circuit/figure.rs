@@ -148,6 +148,21 @@ pub struct FigureDrawerOptions {
     pub reverse_bits: bool,
 }
 
+impl FigureDrawerOptions {
+    /// Converts figure DPI into the PNG rasterization scale.
+    ///
+    /// The default DPI maps to scale `1.0` so existing visual references stay stable.
+    /// Larger DPI values produce proportionally larger PNG dimensions.
+    fn png_scale(&self) -> Result<f64, VisualizationError> {
+        if self.dpi == 0 {
+            return Err(VisualizationError::InvalidInput(
+                "figure dpi must be greater than zero".to_string(),
+            ));
+        }
+        Ok(self.dpi as f64 / DEFAULT_FIGURE_DPI as f64)
+    }
+}
+
 impl Default for FigureDrawerOptions {
     fn default() -> Self {
         Self {
@@ -262,20 +277,7 @@ pub fn render_figure_to_file(
     };
     let visual = build_visual_circuit(circuit, &visual_options)?;
     let svg = draw_figure_svg_from_visual(&visual, options);
-    render_svg_to_file(&svg, output_path, figure_png_scale(options)?)
-}
-
-/// Converts figure DPI into the PNG rasterization scale.
-///
-/// The default DPI maps to scale `1.0` so existing visual references stay stable.
-/// Larger DPI values produce proportionally larger PNG dimensions.
-fn figure_png_scale(options: &FigureDrawerOptions) -> Result<f64, VisualizationError> {
-    if options.dpi == 0 {
-        return Err(VisualizationError::InvalidInput(
-            "figure dpi must be greater than zero".to_string(),
-        ));
-    }
-    Ok(options.dpi as f64 / DEFAULT_FIGURE_DPI as f64)
+    render_svg_to_file(&svg, output_path, options.png_scale()?)
 }
 
 fn draw_figure_svg_from_visual(visual: &VisualCircuit, options: &FigureDrawerOptions) -> String {

@@ -136,6 +136,38 @@ pub(crate) struct UnscoredTrial {
     lazy_pair_l1_cached_count: usize,
 }
 
+impl UnscoredTrial {
+    pub(crate) fn abstract_quality(&self) -> AbstractTrialQuality {
+        let two_qubit_depth = two_qubit_depth(&self.operations);
+        let operation_count = operation_count(&self.operations);
+        AbstractTrialQuality {
+            swap_count: self.swap_count,
+            two_qubit_depth,
+            operation_count,
+            two_qubit_operation_count: two_qubit_operation_count(&self.operations),
+        }
+    }
+
+    pub(crate) fn finalize(
+        self,
+        abstract_quality: AbstractTrialQuality,
+        target: &RoutingTarget,
+    ) -> Result<TrialResult, CompilerError> {
+        let quality = trial_quality(&self.operations, abstract_quality, target)?;
+        Ok(TrialResult {
+            operations: self.operations,
+            final_layout: self.final_layout,
+            swap_count: self.swap_count,
+            fallback_count: self.fallback_count,
+            control_flow_blocks_routed: self.control_flow_blocks_routed,
+            lazy_pair_l1_lookup_count: self.lazy_pair_l1_lookup_count,
+            lazy_pair_l1_hit_count: self.lazy_pair_l1_hit_count,
+            lazy_pair_l1_cached_count: self.lazy_pair_l1_cached_count,
+            quality,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct AbstractTrialQuality {
     pub(crate) swap_count: usize,
@@ -168,7 +200,7 @@ pub fn sabre_route(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<SabreRoutingResult, CompilerError> {
-    validate_config(config)?;
+    config.validate()?;
     // Build a dense, reusable view of the physical topology once. The routing
     // loop indexes into this structure heavily for adjacency, distance, and
     // deterministic candidate ordering.
@@ -192,7 +224,7 @@ pub(crate) fn sabre_route_prepared(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<SabreRoutingResult, CompilerError> {
-    validate_config(config)?;
+    config.validate()?;
     let logical_qubits = circuit
         .qubits()
         .into_iter()
@@ -223,55 +255,50 @@ pub(crate) fn sabre_route_prepared(
     unscored_trials
         .par_iter()
         .try_for_each(|(_, trial)| validate_native_trial_operations(&trial.operations, target))?;
-    let swap_limit = trial_swap_limit(
-        config.trial_objective,
+    let swap_limit = config.trial_objective.swap_limit(
         config.swap_regret_ratio,
         unscored_trials.iter().map(|(_, result)| result.swap_count),
     );
-    let (best_index, best) = if config.trial_objective
-        == SabreTrialObjective::NativeQualityWithinSwapBudget
-    {
-        unscored_trials
-            .into_par_iter()
-            .filter(|(_, trial)| trial.swap_count <= swap_limit)
-            .map(|(index, trial)| {
-                let abstract_quality = abstract_trial_quality(&trial);
-                finalize_trial_quality(trial, abstract_quality, target).map(|trial| (index, trial))
-            })
-            .collect::<Result<Vec<_>, CompilerError>>()?
-            .into_iter()
-            .min_by(|(left_index, left), (right_index, right)| {
-                compare_trial_quality(
-                    config.trial_objective,
-                    left.quality,
-                    *left_index,
-                    right.quality,
-                    *right_index,
-                )
-            })
-            .expect("routing_trials is validated to be non-zero")
-    } else {
-        let (index, trial, abstract_quality) = unscored_trials
-            .into_iter()
-            .map(|(index, trial)| {
-                let abstract_quality = abstract_trial_quality(&trial);
-                (index, trial, abstract_quality)
-            })
-            .min_by(|(left_index, _, left), (right_index, _, right)| {
-                compare_trial_quality(
-                    config.trial_objective,
-                    TrialQuality::from_abstract(*left),
-                    *left_index,
-                    TrialQuality::from_abstract(*right),
-                    *right_index,
-                )
-            })
-            .expect("routing_trials is validated to be non-zero");
-        (
-            index,
-            finalize_trial_quality(trial, abstract_quality, target)?,
-        )
-    };
+    let (best_index, best) =
+        if config.trial_objective == SabreTrialObjective::NativeQualityWithinSwapBudget {
+            unscored_trials
+                .into_par_iter()
+                .filter(|(_, trial)| trial.swap_count <= swap_limit)
+                .map(|(index, trial)| {
+                    let abstract_quality = trial.abstract_quality();
+                    trial
+                        .finalize(abstract_quality, target)
+                        .map(|trial| (index, trial))
+                })
+                .collect::<Result<Vec<_>, CompilerError>>()?
+                .into_iter()
+                .min_by(|(left_index, left), (right_index, right)| {
+                    config.trial_objective.compare(
+                        left.quality,
+                        *left_index,
+                        right.quality,
+                        *right_index,
+                    )
+                })
+                .expect("routing_trials is validated to be non-zero")
+        } else {
+            let (index, trial, abstract_quality) = unscored_trials
+                .into_iter()
+                .map(|(index, trial)| {
+                    let abstract_quality = trial.abstract_quality();
+                    (index, trial, abstract_quality)
+                })
+                .min_by(|(left_index, _, left), (right_index, _, right)| {
+                    config.trial_objective.compare(
+                        TrialQuality::from_abstract(*left),
+                        *left_index,
+                        TrialQuality::from_abstract(*right),
+                        *right_index,
+                    )
+                })
+                .expect("routing_trials is validated to be non-zero");
+            (index, trial.finalize(abstract_quality, target)?)
+        };
 
     // Routing rewrites operation qubits but keeps symbolic parameters by index.
     // Rebuild the routed circuit's parameter table in first-use order, then
@@ -363,26 +390,6 @@ pub(crate) fn sabre_route_prepared(
             lazy_pair_l1_cached_count: best.lazy_pair_l1_cached_count,
         },
     })
-}
-
-/// Validates a SABRE routing configuration.
-///
-/// This check intentionally ignores layout-refinement fields such as
-/// [`SabreConfig::layout_trials`] and [`SabreConfig::layout_scoring_trials`].
-/// Routing starts from a concrete initial layout and does not depend on those
-/// layout-only knobs.
-pub fn validate_config(config: &SabreConfig) -> Result<(), CompilerError> {
-    if config.routing_trials == 0 {
-        return Err(CompilerError::InvalidInput(
-            "sabre routing_trials must be greater than zero".to_string(),
-        ));
-    }
-    if !(config.swap_regret_ratio.is_finite() && config.swap_regret_ratio >= 0.0) {
-        return Err(CompilerError::InvalidInput(
-            "sabre swap_regret_ratio must be finite and non-negative".to_string(),
-        ));
-    }
-    config.heuristic.validate()
 }
 
 fn route_unscored_trial(
@@ -543,36 +550,6 @@ pub(crate) fn route_unscored_trial_with_metadata(
     })
 }
 
-pub(crate) fn finalize_trial_quality(
-    unscored: UnscoredTrial,
-    abstract_quality: AbstractTrialQuality,
-    target: &RoutingTarget,
-) -> Result<TrialResult, CompilerError> {
-    let quality = trial_quality(&unscored.operations, abstract_quality, target)?;
-    Ok(TrialResult {
-        operations: unscored.operations,
-        final_layout: unscored.final_layout,
-        swap_count: unscored.swap_count,
-        fallback_count: unscored.fallback_count,
-        control_flow_blocks_routed: unscored.control_flow_blocks_routed,
-        lazy_pair_l1_lookup_count: unscored.lazy_pair_l1_lookup_count,
-        lazy_pair_l1_hit_count: unscored.lazy_pair_l1_hit_count,
-        lazy_pair_l1_cached_count: unscored.lazy_pair_l1_cached_count,
-        quality,
-    })
-}
-
-pub(crate) fn abstract_trial_quality(unscored: &UnscoredTrial) -> AbstractTrialQuality {
-    let two_qubit_depth = two_qubit_depth(&unscored.operations);
-    let operation_count = operation_count(&unscored.operations);
-    AbstractTrialQuality {
-        swap_count: unscored.swap_count,
-        two_qubit_depth,
-        operation_count,
-        two_qubit_operation_count: two_qubit_operation_count(&unscored.operations),
-    }
-}
-
 impl TrialQuality {
     pub(crate) fn from_abstract(abstract_quality: AbstractTrialQuality) -> Self {
         Self {
@@ -581,6 +558,33 @@ impl TrialQuality {
             native_two_qubit_depth: abstract_quality.two_qubit_depth,
             native_total_ops: abstract_quality.operation_count,
             ..Self::default()
+        }
+    }
+
+    fn compare_duration(self, other: Self) -> Ordering {
+        match (self.duration, other.duration) {
+            (Some(left_duration), Some(right_duration)) => left_duration
+                .unavailable_count
+                .cmp(&right_duration.unavailable_count)
+                .then_with(|| {
+                    left_duration
+                        .imputed_count
+                        .cmp(&right_duration.imputed_count)
+                })
+                .then_with(|| match (self.makespan, other.makespan) {
+                    (Some(left), Some(right)) => left.total_cmp(&right),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                })
+                .then_with(|| {
+                    left_duration
+                        .duration_work
+                        .total_cmp(&right_duration.duration_work)
+                }),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
         }
     }
 }
@@ -735,14 +739,14 @@ impl<T: Copy> PairStateTable<T> {
     }
 
     fn get(&self, left: usize, right: usize) -> Option<T> {
-        pair_state_index(self.width, left, right)
+        Self::index(self.width, left, right)
             .and_then(|index| self.values.get(index))
             .copied()
             .flatten()
     }
 
     fn set(&mut self, left: usize, right: usize, value: T) {
-        if let Some(index) = pair_state_index(self.width, left, right) {
+        if let Some(index) = Self::index(self.width, left, right) {
             self.values[index] = Some(value);
         }
     }
@@ -750,15 +754,15 @@ impl<T: Copy> PairStateTable<T> {
     fn state_count(&self) -> usize {
         self.values.len()
     }
-}
 
-fn pair_state_index(width: usize, left: usize, right: usize) -> Option<usize> {
-    if width < 2 || left >= width || right >= width || left == right {
-        return None;
+    fn index(width: usize, left: usize, right: usize) -> Option<usize> {
+        if width < 2 || left >= width || right >= width || left == right {
+            return None;
+        }
+        let right_without_diagonal = if right < left { right } else { right - 1 };
+        left.checked_mul(width - 1)?
+            .checked_add(right_without_diagonal)
     }
-    let right_without_diagonal = if right < left { right } else { right - 1 };
-    left.checked_mul(width - 1)?
-        .checked_add(right_without_diagonal)
 }
 
 #[derive(Debug, Default)]
@@ -1044,7 +1048,7 @@ impl RoutingTarget {
         let physical_qubits = physical.physical_qubits();
         let native_mode = device_declares_routing_capability(device, physical_qubits);
         let mut pair_state_budget = pair_state_budget;
-        let signatures = ordered_interaction_signatures(sabre)?;
+        let signatures = sabre.ordered_interaction_signatures()?;
         let interaction_ids = signatures
             .iter()
             .cloned()
@@ -1401,7 +1405,7 @@ impl RoutingTarget {
         sabre: &SabreDag,
         node: NodeIndex,
     ) -> Result<usize, CompilerError> {
-        let signature = interaction_signature(&sabre.graph[node])?;
+        let signature = sabre.graph[node].interaction_signature()?;
         self.interaction_ids
             .get(&signature)
             .copied()
@@ -1524,101 +1528,120 @@ fn device_declares_routing_capability(device: &Device, physical_qubits: &[Physic
     })
 }
 
-fn interaction_signature(node: &SabreNode) -> Result<InteractionSignature, CompilerError> {
-    let logicals: SmallVec<[LogicalQubit; 2]> = match &node.kind {
-        SabreNodeKind::Unary(logical) => smallvec![*logical],
-        SabreNodeKind::TwoQ(pair) => SmallVec::from_slice(pair),
-        SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => {
-            return Ok(InteractionSignature::GenericPair);
-        }
-    };
-    if node.operations.is_empty() {
-        return Ok(InteractionSignature::GenericPair);
-    }
-
-    let mut operations = Vec::new();
-    for operation in &node.operations {
-        let Some(instruction) = KnowledgeInstructionKey::from_instruction(&operation.instruction)
-        else {
-            match operation.instruction {
-                Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
-                    return Err(CompilerError::InvalidInput(format!(
-                        "sabre device preparation requires {} to be decomposed before routing",
-                        operation.instruction
-                    )));
-                }
-                _ => continue,
+impl SabreNode {
+    fn interaction_signature(&self) -> Result<InteractionSignature, CompilerError> {
+        let logicals: SmallVec<[LogicalQubit; 2]> = match &self.kind {
+            SabreNodeKind::Unary(logical) => smallvec![*logical],
+            SabreNodeKind::TwoQ(pair) => SmallVec::from_slice(pair),
+            SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => {
+                return Ok(InteractionSignature::GenericPair);
             }
         };
-        if matches!(
-            instruction,
-            KnowledgeInstructionKey::Standard(StandardGate::GPhase)
-        ) {
-            continue;
+        if self.operations.is_empty() {
+            return Ok(InteractionSignature::GenericPair);
         }
-        let mut qarg_roles = SmallVec::new();
-        for qubit in &operation.qubits {
-            let logical = LogicalQubit::from_qubit(*qubit);
-            let Some(role) = logicals.iter().position(|candidate| *candidate == logical) else {
-                return Err(CompilerError::InvariantViolation(format!(
-                    "folded SABRE node on {logicals:?} contains operation {} on unrelated logical qubit {logical}",
-                    operation.instruction
-                )));
+
+        let mut operations = Vec::new();
+        for operation in &self.operations {
+            let Some(instruction) =
+                KnowledgeInstructionKey::from_instruction(&operation.instruction)
+            else {
+                match operation.instruction {
+                    Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                        return Err(CompilerError::InvalidInput(format!(
+                            "sabre device preparation requires {} to be decomposed before routing",
+                            operation.instruction
+                        )));
+                    }
+                    _ => continue,
+                }
             };
-            qarg_roles.push(role as u8);
+            if matches!(
+                instruction,
+                KnowledgeInstructionKey::Standard(StandardGate::GPhase)
+            ) {
+                continue;
+            }
+            let mut qarg_roles = SmallVec::new();
+            for qubit in &operation.qubits {
+                let logical = LogicalQubit::from_qubit(*qubit);
+                let Some(role) = logicals.iter().position(|candidate| *candidate == logical) else {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "folded SABRE node on {logicals:?} contains operation {} on unrelated logical qubit {logical}",
+                        operation.instruction
+                    )));
+                };
+                qarg_roles.push(role as u8);
+            }
+            operations.push(InteractionOperation {
+                instruction,
+                qarg_roles,
+            });
         }
-        operations.push(InteractionOperation {
-            instruction,
-            qarg_roles,
-        });
-    }
-    if operations.is_empty() {
-        Ok(InteractionSignature::GenericPair)
-    } else {
-        match logicals.len() {
-            1 => Ok(InteractionSignature::Unary(operations)),
-            2 => Ok(InteractionSignature::Pair(operations)),
-            arity => Err(CompilerError::InvariantViolation(format!(
-                "routing interaction signature has unsupported arity {arity}"
-            ))),
+        if operations.is_empty() {
+            Ok(InteractionSignature::GenericPair)
+        } else {
+            match logicals.len() {
+                1 => Ok(InteractionSignature::Unary(operations)),
+                2 => Ok(InteractionSignature::Pair(operations)),
+                arity => Err(CompilerError::InvariantViolation(format!(
+                    "routing interaction signature has unsupported arity {arity}"
+                ))),
+            }
         }
     }
 }
 
-fn collect_interaction_signatures(
-    sabre: &SabreDag,
-    output: &mut HashSet<InteractionSignature>,
-) -> Result<(), CompilerError> {
-    for node in sabre.graph.node_weights() {
-        match &node.kind {
-            SabreNodeKind::Unary(_) | SabreNodeKind::TwoQ(_) => {
-                output.insert(interaction_signature(node)?);
-            }
-            SabreNodeKind::ControlFlow(SabreControlFlow::If {
-                then_body,
-                else_body,
-                ..
-            }) => {
-                collect_interaction_signatures(then_body, output)?;
-                if let Some(else_body) = else_body {
-                    collect_interaction_signatures(else_body, output)?;
+impl SabreDag {
+    fn collect_interaction_signatures(
+        &self,
+        output: &mut HashSet<InteractionSignature>,
+    ) -> Result<(), CompilerError> {
+        for node in self.graph.node_weights() {
+            match &node.kind {
+                SabreNodeKind::Unary(_) | SabreNodeKind::TwoQ(_) => {
+                    output.insert(node.interaction_signature()?);
                 }
-            }
-            SabreNodeKind::ControlFlow(
-                SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
-            ) => collect_interaction_signatures(body, output)?,
-            SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
-                for case in cases {
-                    collect_interaction_signatures(&case.body, output)?;
+                SabreNodeKind::ControlFlow(SabreControlFlow::If {
+                    then_body,
+                    else_body,
+                    ..
+                }) => {
+                    then_body.collect_interaction_signatures(output)?;
+                    if let Some(else_body) = else_body {
+                        else_body.collect_interaction_signatures(output)?;
+                    }
                 }
-                if let Some(default) = default {
-                    collect_interaction_signatures(default, output)?;
+                SabreNodeKind::ControlFlow(
+                    SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
+                ) => body.collect_interaction_signatures(output)?,
+                SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
+                    for case in cases {
+                        case.body.collect_interaction_signatures(output)?;
+                    }
+                    if let Some(default) = default {
+                        default.collect_interaction_signatures(output)?;
+                    }
                 }
+                SabreNodeKind::Synchronize => {}
             }
-            SabreNodeKind::Synchronize => {}
         }
+        Ok(())
     }
-    Ok(())
+
+    fn ordered_interaction_signatures(&self) -> Result<Vec<InteractionSignature>, CompilerError> {
+        let mut signatures = HashSet::from([InteractionSignature::GenericPair]);
+        self.collect_interaction_signatures(&mut signatures)?;
+        let mut signatures = signatures.into_iter().collect::<Vec<_>>();
+        signatures.sort_by_key(|signature| format!("{signature:?}"));
+        if let Some(position) = signatures
+            .iter()
+            .position(|signature| matches!(signature, InteractionSignature::GenericPair))
+        {
+            signatures.swap(0, position);
+        }
+        Ok(signatures)
+    }
 }
 
 fn states_for_requirement(
@@ -1650,22 +1673,6 @@ fn combined_catalog_cost(
         cost = Some(cost.map_or(next, |current: NativePlanCost| current.combine(next)));
     }
     Some(cost.unwrap_or_default())
-}
-
-fn ordered_interaction_signatures(
-    sabre: &SabreDag,
-) -> Result<Vec<InteractionSignature>, CompilerError> {
-    let mut signatures = HashSet::from([InteractionSignature::GenericPair]);
-    collect_interaction_signatures(sabre, &mut signatures)?;
-    let mut signatures = signatures.into_iter().collect::<Vec<_>>();
-    signatures.sort_by_key(|signature| format!("{signature:?}"));
-    if let Some(position) = signatures
-        .iter()
-        .position(|signature| matches!(signature, InteractionSignature::GenericPair))
-    {
-        signatures.swap(0, position);
-    }
-    Ok(signatures)
 }
 
 fn prepare_topology_only_parts(
@@ -2008,7 +2015,7 @@ fn pair_route_lower_bound_from_state(
     start: [usize; 2],
 ) -> Option<RouteLowerBound> {
     let count = swap_neighbors.len();
-    pair_state_index(count, start[0], start[1])?;
+    PairStateTable::<RouteLowerBound>::index(count, start[0], start[1])?;
     let mut visited_depth = BTreeMap::from([(start, 0_u32)]);
     let mut layers = vec![vec![start]];
     let terminal_depth = loop {
@@ -2151,6 +2158,22 @@ impl ScoredCandidate {
 }
 
 impl RoutingState {
+    fn prepared_requirement_id(
+        requirement_ids: &[Option<usize>],
+        node: NodeIndex,
+    ) -> Result<usize, CompilerError> {
+        requirement_ids
+            .get(node.index())
+            .copied()
+            .flatten()
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "routing node {} has no prepared requirement id",
+                    node.index()
+                ))
+            })
+    }
+
     /// Creates mutable state for one SABRE routing trial.
     ///
     /// `required_predecessors` is the mutable readiness counter for DAG
@@ -2228,7 +2251,8 @@ impl RoutingState {
             match &node.kind {
                 SabreNodeKind::Unary(logical) => {
                     let physical = physical_for(&self.layout, *logical)?;
-                    let requirement = prepared_requirement_id(&self.requirement_ids, node_id)?;
+                    let requirement =
+                        Self::prepared_requirement_id(&self.requirement_ids, node_id)?;
                     let placement = RequirementPlacement::Unary(target.physical_index(physical)?);
                     if target.terminal_cost_for(requirement, placement).is_none() {
                         let distance = |requirement, placement| {
@@ -2257,7 +2281,8 @@ impl RoutingState {
                         physical_for(&self.layout, pair[0])?,
                         physical_for(&self.layout, pair[1])?,
                     ];
-                    let interaction = prepared_requirement_id(&self.requirement_ids, node_id)?;
+                    let interaction =
+                        Self::prepared_requirement_id(&self.requirement_ids, node_id)?;
                     let physical_indices = [
                         target.physical_index(physical[0])?,
                         target.physical_index(physical[1])?,
@@ -2530,7 +2555,8 @@ impl RoutingState {
                 match &sabre.graph[node].kind {
                     SabreNodeKind::Unary(logical) => {
                         if let Ok(physical) = physical_for(&self.layout, *logical) {
-                            let requirement = prepared_requirement_id(&self.requirement_ids, node)?;
+                            let requirement =
+                                Self::prepared_requirement_id(&self.requirement_ids, node)?;
                             let distance = |requirement, placement| {
                                 target.distance_for_cached(
                                     requirement,
@@ -2552,7 +2578,8 @@ impl RoutingState {
                             physical_for(&self.layout, pair[0]),
                             physical_for(&self.layout, pair[1]),
                         ) {
-                            let interaction = prepared_requirement_id(&self.requirement_ids, node)?;
+                            let interaction =
+                                Self::prepared_requirement_id(&self.requirement_ids, node)?;
                             let distance = |requirement, placement| {
                                 target.distance_for_cached(
                                     requirement,
@@ -2860,22 +2887,6 @@ impl RoutingState {
     }
 }
 
-fn prepared_requirement_id(
-    requirement_ids: &[Option<usize>],
-    node: NodeIndex,
-) -> Result<usize, CompilerError> {
-    requirement_ids
-        .get(node.index())
-        .copied()
-        .flatten()
-        .ok_or_else(|| {
-            CompilerError::InvariantViolation(format!(
-                "routing node {} has no prepared requirement id",
-                node.index()
-            ))
-        })
-}
-
 /// Detects exact mapping cycles without copying the full mapping after every
 /// speculative SWAP. Hash matches are verified against a replayed mapping, so
 /// a hash collision cannot trigger a false cycle.
@@ -2888,8 +2899,8 @@ struct MappingCycleDetector {
 
 impl MappingCycleDetector {
     fn new(layout: &Layout, target: &RoutingTarget) -> Self {
-        let initial = mapping_signature(layout, target);
-        let current_hash = mapping_hash(&initial);
+        let initial = Self::signature(layout, target);
+        let current_hash = Self::mapping_hash(&initial);
         Self {
             initial,
             current_hash,
@@ -2907,10 +2918,10 @@ impl MappingCycleDetector {
         let [left, right] = swap;
         let after_left = layout.get_logical(target.physical_at(left)?);
         let after_right = layout.get_logical(target.physical_at(right)?);
-        self.current_hash ^= mapping_entry_hash(left, after_right)
-            ^ mapping_entry_hash(right, after_left)
-            ^ mapping_entry_hash(left, after_left)
-            ^ mapping_entry_hash(right, after_right);
+        self.current_hash ^= Self::entry_hash(left, after_right)
+            ^ Self::entry_hash(right, after_left)
+            ^ Self::entry_hash(left, after_left)
+            ^ Self::entry_hash(right, after_right);
         self.history.push(swap);
 
         let step = self.history.len();
@@ -2919,7 +2930,7 @@ impl MappingCycleDetector {
             return Ok(false);
         };
 
-        let current = mapping_signature(layout, target);
+        let current = Self::signature(layout, target);
         for &previous_step in previous_steps.iter() {
             let mut previous = self.initial.clone();
             for &[previous_left, previous_right] in &self.history[..previous_step] {
@@ -2932,34 +2943,34 @@ impl MappingCycleDetector {
         previous_steps.push(step);
         Ok(false)
     }
-}
 
-fn mapping_signature(layout: &Layout, target: &RoutingTarget) -> Vec<Option<LogicalQubit>> {
-    target
-        .physical_qubits
-        .iter()
-        .map(|physical| layout.get_logical(*physical))
-        .collect()
-}
+    fn signature(layout: &Layout, target: &RoutingTarget) -> Vec<Option<LogicalQubit>> {
+        target
+            .physical_qubits
+            .iter()
+            .map(|physical| layout.get_logical(*physical))
+            .collect()
+    }
 
-fn mapping_hash(mapping: &[Option<LogicalQubit>]) -> u64 {
-    mapping
-        .iter()
-        .copied()
-        .enumerate()
-        .fold(0, |hash, (physical, logical)| {
-            hash ^ mapping_entry_hash(physical, logical)
-        })
-}
+    fn mapping_hash(mapping: &[Option<LogicalQubit>]) -> u64 {
+        mapping
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(0, |hash, (physical, logical)| {
+                hash ^ Self::entry_hash(physical, logical)
+            })
+    }
 
-fn mapping_entry_hash(physical: usize, logical: Option<LogicalQubit>) -> u64 {
-    let logical = logical.map_or(0, |logical| u64::from(logical.id()) + 1);
-    let mut value = (physical as u64)
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(logical);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
+    fn entry_hash(physical: usize, logical: Option<LogicalQubit>) -> u64 {
+        let logical = logical.map_or(0, |logical| u64::from(logical.id()) + 1);
+        let mut value = (physical as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(logical);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
 }
 
 fn compare_optional_native_cost(
@@ -3907,116 +3918,91 @@ fn swap_operation(swap: [PhysicalQubit; 2]) -> Operation {
     }
 }
 
-pub(crate) fn compare_trial_quality(
-    objective: SabreTrialObjective,
-    left: TrialQuality,
-    left_index: usize,
-    right: TrialQuality,
-    right_index: usize,
-) -> Ordering {
-    match objective {
-        SabreTrialObjective::SwapCount => left
-            .abstract_quality
-            .swap_count
-            .cmp(&right.abstract_quality.swap_count)
-            .then_with(|| left_index.cmp(&right_index)),
-        SabreTrialObjective::Depth => left
-            .abstract_quality
-            .two_qubit_depth
-            .cmp(&right.abstract_quality.two_qubit_depth)
-            .then_with(|| left_index.cmp(&right_index)),
-        SabreTrialObjective::NativeQualityWithinSwapBudget => left
-            .native_two_qubit_ops
-            .cmp(&right.native_two_qubit_ops)
-            .then_with(|| {
-                left.native_two_qubit_depth
-                    .cmp(&right.native_two_qubit_depth)
-            })
-            .then_with(|| match (left.error, right.error) {
-                (Some(left), Some(right)) => left.compare(right),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            })
-            .then_with(|| compare_trial_duration(left, right))
-            .then_with(|| left.native_total_ops.cmp(&right.native_total_ops))
-            .then_with(|| {
-                left.abstract_quality
-                    .swap_count
-                    .cmp(&right.abstract_quality.swap_count)
-            })
-            .then_with(|| {
-                left.abstract_quality
-                    .two_qubit_depth
-                    .cmp(&right.abstract_quality.two_qubit_depth)
-            })
-            .then_with(|| {
-                left.abstract_quality
-                    .operation_count
-                    .cmp(&right.abstract_quality.operation_count)
-            })
-            .then_with(|| left_index.cmp(&right_index)),
-        SabreTrialObjective::DepthThenSwap => left
-            .abstract_quality
-            .two_qubit_depth
-            .cmp(&right.abstract_quality.two_qubit_depth)
-            .then_with(|| {
-                left.abstract_quality
-                    .swap_count
-                    .cmp(&right.abstract_quality.swap_count)
-            })
-            .then_with(|| {
-                left.abstract_quality
-                    .operation_count
-                    .cmp(&right.abstract_quality.operation_count)
-            })
-            .then_with(|| left_index.cmp(&right_index)),
+impl SabreTrialObjective {
+    pub(crate) fn compare(
+        self,
+        left: TrialQuality,
+        left_index: usize,
+        right: TrialQuality,
+        right_index: usize,
+    ) -> Ordering {
+        match self {
+            SabreTrialObjective::SwapCount => left
+                .abstract_quality
+                .swap_count
+                .cmp(&right.abstract_quality.swap_count)
+                .then_with(|| left_index.cmp(&right_index)),
+            SabreTrialObjective::Depth => left
+                .abstract_quality
+                .two_qubit_depth
+                .cmp(&right.abstract_quality.two_qubit_depth)
+                .then_with(|| left_index.cmp(&right_index)),
+            SabreTrialObjective::NativeQualityWithinSwapBudget => left
+                .native_two_qubit_ops
+                .cmp(&right.native_two_qubit_ops)
+                .then_with(|| {
+                    left.native_two_qubit_depth
+                        .cmp(&right.native_two_qubit_depth)
+                })
+                .then_with(|| match (left.error, right.error) {
+                    (Some(left), Some(right)) => left.compare(right),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                })
+                .then_with(|| left.compare_duration(right))
+                .then_with(|| left.native_total_ops.cmp(&right.native_total_ops))
+                .then_with(|| {
+                    left.abstract_quality
+                        .swap_count
+                        .cmp(&right.abstract_quality.swap_count)
+                })
+                .then_with(|| {
+                    left.abstract_quality
+                        .two_qubit_depth
+                        .cmp(&right.abstract_quality.two_qubit_depth)
+                })
+                .then_with(|| {
+                    left.abstract_quality
+                        .operation_count
+                        .cmp(&right.abstract_quality.operation_count)
+                })
+                .then_with(|| left_index.cmp(&right_index)),
+            SabreTrialObjective::DepthThenSwap => left
+                .abstract_quality
+                .two_qubit_depth
+                .cmp(&right.abstract_quality.two_qubit_depth)
+                .then_with(|| {
+                    left.abstract_quality
+                        .swap_count
+                        .cmp(&right.abstract_quality.swap_count)
+                })
+                .then_with(|| {
+                    left.abstract_quality
+                        .operation_count
+                        .cmp(&right.abstract_quality.operation_count)
+                })
+                .then_with(|| left_index.cmp(&right_index)),
+        }
     }
-}
 
-fn compare_trial_duration(left: TrialQuality, right: TrialQuality) -> Ordering {
-    match (left.duration, right.duration) {
-        (Some(left_duration), Some(right_duration)) => left_duration
-            .unavailable_count
-            .cmp(&right_duration.unavailable_count)
-            .then_with(|| {
-                left_duration
-                    .imputed_count
-                    .cmp(&right_duration.imputed_count)
-            })
-            .then_with(|| match (left.makespan, right.makespan) {
-                (Some(left), Some(right)) => left.total_cmp(&right),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            })
-            .then_with(|| {
-                left_duration
-                    .duration_work
-                    .total_cmp(&right_duration.duration_work)
-            }),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
+    pub(crate) fn swap_limit(
+        self,
+        swap_regret_ratio: f64,
+        swap_counts: impl Iterator<Item = usize>,
+    ) -> usize {
+        if self != SabreTrialObjective::NativeQualityWithinSwapBudget {
+            return usize::MAX;
+        }
+        let best = swap_counts.min().unwrap_or(0);
+        let regret = ((best as f64) * swap_regret_ratio).ceil();
+        let regret = if regret >= usize::MAX as f64 {
+            usize::MAX
+        } else {
+            regret as usize
+        };
+        best.saturating_add(regret)
     }
-}
-
-pub(crate) fn trial_swap_limit(
-    objective: SabreTrialObjective,
-    swap_regret_ratio: f64,
-    swap_counts: impl Iterator<Item = usize>,
-) -> usize {
-    if objective != SabreTrialObjective::NativeQualityWithinSwapBudget {
-        return usize::MAX;
-    }
-    let best = swap_counts.min().unwrap_or(0);
-    let regret = ((best as f64) * swap_regret_ratio).ceil();
-    let regret = if regret >= usize::MAX as f64 {
-        usize::MAX
-    } else {
-        regret as usize
-    };
-    best.saturating_add(regret)
 }
 
 fn trial_quality(

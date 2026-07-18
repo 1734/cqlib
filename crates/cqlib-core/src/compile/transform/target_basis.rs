@@ -284,15 +284,14 @@ impl LoweringPlans {
             .iter()
             .cloned()
             .map(|key| {
-                let cost = if is_implicit_key(&key) {
+                let cost = if key.is_implicit() {
                     PlanCost::zero(key_rule_sort_value(&key))
                 } else {
                     PlanCost {
                         rank: 0,
                         total_ops: 1,
-                        two_qubit_ops: key_num_qubits(&key).is_some_and(|num| num == 2) as usize,
-                        parameterized_ops: key_num_params(&key)
-                            .is_some_and(|num_params| num_params > 0)
+                        two_qubit_ops: key.num_qubits().is_some_and(|num| num == 2) as usize,
+                        parameterized_ops: key.num_params().is_some_and(|num_params| num_params > 0)
                             as usize,
                         rule_id: key_rule_sort_value(&key),
                     }
@@ -326,7 +325,7 @@ impl LoweringPlans {
                                 source_item.instruction
                             ))
                         })?;
-                if physical_keys.contains(&source_key) || is_implicit_key(&source_key) {
+                if physical_keys.contains(&source_key) || source_key.is_implicit() {
                     continue;
                 }
 
@@ -489,7 +488,7 @@ impl<'a> CircuitLowerer<'a> {
                     operation.instruction
                 ))
             })?;
-        if is_implicit_key(&key) {
+        if key.is_implicit() {
             self.changed = true;
             self.accumulate_phase(gphase_param(&operation)?, target);
             return Ok(());
@@ -746,7 +745,7 @@ fn rewrite_cost(
 
     for item in target {
         let key = KnowledgeInstructionKey::from_instruction(&item.instruction)?;
-        if is_implicit_key(&key) {
+        if key.is_implicit() {
             continue;
         }
         let cost = cost_by_key.get(&key).copied()?;
@@ -913,24 +912,6 @@ fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerErr
     Ok(match phase {
         ParameterValue::Fixed(value) => Parameter::from(*value),
         ParameterValue::Param(parameter) => parameter.clone(),
-    })
-}
-
-fn is_implicit_key(key: &KnowledgeInstructionKey) -> bool {
-    matches!(key, KnowledgeInstructionKey::Standard(StandardGate::GPhase))
-}
-
-fn key_num_qubits(key: &KnowledgeInstructionKey) -> Option<usize> {
-    Some(match key {
-        KnowledgeInstructionKey::Standard(gate) => gate.num_qubits(),
-        KnowledgeInstructionKey::McGate(gate) => gate.num_qubits(),
-    })
-}
-
-fn key_num_params(key: &KnowledgeInstructionKey) -> Option<usize> {
-    Some(match key {
-        KnowledgeInstructionKey::Standard(gate) => gate.num_params(),
-        KnowledgeInstructionKey::McGate(gate) => gate.num_params(),
     })
 }
 

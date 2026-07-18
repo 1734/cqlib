@@ -141,6 +141,26 @@ struct DevicePlanCandidate {
     ancestry: HashSet<StateId>,
 }
 
+impl DevicePlanCandidate {
+    fn dominates(&self, other: &Self) -> bool {
+        let Some(schedule_strict) = self.schedule_profile.dominance(&other.schedule_profile) else {
+            return false;
+        };
+        let left = self.physical_cost;
+        let right = other.physical_cost;
+        let comparisons = [
+            left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops),
+            left.error
+                .compare_by(right.error, |left, right| left.compare(right)),
+            left.native_total_ops.cmp(&right.native_total_ops),
+            left.duration
+                .compare_by(right.duration, |left, right| left.compare(right)),
+        ];
+        comparisons.iter().all(|ordering| !ordering.is_gt())
+            && (schedule_strict || comparisons.iter().any(|ordering| ordering.is_lt()))
+    }
+}
+
 /// One solved plan table for the finite closure reachable from circuit roots.
 pub(crate) struct DevicePlanner<'a> {
     device: &'a Device,
@@ -433,7 +453,7 @@ impl<'a> DevicePlanner<'a> {
         let frontier = &self.frontiers[candidate.state];
         for existing in frontier.iter().copied() {
             let existing = &self.nodes[existing.0];
-            if candidate_dominates(existing, &candidate)
+            if existing.dominates(&candidate)
                 || (existing.physical_cost == candidate.physical_cost
                     && existing.schedule_profile == candidate.schedule_profile
                     && (existing.derivation_steps, &existing.stable_key)
@@ -447,7 +467,7 @@ impl<'a> DevicePlanner<'a> {
             .iter()
             .filter(|existing| {
                 let existing = &self.nodes[existing.0];
-                !candidate_dominates(&candidate, existing)
+                !candidate.dominates(existing)
                     && !(candidate.physical_cost == existing.physical_cost
                         && candidate.schedule_profile == existing.schedule_profile
                         && (candidate.derivation_steps, &candidate.stable_key)
@@ -528,24 +548,6 @@ impl Iterator for PlanCombinations<'_> {
         self.done = true;
         Some(combination)
     }
-}
-
-fn candidate_dominates(left: &DevicePlanCandidate, right: &DevicePlanCandidate) -> bool {
-    let Some(schedule_strict) = left.schedule_profile.dominance(&right.schedule_profile) else {
-        return false;
-    };
-    let left = left.physical_cost;
-    let right = right.physical_cost;
-    let comparisons = [
-        left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops),
-        left.error
-            .compare_by(right.error, |left, right| left.compare(right)),
-        left.native_total_ops.cmp(&right.native_total_ops),
-        left.duration
-            .compare_by(right.duration, |left, right| left.compare(right)),
-    ];
-    comparisons.iter().all(|ordering| !ordering.is_gt())
-        && (schedule_strict || comparisons.iter().any(|ordering| ordering.is_lt()))
 }
 
 fn validate_leaf_calibration(

@@ -17,8 +17,13 @@ use crate::circuit::symbolic_matrix::{
     SymbolicComplex, standard_gate_symbolic_matrix, symbolic_eye,
 };
 use crate::circuit::{Circuit, Parameter, Qubit};
-use crate::util::matrix::c;
 use ndarray::array;
+use num_complex::Complex64;
+
+const fn c(re: f64, im: f64) -> Complex64 {
+    Complex64::new(re, im)
+}
+
 use std::f64::consts::PI;
 use std::sync::Arc;
 

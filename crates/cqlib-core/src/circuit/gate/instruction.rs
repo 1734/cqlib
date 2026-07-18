@@ -72,6 +72,14 @@ pub enum Instruction {
 }
 
 impl Instruction {
+    /// Returns the standard gate represented directly by this instruction.
+    pub fn standard_gate(&self) -> Option<StandardGate> {
+        match self {
+            Self::Standard(gate) => Some(*gate),
+            _ => None,
+        }
+    }
+
     /// Returns true when this instruction directly or recursively contains a measurement.
     pub fn has_measurement(&self) -> bool {
         match self {

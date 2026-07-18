@@ -17,6 +17,18 @@ use crate::circuit::{
 };
 
 #[test]
+fn standard_gate_query_distinguishes_instruction_kinds() {
+    assert_eq!(
+        Instruction::Standard(StandardGate::H).standard_gate(),
+        Some(StandardGate::H)
+    );
+    assert_eq!(
+        Instruction::Directive(Directive::Barrier).standard_gate(),
+        None
+    );
+}
+
+#[test]
 fn reports_measurements_and_classical_value_reads() {
     let circuit_id = CircuitId::new();
     let result = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);

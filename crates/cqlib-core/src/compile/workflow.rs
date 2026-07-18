@@ -45,6 +45,7 @@
 
 use crate::circuit::{Circuit, Instruction};
 use crate::compile::CompilerError;
+use crate::compile::physical_target::PhysicalLayoutGraph;
 use crate::compile::resource::ResourceLimits;
 use crate::compile::sabre::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
 use crate::compile::transform::decompose::unitary::{
@@ -54,7 +55,6 @@ use crate::compile::transform::decompose::{
     DecomposeDefinitions, DecomposeMcGates, DecomposeUnitaries, McGateDecomposeConfig,
     UnitaryDecomposeConfig,
 };
-use crate::compile::transform::layout::build_physical_layout_graph;
 use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, DeviceLowerer, KnowledgeRewriter, LayoutObjective,
@@ -90,6 +90,45 @@ struct WorkflowState {
     target_basis: Option<Vec<Instruction>>,
     two_qubit_target: TwoQubitSynthesisTarget,
     device_metadata: Option<DeviceCompilationMetadata>,
+}
+
+impl WorkflowState {
+    fn apply_transform(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformResult, CompilerError>,
+    ) -> Result<(), CompilerError> {
+        let TransformResult { circuit, changed } = transform(&self.current, &self.analysis)?;
+        if changed {
+            self.analysis = CircuitAnalysis::analyze(&circuit);
+        }
+        self.current = circuit;
+        self.changed |= changed;
+        self.steps.push(WorkflowStepReport {
+            stage,
+            name,
+            changed,
+            skipped: false,
+            reason: None,
+        });
+        Ok(())
+    }
+
+    fn record_skipped(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        reason: impl Into<String>,
+    ) {
+        self.steps.push(WorkflowStepReport {
+            stage,
+            name,
+            changed: false,
+            skipped: true,
+            reason: Some(reason.into()),
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,14 +199,13 @@ impl CompilerWorkflow {
     /// Definition expansion precedes the first rewrite pass so knowledge rules
     /// see the operations contained by user-defined gates.
     fn lower_init(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        apply_circuit_transform(state, "init", "canonicalize.input", |circuit, analysis| {
+        state.apply_transform("init", "canonicalize.input", |circuit, analysis| {
             Canonicalizer::production().transform(circuit, Some(analysis))
         })?;
         self.apply_definition_decomposition(state)?;
         let rewrite_config =
             self.rewrite_config_for_state(RewritePhase::PreDecomposition, state)?;
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "optimization",
             "optimize.pre_decomposition",
             |circuit, analysis| {
@@ -183,8 +221,7 @@ impl CompilerWorkflow {
     fn lower_decompose(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         self.apply_unitary_decomposition(state)?;
         self.apply_mc_gate_decomposition(state)?;
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "optimization",
             "canonicalize.after_decomposition",
             |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
@@ -200,8 +237,7 @@ impl CompilerWorkflow {
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let rewrite_config =
             self.rewrite_config_for_state(RewritePhase::PostDecomposition, state)?;
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "optimization",
             "optimize.post_decomposition",
             |circuit, analysis| {
@@ -239,8 +275,7 @@ impl CompilerWorkflow {
         if self.config.mode == CompileMode::Enhanced {
             let cleanup_config =
                 self.rewrite_config_for_state(RewritePhase::TargetCleanup, state)?;
-            apply_circuit_transform(
-                state,
+            state.apply_transform(
                 "optimization",
                 "optimize.target_cleanup",
                 |circuit, analysis| {
@@ -252,18 +287,14 @@ impl CompilerWorkflow {
     }
 
     fn lower_output(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        apply_circuit_transform(
-            state,
-            "output",
-            "canonicalize.output",
-            |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
-        )
+        state.apply_transform("output", "canonicalize.output", |circuit, analysis| {
+            Canonicalizer::production().transform(circuit, Some(analysis))
+        })
     }
 
     fn lower_device_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let Some(target) = self.device_target() else {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "translation",
                 "lower.device_instructions",
                 "no target device configured",
@@ -271,8 +302,7 @@ impl CompilerWorkflow {
             return Ok(());
         };
         let lowerer = DeviceLowerer::new(&target.device);
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "translation",
             "lower.device_instructions",
             |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
@@ -281,16 +311,14 @@ impl CompilerWorkflow {
 
     fn canonicalize_native_input(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         if self.device_target().is_none() {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "optimization",
                 "canonicalize.native_input",
                 "no target device configured",
             );
             return Ok(());
         }
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "optimization",
             "canonicalize.native_input",
             |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
@@ -299,8 +327,7 @@ impl CompilerWorkflow {
 
     fn optimize_native_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let Some(target) = self.device_target() else {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "optimization",
                 "optimize.native_fixed_point",
                 "no target device configured",
@@ -353,8 +380,7 @@ impl CompilerWorkflow {
 
     fn validate_device(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let Some(target) = self.device_target() else {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "validation",
                 "validate.device",
                 "no target device configured",
@@ -416,12 +442,9 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
-        apply_circuit_transform(
-            state,
-            "init",
-            "decompose.definitions",
-            |circuit, analysis| DecomposeDefinitions.transform(circuit, Some(analysis)),
-        )
+        state.apply_transform("init", "decompose.definitions", |circuit, analysis| {
+            DecomposeDefinitions.transform(circuit, Some(analysis))
+        })
     }
 
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -439,12 +462,9 @@ impl CompilerWorkflow {
         } else {
             DecomposeUnitaries::new(config)
         };
-        apply_circuit_transform(
-            state,
-            "translation",
-            "decompose.unitary",
-            |circuit, analysis| decomposer.transform(circuit, Some(analysis)),
-        )
+        state.apply_transform("translation", "decompose.unitary", |circuit, analysis| {
+            decomposer.transform(circuit, Some(analysis))
+        })
     }
 
     fn unitary_decompose_config_for_state(&self, state: &WorkflowState) -> UnitaryDecomposeConfig {
@@ -456,12 +476,9 @@ impl CompilerWorkflow {
 
     fn apply_mc_gate_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.mc_gate_decompose_config();
-        apply_circuit_transform(
-            state,
-            "translation",
-            "decompose.mc_gates",
-            |circuit, analysis| DecomposeMcGates::new(config).transform(circuit, Some(analysis)),
-        )
+        state.apply_transform("translation", "decompose.mc_gates", |circuit, analysis| {
+            DecomposeMcGates::new(config).transform(circuit, Some(analysis))
+        })
     }
 
     fn apply_two_qubit_resynthesis(
@@ -482,7 +499,7 @@ impl CompilerWorkflow {
         } else {
             ResynthesizeTwoQubitBlocks::new(config)
         };
-        apply_circuit_transform(state, stage, name, |circuit, analysis| {
+        state.apply_transform(stage, name, |circuit, analysis| {
             resynthesizer.transform(circuit, Some(analysis))
         })
     }
@@ -492,8 +509,7 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
         if self.device_target().is_none() {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "optimization",
                 "resynthesize.two_qubit_blocks.post_routing",
                 "routing was skipped",
@@ -527,8 +543,7 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
         if self.device_target().is_none() {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "translation",
                 "decompose.routing_basis",
                 "no target device configured",
@@ -536,8 +551,7 @@ impl CompilerWorkflow {
             return Ok(());
         }
 
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "translation",
             "decompose.routing_basis",
             |circuit, analysis| LowerToRoutingBasis::new(None).transform(circuit, Some(analysis)),
@@ -596,12 +610,7 @@ impl CompilerWorkflow {
     /// workflow derives a layout objective from the configured target device.
     fn apply_layout_and_routing(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let Some(target) = self.device_target() else {
-            record_skipped(
-                state,
-                "routing",
-                "route.sabre",
-                "no target device configured",
-            );
+            state.record_skipped("routing", "route.sabre", "no target device configured");
             return Ok(());
         };
 
@@ -620,7 +629,7 @@ impl CompilerWorkflow {
                 state.current = routed.into_circuit();
                 (route_changed, swap_count, trials_evaluated, true)
             } else {
-                let physical = build_physical_layout_graph(device)?;
+                let physical = PhysicalLayoutGraph::from_device(device)?;
                 let objective = match self.config.mode {
                     CompileMode::Normal => LayoutObjective::auto_from_physical(&physical),
                     CompileMode::Enhanced => {
@@ -668,8 +677,7 @@ impl CompilerWorkflow {
 
     fn apply_post_routing_cleanup(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         if self.device_target().is_none() {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "optimization",
                 "optimize.post_routing",
                 "routing was skipped",
@@ -678,8 +686,7 @@ impl CompilerWorkflow {
         }
 
         let rewrite_config = self.rewrite_config_for_state(RewritePhase::PostRouting, state)?;
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "optimization",
             "optimize.post_routing",
             |circuit, analysis| {
@@ -690,8 +697,7 @@ impl CompilerWorkflow {
 
     fn apply_target_translation(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let Some(target_basis) = state.target_basis.as_deref() else {
-            record_skipped(
-                state,
+            state.record_skipped(
                 "translation",
                 "translate.target_basis",
                 "no target basis configured",
@@ -701,8 +707,7 @@ impl CompilerWorkflow {
         let target_basis = target_basis.to_vec();
         let lowerer = TargetBasisLowerer::new(target_basis)?;
 
-        apply_circuit_transform(
-            state,
+        state.apply_transform(
             "translation",
             "translate.target_basis",
             |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
@@ -747,43 +752,6 @@ impl CompilerWorkflow {
             CompileTarget::Logical | CompileTarget::Basis(_) => None,
         }
     }
-}
-
-fn apply_circuit_transform(
-    state: &mut WorkflowState,
-    stage: &'static str,
-    name: &'static str,
-    transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformResult, CompilerError>,
-) -> Result<(), CompilerError> {
-    let TransformResult { circuit, changed } = transform(&state.current, &state.analysis)?;
-    if changed {
-        state.analysis = CircuitAnalysis::analyze(&circuit);
-    }
-    state.current = circuit;
-    state.changed |= changed;
-    state.steps.push(WorkflowStepReport {
-        stage,
-        name,
-        changed,
-        skipped: false,
-        reason: None,
-    });
-    Ok(())
-}
-
-fn record_skipped(
-    state: &mut WorkflowState,
-    stage: &'static str,
-    name: &'static str,
-    reason: impl Into<String>,
-) {
-    state.steps.push(WorkflowStepReport {
-        stage,
-        name,
-        changed: false,
-        skipped: true,
-        reason: Some(reason.into()),
-    });
 }
 
 fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {

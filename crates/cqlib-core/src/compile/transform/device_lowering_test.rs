@@ -17,9 +17,9 @@ use crate::circuit::{
     ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::CompilerError;
+use crate::compile::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
 use crate::compile::transform::Transformer;
 use crate::device::{Device, EdgeProp, InstructionProp, PhysicalQubit, QubitProp};
-use crate::util::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
 use std::collections::HashMap;
 use std::f64::consts::PI;
 

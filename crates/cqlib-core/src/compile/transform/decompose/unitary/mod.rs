@@ -43,6 +43,7 @@
 
 pub mod decompose;
 pub(crate) mod device_synthesis;
+mod matrix;
 pub mod two_qubit_kak;
 pub mod unitary_1q;
 pub mod unitary_2q;

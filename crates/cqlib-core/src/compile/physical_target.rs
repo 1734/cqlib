@@ -344,11 +344,6 @@ impl DistanceTable {
     }
 }
 
-/// Builds the compiler-local physical layout graph for `device`.
-pub fn build_physical_layout_graph(device: &Device) -> Result<PhysicalLayoutGraph, CompilerError> {
-    PhysicalLayoutGraph::from_device(device)
-}
-
 fn build_physical_index(physical_qubits: &[PhysicalQubit]) -> BTreeMap<PhysicalQubit, usize> {
     physical_qubits
         .iter()

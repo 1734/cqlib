@@ -76,6 +76,7 @@
 //! assert!(counts.keys().all(|bits| bits == "00" || bits == "11"));
 //! ```
 
+mod aligned_buffer;
 pub mod classical;
 pub mod density_matrix;
 pub mod density_matrix_noise;

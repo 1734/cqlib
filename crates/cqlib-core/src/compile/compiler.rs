@@ -116,6 +116,22 @@ pub struct CompileResult {
     pub device_metadata: Option<DeviceCompilationMetadata>,
 }
 
+impl CompileResult {
+    /// Returns the first workflow report with the requested step name.
+    pub fn step(&self, name: &str) -> Option<&WorkflowStepReport> {
+        self.steps.iter().find(|step| step.name == name)
+    }
+
+    /// Returns whether any report with the requested name changed the circuit.
+    ///
+    /// Skipped reports are not considered changes.
+    pub fn step_changed(&self, name: &str) -> bool {
+        self.steps
+            .iter()
+            .any(|step| step.name == name && step.changed && !step.skipped)
+    }
+}
+
 /// Runs the configured compiler workflow over `circuit`.
 ///
 /// The returned result records the optimized circuit and step-level reports in
