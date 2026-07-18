@@ -14,6 +14,7 @@ use super::*;
 use crate::circuit::gate::standard_gate::StandardGate;
 use crate::circuit::{
     ClassicalExpr, ClassicalType, MCGate, Operation, ParameterValue, Qubit, UnitaryGate,
+    ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
 };
 
 #[test]
@@ -216,6 +217,9 @@ fn test_device_creation_and_defaults() {
     .with_default_two_qubit_error(0.01);
 
     assert_eq!(device.name(), "test_device");
+    assert_eq!(device.default_t1(), Some(40.0));
+    assert_eq!(device.default_t2(), Some(20.0));
+    assert_eq!(device.default_readout_error(), Some(0.03));
     assert_eq!(device.default_single_qubit_error(), Some(0.001));
     assert_eq!(device.default_two_qubit_error(), Some(0.01));
 
@@ -388,11 +392,40 @@ fn test_device_errors() {
 
     let prop = QubitProp::new(0.05);
     let err = device.add_qubit_properties(q2, prop);
-    assert_eq!(err.unwrap_err(), DeviceError::QubitNotInTopology(q2));
+    assert_eq!(err.unwrap_err(), DeviceError::QubitNotInDevice(q2));
 
     let edge_prop = EdgeProp::new();
     let err = device.add_edge_properties(q1, q0, edge_prop).unwrap_err();
     assert_eq!(err, DeviceError::EdgeNotInTopology(q1, q0));
+}
+
+#[test]
+fn qubit_properties_distinguish_device_membership_from_topology_membership() {
+    let q0 = PhysicalQubit::new(0);
+    let q1 = PhysicalQubit::new(1);
+    let topology = Topology::new(vec![q0], vec![]).unwrap();
+    let mut device = Device::new("partial", HashSet::from([q0, q1]), topology).unwrap();
+
+    assert_eq!(
+        device
+            .add_qubit_properties(q1, QubitProp::new(0.01))
+            .unwrap_err(),
+        DeviceError::QubitNotInTopology(q1)
+    );
+}
+
+#[test]
+fn qubit_properties_can_be_recorded_for_offline_qubits() {
+    let q0 = PhysicalQubit::new(0);
+    let mut device = Device::line("offline-calibration", 1).unwrap();
+    device.set_invalid_qubits(HashSet::from([q0])).unwrap();
+
+    device
+        .add_qubit_properties(q0, QubitProp::new(0.02).with_t1(50.0))
+        .unwrap();
+
+    assert_eq!(device.qubit_properties(q0).unwrap().t1(), Some(50.0));
+    assert!(!device.is_usable_qubit(q0));
 }
 
 #[test]
@@ -883,6 +916,118 @@ fn validate_circuit_recurses_while_for_and_switch_bodies() {
     assert!(matches!(
         device.validate_circuit(&switch_circuit),
         Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+}
+
+#[test]
+fn validate_value_operation_matches_storage_operation_validation() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let forward = Device::new(
+        "forward",
+        HashSet::from([p0, p1]),
+        Topology::new(vec![p0, p1], vec![(p0, p1, "p0-p1".to_string())]).unwrap(),
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+    .unwrap();
+    let reverse = Device::new(
+        "reverse",
+        HashSet::from([p0, p1]),
+        Topology::new(vec![p0, p1], vec![(p1, p0, "p1-p0".to_string())]).unwrap(),
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+    .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let value_operation = circuit.index(0).unwrap();
+
+    assert!(forward.validate_operation(&circuit.operations()[0]).is_ok());
+    assert!(forward.validate_value_operation(&value_operation).is_ok());
+    assert!(matches!(
+        reverse.validate_operation(&circuit.operations()[0]),
+        Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+    assert!(matches!(
+        reverse.validate_value_operation(&value_operation),
+        Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+}
+
+#[test]
+fn validate_value_operation_does_not_require_owning_classical_tables() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut circuit = Circuit::new(2);
+    let measurement = circuit.measure(Qubit::new(0)).unwrap();
+    circuit
+        .if_(measurement.expr().to_bool().unwrap(), |body| {
+            body.cx(Qubit::new(0), Qubit::new(1))
+        })
+        .unwrap();
+    let operation = circuit.index(1).unwrap();
+
+    let forward = Device::new(
+        "forward",
+        HashSet::from([p0, p1]),
+        Topology::new(vec![p0, p1], vec![(p0, p1, "p0-p1".to_string())]).unwrap(),
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+    .unwrap();
+    let reverse = Device::new(
+        "reverse",
+        HashSet::from([p0, p1]),
+        Topology::new(vec![p0, p1], vec![(p1, p0, "p1-p0".to_string())]).unwrap(),
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+    .unwrap();
+
+    assert!(forward.validate_value_operation(&operation).is_ok());
+    assert!(matches!(
+        reverse.validate_value_operation(&operation),
+        Err(DeviceValidationError::MissingDirectedCoupling { .. })
+    ));
+}
+
+#[test]
+fn validate_value_control_body_only_skips_a_leading_global_phase_marker() {
+    let p0 = PhysicalQubit::new(0);
+    let device = Device::new(
+        "phase-marker",
+        HashSet::from([p0]),
+        Topology::new(vec![p0], vec![]).unwrap(),
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+    .unwrap();
+    let gphase =
+        ValueOperation::from_standard(StandardGate::GPhase, [], [ParameterValue::from(0.25)]);
+    let h = ValueOperation::from_standard(StandardGate::H, [Qubit::new(0)], []);
+    let make_control = |operations| {
+        let control = ValueClassicalControlOp::If {
+            condition: ClassicalExpr::bool_literal(true),
+            then_body: ValueControlBody::new(operations),
+            else_body: None,
+        };
+        ValueOperation {
+            qubits: control.used_qubits().into_iter().collect(),
+            instruction: ValueInstruction::ClassicalControl(control),
+            params: Default::default(),
+            label: None,
+        }
+    };
+
+    assert!(
+        device
+            .validate_value_operation(&make_control(vec![gphase.clone(), h.clone()]))
+            .is_ok()
+    );
+    assert!(matches!(
+        device.validate_value_operation(&make_control(vec![h, gphase])),
+        Err(DeviceValidationError::UnsupportedInstruction { .. })
     ));
 }
 

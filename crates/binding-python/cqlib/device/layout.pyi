@@ -11,6 +11,10 @@
 # that they have been altered from the originals.
 
 from cqlib import Qubit
+from .qubit import LogicalQubit, PhysicalQubit
+
+_LogicalQubitLike = int | Qubit | LogicalQubit
+_PhysicalQubitLike = int | Qubit | PhysicalQubit
 
 
 class Layout:
@@ -63,9 +67,9 @@ class Layout:
 
     def __init__(
         self,
-        logical: list[int] | list[Qubit],
-        physical: list[int] | list[Qubit],
-        init_map: dict[Qubit, Qubit] | None = None,
+        logical: list[_LogicalQubitLike],
+        physical: list[_PhysicalQubitLike],
+        init_map: dict[_LogicalQubitLike, _PhysicalQubitLike] | None = None,
     ) -> None:
         """Creates a new layout mapping logical to physical qubits.
 
@@ -73,9 +77,6 @@ class Layout:
         qubits are mapped to remaining physical qubits in the order
         supplied by ``logical`` and ``physical``. Extra physical qubits
         remain vacant.
-
-        Note: ``logical`` and ``physical`` must each be all ``int`` or all
-        ``Qubit``.
 
         Args:
             logical: List of logical qubit identifiers.
@@ -122,7 +123,7 @@ class Layout:
 
     # ---- Lookup methods ----
 
-    def get_physical(self, logical_id: int | Qubit) -> Qubit | None:
+    def get_physical(self, logical_id: _LogicalQubitLike) -> Qubit | None:
         """Get the physical qubit mapped to a logical qubit.
 
         Returns ``None`` if the logical qubit is not bound.
@@ -131,7 +132,7 @@ class Layout:
             logical_id: The logical qubit to look up.
         """
 
-    def get_logical(self, physical_id: int | Qubit) -> Qubit | None:
+    def get_logical(self, physical_id: _PhysicalQubitLike) -> Qubit | None:
         """Get the logical qubit carried by a physical qubit.
 
         Returns ``None`` if the physical qubit is vacant.
@@ -154,7 +155,7 @@ class Layout:
     def vacant_physical_qubits(self) -> list[Qubit]:
         """All vacant physical qubits (not carrying a logical qubit)."""
 
-    def is_physical_vacant(self, physical_id: int | Qubit) -> bool:
+    def is_physical_vacant(self, physical_id: _PhysicalQubitLike) -> bool:
         """Check whether a physical qubit is in the layout and vacant.
 
         Args:
@@ -180,7 +181,7 @@ class Layout:
 
     # ---- Mutation (routing operations) ----
 
-    def bind(self, logical_id: int | Qubit, physical_id: int | Qubit) -> None:
+    def bind(self, logical_id: _LogicalQubitLike, physical_id: _PhysicalQubitLike) -> None:
         """Bind an unmapped logical qubit to a vacant physical qubit.
 
         May introduce a new logical qubit to the layout. The caller must
@@ -196,7 +197,7 @@ class Layout:
                 either qubit already participates in a mapping.
         """
 
-    def unbind(self, logical_id: int | Qubit) -> Qubit:
+    def unbind(self, logical_id: _LogicalQubitLike) -> Qubit:
         """Remove the mapping for a logical qubit and return the released
         physical qubit.
 
@@ -211,7 +212,7 @@ class Layout:
         """
 
     def swap_physical(
-        self, phys_a: int | Qubit, phys_b: int | Qubit
+        self, phys_a: _PhysicalQubitLike, phys_b: _PhysicalQubitLike
     ) -> None:
         """Swap the logical qubits carried by two physical qubits.
 

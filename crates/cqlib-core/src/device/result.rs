@@ -373,6 +373,7 @@ impl ExecutionResult {
         t: Option<OffsetDateTime>,
     ) -> &mut Self {
         self.counts = counts;
+        self.probabilities = None;
         self.status = Status::Completed;
         self.finished_at = t.or(Some(OffsetDateTime::now_utc()));
         self

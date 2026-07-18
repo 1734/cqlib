@@ -207,7 +207,7 @@ impl fmt::Display for DeviceError {
     }
 }
 
-/// Errors that can occur when creating or operating on a [`Layout`].
+/// Errors that can occur when creating or operating on a [`crate::device::Layout`].
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {
     /// The number of logical qubits exceeds the number of physical qubits.

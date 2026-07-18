@@ -18,7 +18,8 @@
 //! mapping, routing, and circuit scheduling.
 
 use crate::circuit::{
-    Circuit, ClassicalControlOp, Directive, Instruction, Operation, StandardGate,
+    Circuit, ClassicalControlOp, Directive, Instruction, Operation, Qubit, StandardGate,
+    ValueClassicalControlOp, ValueInstruction, ValueOperation,
 };
 use crate::device::topology::Topology;
 use crate::device::{DeviceError, DeviceValidationError, PhysicalQubit};
@@ -713,13 +714,19 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns `DeviceError::QubitNotInTopology` if the qubit is not in the device's topology.
+    /// Returns [`DeviceError::QubitNotInDevice`] if the qubit is not registered
+    /// with the device, or [`DeviceError::QubitNotInTopology`] if it is
+    /// registered but absent from the topology. Properties may be retained for
+    /// a registered qubit while it is marked invalid/offline.
     pub fn add_qubit_properties(
         &mut self,
         qubit: PhysicalQubit,
         props: QubitProp,
     ) -> Result<(), DeviceError> {
-        if !self.qubits.contains(&qubit) || self.invalid_qubits.contains(&qubit) {
+        if !self.qubits.contains(&qubit) {
+            return Err(DeviceError::QubitNotInDevice(qubit));
+        }
+        if !self.topology.contains_qubit(&qubit) {
             return Err(DeviceError::QubitNotInTopology(qubit));
         }
         self.qubit_properties.insert(qubit, props);
@@ -906,24 +913,7 @@ impl Device {
     /// read-only and never performs layout, routing, lowering, or direction
     /// correction.
     pub fn validate_operation(&self, operation: &Operation) -> Result<(), DeviceValidationError> {
-        let qargs = operation
-            .qubits
-            .iter()
-            .copied()
-            .map(PhysicalQubit::from_qubit)
-            .collect::<Vec<_>>();
-        // Diagnose unusable qargs before the coarser capability query so
-        // callers receive the concrete physical-qubit failure.
-        if let Some(qubit) = qargs
-            .iter()
-            .copied()
-            .find(|qubit| !self.is_usable_qubit(*qubit))
-        {
-            return Err(DeviceValidationError::UnusablePhysicalQubit {
-                device: self.name.clone(),
-                qubit,
-            });
-        }
+        let qargs = self.validate_qargs(&operation.qubits)?;
         match &operation.instruction {
             Instruction::ClassicalControl(control) => match control {
                 ClassicalControlOp::If(op) => {
@@ -948,48 +938,126 @@ impl Device {
                 }
                 ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
             },
+            instruction => self.validate_atomic_instruction(instruction, qargs)?,
+        }
+        Ok(())
+    }
+
+    /// Validates one value-level operation interpreted in the physical-qubit ID space.
+    ///
+    /// This is the construction-IR counterpart of [`Self::validate_operation`].
+    /// Structured control-flow bodies are checked recursively without first
+    /// converting the operation into a [`Circuit`], so circuit-owned classical
+    /// variables and values are not required solely for device validation.
+    pub fn validate_value_operation(
+        &self,
+        operation: &ValueOperation,
+    ) -> Result<(), DeviceValidationError> {
+        let qargs = self.validate_qargs(&operation.qubits)?;
+        match &operation.instruction {
+            ValueInstruction::Instruction(instruction) => {
+                self.validate_atomic_instruction(instruction, qargs)?
+            }
+            ValueInstruction::ClassicalControl(control) => match control {
+                ValueClassicalControlOp::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.validate_value_control_body(then_body.operations())?;
+                    if let Some(body) = else_body {
+                        self.validate_value_control_body(body.operations())?;
+                    }
+                }
+                ValueClassicalControlOp::While { body, .. }
+                | ValueClassicalControlOp::For { body, .. } => {
+                    self.validate_value_control_body(body.operations())?
+                }
+                ValueClassicalControlOp::Switch { cases, default, .. } => {
+                    for case in cases {
+                        self.validate_value_control_body(case.body.operations())?;
+                    }
+                    if let Some(body) = default {
+                        self.validate_value_control_body(body.operations())?;
+                    }
+                }
+                ValueClassicalControlOp::Break | ValueClassicalControlOp::Continue => {}
+            },
+        }
+        Ok(())
+    }
+
+    fn validate_qargs(
+        &self,
+        qubits: &[Qubit],
+    ) -> Result<Vec<PhysicalQubit>, DeviceValidationError> {
+        let qargs = qubits
+            .iter()
+            .copied()
+            .map(PhysicalQubit::from_qubit)
+            .collect::<Vec<_>>();
+        // Diagnose unusable qargs before the coarser capability query so
+        // callers receive the concrete physical-qubit failure.
+        if let Some(qubit) = qargs
+            .iter()
+            .copied()
+            .find(|qubit| !self.is_usable_qubit(*qubit))
+        {
+            return Err(DeviceValidationError::UnusablePhysicalQubit {
+                device: self.name.clone(),
+                qubit,
+            });
+        }
+        Ok(qargs)
+    }
+
+    fn validate_atomic_instruction(
+        &self,
+        instruction: &Instruction,
+        qargs: Vec<PhysicalQubit>,
+    ) -> Result<(), DeviceValidationError> {
+        match instruction {
             Instruction::Directive(Directive::Measure | Directive::Reset) if qargs.len() == 1 => {}
             Instruction::Directive(Directive::Barrier) => {}
             Instruction::ClassicalData(op) => match op {
                 crate::circuit::ClassicalDataOp::Store { .. } if qargs.is_empty() => {}
                 crate::circuit::ClassicalDataOp::MeasureBit { .. } if qargs.len() == 1 => {}
                 crate::circuit::ClassicalDataOp::MeasureBits { .. } if !qargs.is_empty() => {}
-                _ => return Err(self.unsupported_instruction(&operation.instruction, qargs)),
+                _ => return Err(self.unsupported_instruction(instruction, qargs)),
             },
             Instruction::Delay if qargs.len() == 1 => {}
             Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
                 return Err(DeviceValidationError::UndecomposedInstruction {
                     device: self.name.clone(),
-                    instruction: operation.instruction.to_string(),
+                    instruction: instruction.to_string(),
                     qargs,
                 });
             }
             Instruction::Standard(gate) if gate.num_qubits() > 2 => {
                 return Err(DeviceValidationError::UndecomposedInstruction {
                     device: self.name.clone(),
-                    instruction: operation.instruction.to_string(),
+                    instruction: instruction.to_string(),
                     qargs,
                 });
             }
             Instruction::Standard(gate) if gate.num_qubits() == 2 => {
                 let [control, target] = qargs.as_slice() else {
-                    return Err(self.unsupported_instruction(&operation.instruction, qargs));
+                    return Err(self.unsupported_instruction(instruction, qargs));
                 };
                 if !self.topology.supports_directed_coupling(*control, *target) {
                     return Err(DeviceValidationError::MissingDirectedCoupling {
                         device: self.name.clone(),
-                        instruction: operation.instruction.to_string(),
+                        instruction: instruction.to_string(),
                         control: *control,
                         target: *target,
                     });
                 }
-                if !self.supports_native_instruction(&operation.instruction, &qargs) {
-                    return Err(self.unsupported_instruction(&operation.instruction, qargs));
+                if !self.supports_native_instruction(instruction, &qargs) {
+                    return Err(self.unsupported_instruction(instruction, qargs));
                 }
             }
-            Instruction::Standard(_)
-                if self.supports_native_instruction(&operation.instruction, &qargs) => {}
-            _ => return Err(self.unsupported_instruction(&operation.instruction, qargs)),
+            Instruction::Standard(_) if self.supports_native_instruction(instruction, &qargs) => {}
+            _ => return Err(self.unsupported_instruction(instruction, qargs)),
         }
         Ok(())
     }
@@ -1031,6 +1099,26 @@ impl Device {
             operations
         };
         self.validate_operations(operations)
+    }
+
+    fn validate_value_control_body(
+        &self,
+        operations: &[ValueOperation],
+    ) -> Result<(), DeviceValidationError> {
+        let operations = if operations.first().is_some_and(|operation| {
+            matches!(
+                operation.instruction,
+                ValueInstruction::Instruction(Instruction::Standard(StandardGate::GPhase))
+            ) && operation.qubits.is_empty()
+        }) {
+            &operations[1..]
+        } else {
+            operations
+        };
+        for operation in operations {
+            self.validate_value_operation(operation)?;
+        }
+        Ok(())
     }
 
     /// Builds the common diagnostic for a well-formed but unsupported atomic instruction.
@@ -1223,6 +1311,21 @@ impl Device {
     /// Gets the default two-qubit gate error rate.
     pub fn default_two_qubit_error(&self) -> Option<f64> {
         self.default_two_qubit_error
+    }
+
+    /// Gets the default T1 relaxation time.
+    pub fn default_t1(&self) -> Option<f64> {
+        self.default_t1
+    }
+
+    /// Gets the default T2 dephasing time.
+    pub fn default_t2(&self) -> Option<f64> {
+        self.default_t2
+    }
+
+    /// Gets the default readout error rate.
+    pub fn default_readout_error(&self) -> Option<f64> {
+        self.default_readout_error
     }
 
     /// Gets the system calibration timestamp.
