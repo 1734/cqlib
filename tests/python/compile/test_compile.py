@@ -485,6 +485,7 @@ def test_compile_rejects_unsupported_and_non_standard_target_basis():
 def test_compile_routes_long_range_circuit_on_line_device():
     source = long_range_device_circuit(4)
     device = Device.line("line-4", 4)
+    device.native_gates = qcis_cz_basis()
 
     result = compile(source, device=device, seed=101)
 
@@ -503,7 +504,8 @@ def test_compile_uses_device_native_gates_as_target_basis_after_routing():
     result = compile(source, device=device, seed=102)
 
     assert not step(result, "route.sabre").skipped
-    assert step(result, "translate.target_basis").changed
+    assert step(result, "translate.target_basis").skipped
+    assert not step(result, "validate.device").skipped
     assert_all_two_qubit_ops_on_topology(result.circuit, device)
     assert_only_standard_basis(result.circuit, standard_names(basis))
 
@@ -514,7 +516,8 @@ def test_compile_explicit_target_basis_takes_precedence_over_device_native_gates
     device.native_gates = [instruction(StandardGate.CX)]
     explicit_basis = [instruction(StandardGate.H), instruction(StandardGate.CZ)]
 
-    result = compile(source, target_basis=explicit_basis, device=device, seed=11)
+    with pytest.warns(UserWarning, match="not guaranteed"):
+        result = compile(source, target_basis=explicit_basis, device=device, seed=11)
 
     assert step(result, "translate.target_basis").changed
     assert_only_standard_basis(result.circuit, {"H", "CZ"})
@@ -563,6 +566,7 @@ def test_compile_routes_from_supplied_initial_layout_and_reports_reason():
     source = Circuit(1)
     source.h(0)
     device = Device.line("layout-line", 3)
+    device.native_gates = [instruction(StandardGate.H)]
     layout = Layout.from_pairs([(0, 2)], 3)
 
     result = compile(source, device=device, initial_layout=layout, seed=17)
@@ -580,13 +584,18 @@ def test_compile_rejects_invalid_device_and_layout_configurations():
     too_wide.h(0)
 
     with pytest.raises(CompilerConfigError, match="4 logical qubits"):
-        compile(too_wide, device=Device.line("line-2", 2))
+        device = Device.line("line-2", 2)
+        device.native_gates = [instruction(StandardGate.H)]
+        compile(too_wide, device=device)
 
     layout = Layout.from_pairs([(0, 0)], 1)
     with pytest.raises(
-        CompilerConfigError, match="initial layout requires a target device"
+        CompilerConfigError, match="initial_layout requires a target device"
     ):
         compile(Circuit(1), initial_layout=layout)
+
+    with pytest.raises(CompilerConfigError, match="device has no native gates"):
+        compile(Circuit(1), device=Device.line("no-native-gates", 1))
 
 
 def test_compile_decomposes_multi_controlled_gates_without_high_level_residue():

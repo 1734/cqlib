@@ -78,11 +78,26 @@ class CompileTarget:
         """Lower to a non-empty explicit standard-instruction basis."""
         ...
     @staticmethod
-    def device(target: DeviceCompileTarget) -> CompileTarget:
-        """Route and lower for one concrete device target."""
+    def device(
+        device: Device,
+        *,
+        initial_layout: Layout | None = None,
+        seed: int | None = None,
+    ) -> CompileTarget:
+        """Route, lower, and validate for one concrete device."""
+        ...
+    @staticmethod
+    def topology_basis(
+        device: Device,
+        instructions: Sequence[str | Instruction],
+        *,
+        initial_layout: Layout | None = None,
+        seed: int | None = None,
+    ) -> CompileTarget:
+        """Route on a device topology and lower to an explicit basis."""
         ...
     @property
-    def kind(self) -> Literal["logical", "basis", "device"]: ...
+    def kind(self) -> Literal["logical", "basis", "device", "topology_basis"]: ...
     @property
     def basis_instructions(self) -> list[Instruction] | None: ...
     @property
@@ -100,7 +115,7 @@ class CompileConfig:
     def __init__(
         self,
         *,
-        mode: CompileMode | None = None,
+        mode: CompileMode | Literal["normal", "enhanced"] | None = None,
         target: CompileTarget | None = None,
         resource_policy: ResourcePolicy | None = None,
     ) -> None:
@@ -199,15 +214,22 @@ class CompilerWorkflow:
 def compile(
     circuit: Circuit,
     *,
-    mode: CompileMode | None = None,
+    mode: CompileMode | Literal["normal", "enhanced"] | None = None,
     target: CompileTarget | None = None,
+    target_basis: Sequence[str | Instruction] | None = None,
+    device: Device | None = None,
+    initial_layout: Layout | None = None,
     resource_policy: ResourcePolicy | None = None,
+    seed: int | None = None,
 ) -> CompileResult:
-    """Compile ``circuit`` for one explicit target contract.
+    """Compile ``circuit`` for an explicit target or loose constraints.
 
-    ``target=None`` performs logical compilation. Device compilation requires a
-    :class:`DeviceCompileTarget` wrapped by :meth:`CompileTarget.device` and
-    returns physical layout metadata.
+    ``device`` alone selects strict device-native compilation. Combining
+    ``device`` with ``target_basis`` uses the device for capacity, layout, and
+    routing while the explicit basis constrains the output; this loose form
+    does not guarantee device-native compatibility. ``target`` cannot be
+    combined with ``device`` or ``target_basis``. Per-run ``initial_layout``
+    and ``seed`` options may accompany an explicit physical target.
 
     Raises:
         CompilerConfigError: If target configuration is invalid.

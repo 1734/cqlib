@@ -52,10 +52,14 @@
 //!
 //! # Target Constraints
 //!
-//! [`CompileTarget`] is mutually exclusive: [`CompileTarget::Logical`] keeps
-//! logical operations, [`CompileTarget::Basis`] lowers to an explicit basis,
-//! and [`CompileTarget::Device`] routes and lowers for one device. Device
-//! compilation uses an exact-plan-aware SABRE movement graph and checks local
+//! [`CompileTarget::Logical`] keeps logical operations,
+//! [`CompileTarget::Basis`] lowers to an explicit basis, and
+//! [`CompileTarget::Device`] routes and lowers for one device. The
+//! [`CompileTarget::TopologyBasis`] target routes on a device topology and
+//! lowers to a non-empty caller-supplied basis without claiming native-device
+//! compatibility. Strict device compilation
+//! uses an exact-plan-aware SABRE
+//! movement graph and checks local
 //! unary and ordered two-qubit capabilities during routing. Its following
 //! device-lowering stage emits the shared exact-qargs plans, then
 //! [`Device::validate_circuit`](crate::device::Device::validate_circuit)
@@ -66,7 +70,7 @@
 //! [`DeviceCompileTarget::initial_layout`] may skip automatic initial-layout
 //! selection. [`DeviceCompileTarget::seed`] controls only device layout and
 //! routing heuristics. [`CompileResult::device_metadata`] records the initial
-//! and final layouts for device compilation.
+//! and final layouts whenever compilation performs device-topology routing.
 //!
 //! # Classical Control and High-Level Operations
 //!

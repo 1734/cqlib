@@ -21,6 +21,7 @@ use cqlib_core::compile::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, CompilerWorkflow,
     DeviceCompilationMetadata, DeviceCompileTarget, WorkflowStepReport, compile,
 };
+use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -92,18 +93,149 @@ impl PyTargetBasisItem {
     }
 }
 
+fn convert_target_basis(items: Vec<PyTargetBasisItem>) -> PyResult<Vec<Instruction>> {
+    if items.is_empty() {
+        return Err(CompilerConfigError::new_err(
+            "compile target basis must not be empty",
+        ));
+    }
+    items
+        .into_iter()
+        .map(PyTargetBasisItem::into_instruction)
+        .collect()
+}
+
+fn validate_strict_device_target(target: DeviceCompileTarget) -> PyResult<DeviceCompileTarget> {
+    if target.device.native_gates().is_empty() {
+        return Err(CompilerConfigError::new_err(
+            "device has no native gates; provide target_basis for topology routing or use an explicit CompileTarget.topology_basis()",
+        ));
+    }
+    Ok(target)
+}
+
+fn device_compile_target(
+    device: PyRef<'_, PyDevice>,
+    initial_layout: Option<PyRef<'_, PyLayout>>,
+    seed: Option<u32>,
+) -> DeviceCompileTarget {
+    DeviceCompileTarget {
+        device: device.inner.clone(),
+        initial_layout: initial_layout.map(|layout| layout.inner.clone()),
+        seed,
+    }
+}
+
+#[derive(FromPyObject)]
+pub enum PyCompileModeInput {
+    Mode(PyCompileMode),
+    Name(String),
+}
+
+impl PyCompileModeInput {
+    fn into_mode(self) -> PyResult<CompileMode> {
+        match self {
+            Self::Mode(mode) => Ok(mode.inner),
+            Self::Name(name) => match name.to_ascii_lowercase().as_str() {
+                "normal" => Ok(CompileMode::Normal),
+                "enhanced" => Ok(CompileMode::Enhanced),
+                _ => Err(CompilerConfigError::new_err(format!(
+                    "unknown compile mode {name:?}; expected 'normal' or 'enhanced'"
+                ))),
+            },
+        }
+    }
+}
+
+fn resolve_entrypoint_target(
+    py: Python<'_>,
+    target: Option<PyCompileTarget>,
+    target_basis: Option<Vec<PyTargetBasisItem>>,
+    device: Option<PyRef<'_, PyDevice>>,
+    initial_layout: Option<PyRef<'_, PyLayout>>,
+    seed: Option<u32>,
+) -> PyResult<Option<PyCompileTarget>> {
+    if target.is_some() && (target_basis.is_some() || device.is_some()) {
+        return Err(CompilerConfigError::new_err(
+            "target cannot be combined with target_basis or device",
+        ));
+    }
+    if let Some(mut target) = target {
+        let physical_target = match &mut target.inner {
+            CompileTarget::Device(target) => Some(target),
+            CompileTarget::TopologyBasis { device_target, .. } => Some(device_target),
+            CompileTarget::Logical | CompileTarget::Basis(_) => None,
+        };
+        if let Some(physical_target) = physical_target {
+            if let Some(initial_layout) = initial_layout {
+                physical_target.initial_layout = Some(initial_layout.inner.clone());
+            }
+            if seed.is_some() {
+                physical_target.seed = seed;
+            }
+            return Ok(Some(target));
+        }
+        if initial_layout.is_some() {
+            return Err(CompilerConfigError::new_err(
+                "initial_layout requires a physical device target",
+            ));
+        }
+        if seed.is_some() {
+            return Err(CompilerConfigError::new_err(
+                "seed requires a physical device target",
+            ));
+        }
+        return Ok(Some(target));
+    }
+    if device.is_none() && initial_layout.is_some() {
+        return Err(CompilerConfigError::new_err(
+            "initial_layout requires a target device",
+        ));
+    }
+    if device.is_none() && seed.is_some() {
+        return Err(CompilerConfigError::new_err(
+            "seed requires a target device",
+        ));
+    }
+
+    let basis = target_basis.map(convert_target_basis).transpose()?;
+    let Some(device) = device else {
+        return Ok(basis.map(|basis| CompileTarget::Basis(basis).into()));
+    };
+    let device_target = device_compile_target(device, initial_layout, seed);
+    let Some(basis) = basis else {
+        return Ok(Some(
+            CompileTarget::Device(validate_strict_device_target(device_target)?).into(),
+        ));
+    };
+
+    PyErr::warn(
+        py,
+        &py.get_type::<PyUserWarning>(),
+        c"combining device and target_basis uses the device only for capacity, layout, and routing; output is not guaranteed to satisfy the device's native capabilities; use an explicit CompileTarget.topology_basis() to acknowledge this behavior",
+        1,
+    )?;
+    Ok(Some(
+        CompileTarget::TopologyBasis {
+            device_target,
+            basis,
+        }
+        .into(),
+    ))
+}
+
 /// Builds the core compiler configuration from Python-facing snapshots.
 fn build_compile_config(
-    mode: Option<PyCompileMode>,
+    mode: Option<PyCompileModeInput>,
     target: Option<PyCompileTarget>,
     resource_policy: Option<PyResourcePolicy>,
-) -> CompileConfig {
-    CompileConfig {
-        mode: mode.map_or(CompileMode::Normal, |mode| mode.inner),
+) -> PyResult<CompileConfig> {
+    Ok(CompileConfig {
+        mode: mode.map_or(Ok(CompileMode::Normal), PyCompileModeInput::into_mode)?,
         target: target.map_or(CompileTarget::Logical, |target| target.inner),
         resource_policy: resource_policy
             .map_or_else(ResourcePolicy::default, |policy| policy.inner),
-    }
+    })
 }
 
 /// Optimization effort selected for the compiler workflow.
@@ -227,17 +359,43 @@ impl PyCompileTarget {
     /// Returns a target that lowers to an explicit standard-gate basis.
     #[staticmethod]
     fn basis(instructions: Vec<PyTargetBasisItem>) -> PyResult<Self> {
-        let instructions = instructions
-            .into_iter()
-            .map(PyTargetBasisItem::into_instruction)
-            .collect::<PyResult<Vec<_>>>()?;
+        let instructions = convert_target_basis(instructions)?;
         Ok(CompileTarget::Basis(instructions).into())
     }
 
-    /// Returns a physical-device compile target.
+    /// Returns a strict physical-device compile target.
     #[staticmethod]
-    fn device(target: PyDeviceCompileTarget) -> Self {
-        CompileTarget::Device(target.inner).into()
+    #[pyo3(signature = (device, *, initial_layout=None, seed=None))]
+    fn device(
+        device: PyRef<'_, PyDevice>,
+        initial_layout: Option<PyRef<'_, PyLayout>>,
+        seed: Option<u32>,
+    ) -> PyResult<Self> {
+        Ok(
+            CompileTarget::Device(validate_strict_device_target(device_compile_target(
+                device,
+                initial_layout,
+                seed,
+            ))?)
+            .into(),
+        )
+    }
+
+    /// Returns a target that routes on a device and lowers to an explicit basis.
+    #[staticmethod]
+    #[pyo3(signature = (device, instructions, *, initial_layout=None, seed=None))]
+    fn topology_basis(
+        device: PyRef<'_, PyDevice>,
+        instructions: Vec<PyTargetBasisItem>,
+        initial_layout: Option<PyRef<'_, PyLayout>>,
+        seed: Option<u32>,
+    ) -> PyResult<Self> {
+        let basis = convert_target_basis(instructions)?;
+        Ok(CompileTarget::TopologyBasis {
+            device_target: device_compile_target(device, initial_layout, seed),
+            basis,
+        }
+        .into())
     }
 
     #[getter]
@@ -246,15 +404,18 @@ impl PyCompileTarget {
             CompileTarget::Logical => "logical",
             CompileTarget::Basis(_) => "basis",
             CompileTarget::Device(_) => "device",
+            CompileTarget::TopologyBasis { .. } => "topology_basis",
         }
     }
 
     #[getter]
     fn basis_instructions(&self) -> Option<Vec<PyInstruction>> {
         match &self.inner {
-            CompileTarget::Basis(instructions) => {
-                Some(instructions.iter().cloned().map(Into::into).collect())
-            }
+            CompileTarget::Basis(instructions)
+            | CompileTarget::TopologyBasis {
+                basis: instructions,
+                ..
+            } => Some(instructions.iter().cloned().map(Into::into).collect()),
             CompileTarget::Logical | CompileTarget::Device(_) => None,
         }
     }
@@ -263,6 +424,9 @@ impl PyCompileTarget {
     fn device_target(&self) -> Option<PyDeviceCompileTarget> {
         match &self.inner {
             CompileTarget::Device(target) => Some(target.clone().into()),
+            CompileTarget::TopologyBasis { device_target, .. } => {
+                Some(device_target.clone().into())
+            }
             CompileTarget::Logical | CompileTarget::Basis(_) => None,
         }
     }
@@ -279,7 +443,7 @@ impl PyCompileTarget {
                     .join(", ")
             ),
             CompileTarget::Device(target) => format!(
-                "CompileTarget.device(DeviceCompileTarget(device=Device(name={:?}), initial_layout={}, seed={:?}))",
+                "CompileTarget.device(Device(name={:?}), initial_layout={}, seed={:?})",
                 target.device.name(),
                 if target.initial_layout.is_some() {
                     "Layout(...)"
@@ -287,6 +451,24 @@ impl PyCompileTarget {
                     "None"
                 },
                 target.seed,
+            ),
+            CompileTarget::TopologyBasis {
+                device_target,
+                basis,
+            } => format!(
+                "CompileTarget.topology_basis(Device(name={:?}), [{}], initial_layout={}, seed={:?})",
+                device_target.device.name(),
+                basis
+                    .iter()
+                    .map(|instruction| format!("{:?}", instruction.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if device_target.initial_layout.is_some() {
+                    "Layout(...)"
+                } else {
+                    "None"
+                },
+                device_target.seed,
             ),
         }
     }
@@ -395,11 +577,11 @@ impl PyCompileConfig {
     #[new]
     #[pyo3(signature = (*, mode=None, target=None, resource_policy=None))]
     fn new(
-        mode: Option<PyCompileMode>,
+        mode: Option<PyCompileModeInput>,
         target: Option<PyCompileTarget>,
         resource_policy: Option<PyResourcePolicy>,
-    ) -> Self {
-        build_compile_config(mode, target, resource_policy).into()
+    ) -> PyResult<Self> {
+        Ok(build_compile_config(mode, target, resource_policy)?.into())
     }
 
     #[getter]
@@ -640,7 +822,7 @@ impl PyCompilerWorkflow {
     fn new(config: Option<PyCompileConfig>) -> PyResult<Self> {
         let config = match config {
             Some(config) => config.inner,
-            None => build_compile_config(None, None, None),
+            None => build_compile_config(None, None, None)?,
         };
         Ok(Self {
             inner: CompilerWorkflow::new(config),
@@ -668,15 +850,21 @@ impl PyCompilerWorkflow {
 
 /// Compiles a circuit with the configured compiler workflow.
 #[pyfunction(name = "compile")]
-#[pyo3(signature = (circuit, *, mode=None, target=None, resource_policy=None))]
+#[pyo3(signature = (circuit, *, mode=None, target=None, target_basis=None, device=None, initial_layout=None, resource_policy=None, seed=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn py_compile(
     py: Python<'_>,
     circuit: PyRef<'_, PyCircuit>,
-    mode: Option<PyCompileMode>,
+    mode: Option<PyCompileModeInput>,
     target: Option<PyCompileTarget>,
+    target_basis: Option<Vec<PyTargetBasisItem>>,
+    device: Option<PyRef<'_, PyDevice>>,
+    initial_layout: Option<PyRef<'_, PyLayout>>,
     resource_policy: Option<PyResourcePolicy>,
+    seed: Option<u32>,
 ) -> PyResult<PyCompileResult> {
-    let config = build_compile_config(mode, target, resource_policy);
+    let target = resolve_entrypoint_target(py, target, target_basis, device, initial_layout, seed)?;
+    let config = build_compile_config(mode, target, resource_policy)?;
     let circuit = circuit.inner.clone();
 
     py.detach(move || compile(&circuit, config))

@@ -418,6 +418,47 @@ fn workflow_uses_three_native_cx_for_device_targeted_swap_unitary() {
 }
 
 #[test]
+fn topology_basis_routes_on_device_but_uses_explicit_output_basis() {
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let device = Device::bidirectional_line("topology-basis", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let basis = vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CZ),
+    ];
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device: device.clone(),
+                initial_layout: None,
+                seed: Some(47),
+            },
+            basis,
+        },
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
+    );
+    assert!(result.device_metadata.is_some());
+    assert!(result.step("lower.device_instructions").unwrap().skipped);
+    assert!(result.step("canonicalize.native_input").unwrap().skipped);
+    assert!(result.step("optimize.native_fixed_point").unwrap().skipped);
+    assert!(result.step("validate.device").unwrap().skipped);
+    assert!(device.validate_circuit(&result.circuit).is_err());
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
 fn workflow_uses_three_native_cz_for_device_targeted_swap_unitary() {
     let gate = UnitaryGate::new("DEVICE_CZ_SWAP_MATRIX", 2, 0)
         .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())

@@ -79,6 +79,18 @@ pub enum CompileTarget {
     Basis(Vec<Instruction>),
     /// Route and lower for one concrete target device.
     Device(DeviceCompileTarget),
+    /// Route on a device topology while lowering to an explicit gate basis.
+    ///
+    /// This target uses the device for capacity, layout, and
+    /// routing only. It does not require the output basis to match the
+    /// device's native capabilities and therefore does not perform exact
+    /// device-native lowering or final device validation.
+    TopologyBasis {
+        /// Device-specific layout and routing inputs.
+        device_target: DeviceCompileTarget,
+        /// Explicit standard-gate basis required at the output.
+        basis: Vec<Instruction>,
+    },
 }
 
 /// Device-specific compilation inputs.
@@ -112,7 +124,7 @@ pub struct CompileResult {
     pub mode: CompileMode,
     /// Step-level execution report in run order.
     pub steps: Vec<WorkflowStepReport>,
-    /// Physical-layout data when compilation targeted a device.
+    /// Physical-layout data when compilation used device-topology routing.
     pub device_metadata: Option<DeviceCompilationMetadata>,
 }
 

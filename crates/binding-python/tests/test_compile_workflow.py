@@ -29,7 +29,6 @@ from cqlib.compile import (
     CompilerTransformError,
     CompilerWorkflow,
     DeviceCompilationMetadata,
-    DeviceCompileTarget,
     WorkflowStepReport,
     compile,
 )
@@ -50,6 +49,23 @@ def test_workflow_types_are_public_compile_types() -> None:
     assert "CompilerWorkflow" in compile_module.__all__
     assert repr(CompileMode.normal()) == "CompileMode.Normal"
     assert repr(CompileMode.enhanced()) == "CompileMode.Enhanced"
+
+
+@pytest.mark.parametrize("mode", [CompileMode.enhanced(), "enhanced", "ENHANCED"])
+def test_compile_mode_accepts_objects_and_strings(mode: object) -> None:
+    circuit = Circuit(1)
+    circuit.h(0)
+
+    assert compile(circuit, mode=mode).mode == CompileMode.enhanced()
+    assert CompileConfig(mode=mode).mode == CompileMode.enhanced()
+
+
+def test_compile_mode_rejects_unknown_strings() -> None:
+    with pytest.raises(CompilerConfigError, match="unknown compile mode"):
+        compile(Circuit(1), mode="fast")
+
+    with pytest.raises(CompilerConfigError, match="unknown compile mode"):
+        CompileConfig(mode="fast")
 
 
 def test_compiler_errors_are_public_compile_exceptions() -> None:
@@ -88,13 +104,12 @@ def test_compile_config_exposes_immutable_defaults_and_copy_protocol() -> None:
 def test_compile_config_takes_basis_and_device_target_snapshots() -> None:
     basis = ["H"]
     device = Device.line("line-2", 2)
+    device.native_gates = [Instruction.from_standard_gate(StandardGate.H)]
     layout = Layout.from_pairs([(0, 0)], physical_count=2)
     policy = ResourcePolicy(max_pre_layout_clean_ancillas=2)
     basis_config = CompileConfig(target=CompileTarget.basis(basis))
     device_config = CompileConfig(
-        target=CompileTarget.device(
-            DeviceCompileTarget(device, initial_layout=layout, seed=7)
-        ),
+        target=CompileTarget.device(device, initial_layout=layout, seed=7),
         resource_policy=policy,
     )
 
@@ -105,7 +120,7 @@ def test_compile_config_takes_basis_and_device_target_snapshots() -> None:
     assert instruction_names(basis_config.target.basis_instructions) == ["H"]
     target = device_config.target.device_target
     assert target is not None
-    assert target.device.native_gates == []
+    assert instruction_names(target.device.native_gates) == ["H"]
     assert target.initial_layout is not None
     assert target.initial_layout.num_logical == 1
     assert target.seed == 7
@@ -115,7 +130,7 @@ def test_compile_config_takes_basis_and_device_target_snapshots() -> None:
     returned_device.native_gates = [Instruction.from_standard_gate(StandardGate.Z)]
     target = device_config.target.device_target
     assert target is not None
-    assert target.device.native_gates == []
+    assert instruction_names(target.device.native_gates) == ["H"]
 
 
 def test_compiler_workflow_owns_config_snapshot_and_is_reusable() -> None:
@@ -163,6 +178,68 @@ def test_compile_and_explicit_workflow_have_equivalent_results() -> None:
     assert direct.__eq__(object()) is NotImplemented
 
 
+def test_compile_combines_loose_basis_and_device_arguments() -> None:
+    circuit = Circuit(2)
+    circuit.cx(0, 1)
+    device = Device.bidirectional_line("loose-topology-basis", 2)
+    device.native_gates = [Instruction.from_standard_gate(StandardGate.CX)]
+
+    with pytest.warns(UserWarning, match="not guaranteed"):
+        result = compile(
+            circuit,
+            target_basis=["H", "CZ"],
+            device=device,
+            seed=11,
+        )
+
+    assert [operation.instruction.name for operation in result.circuit.operations] == [
+        "H",
+        "CZ",
+        "H",
+    ]
+    assert result.device_metadata is not None
+    assert result.step("lower.device_instructions").skipped
+    assert result.step("validate.device").skipped
+
+
+def test_explicit_topology_basis_target_is_inspectable_and_does_not_warn() -> None:
+    circuit = Circuit(2)
+    circuit.cx(0, 1)
+    device = Device.bidirectional_line("explicit-topology-basis", 2)
+    target = CompileTarget.topology_basis(
+        device,
+        ["H", "CZ"],
+    )
+
+    assert target.kind == "topology_basis"
+    assert instruction_names(target.basis_instructions) == ["H", "CZ"]
+    assert target.device_target is not None
+    assert target.device_target.seed is None
+    result = compile(circuit, target=target, seed=13)
+    assert result.device_metadata is not None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"target": CompileTarget.logical(), "target_basis": ["H"]},
+            "target cannot be combined",
+        ),
+        (
+            {"initial_layout": Layout.from_pairs([(0, 0)], 1)},
+            "initial_layout requires a target device",
+        ),
+        ({"seed": 7}, "seed requires a target device"),
+    ],
+)
+def test_compile_rejects_conflicting_or_orphaned_target_arguments(
+    kwargs: dict[str, object], message: str
+) -> None:
+    with pytest.raises(CompilerConfigError, match=message):
+        compile(Circuit(1), **kwargs)
+
+
 @pytest.mark.parametrize(
     "run",
     [compile, lambda circuit: CompilerWorkflow().run(circuit)],
@@ -197,9 +274,9 @@ def test_device_compile_returns_layout_metadata() -> None:
     circuit.h(0)
     device = Device.line("native-h", 1)
     device.native_gates = [Instruction.from_standard_gate(StandardGate.H)]
-    target = CompileTarget.device(DeviceCompileTarget(device, seed=7))
+    target = CompileTarget.device(device)
 
-    result = compile(circuit, target=target)
+    result = compile(circuit, target=target, seed=7)
 
     assert isinstance(result.device_metadata, DeviceCompilationMetadata)
     assert result.device_metadata.initial_layout.num_logical == 1
@@ -213,6 +290,17 @@ def test_device_compile_returns_layout_metadata() -> None:
 def test_compile_config_rejects_unknown_target_gate_name() -> None:
     with pytest.raises(CompilerConfigError, match="unknown standard gate"):
         CompileTarget.basis(["not-a-gate"])
+
+
+def test_compile_targets_reject_empty_basis_and_native_gate_sets() -> None:
+    device = Device.line("no-native-gates", 1)
+
+    with pytest.raises(CompilerConfigError, match="basis must not be empty"):
+        CompileTarget.basis([])
+    with pytest.raises(CompilerConfigError, match="basis must not be empty"):
+        CompileTarget.topology_basis(device, [])
+    with pytest.raises(CompilerConfigError, match="device has no native gates"):
+        CompileTarget.device(device)
 
 
 def test_workflow_rejects_non_standard_target_instruction_when_run() -> None:

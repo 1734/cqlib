@@ -62,6 +62,7 @@ use crate::compile::transform::{
     TargetBasisLowerer, TransformResult, Transformer, TwoQubitBlockResynthesisConfig, route_sabre,
     route_with_layout,
 };
+use crate::device::{Device, Topology};
 
 use super::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
@@ -164,9 +165,11 @@ impl CompilerWorkflow {
         let resolved_target = self.resolve_target_basis()?;
         let one_qubit_optimizer = match &self.config.target {
             CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
-            CompileTarget::Basis(target_basis) => {
-                Some(OptimizeOneQubitRuns::basis(target_basis.clone())?)
-            }
+            CompileTarget::Basis(target_basis)
+            | CompileTarget::TopologyBasis {
+                basis: target_basis,
+                ..
+            } => Some(OptimizeOneQubitRuns::basis(target_basis.clone())?),
             CompileTarget::Device(_) => None,
         };
         let two_qubit_target =
@@ -299,7 +302,10 @@ impl CompilerWorkflow {
                 },
             )?;
         }
-        if matches!(self.config.target, CompileTarget::Basis(_)) {
+        if matches!(
+            self.config.target,
+            CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. }
+        ) {
             let changed =
                 self.apply_one_qubit_optimization(state, "optimize.one_qubit.post_translation")?;
             if changed {
@@ -337,11 +343,11 @@ impl CompilerWorkflow {
     }
 
     fn lower_device_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let Some(target) = self.device_target() else {
+        let Some(target) = self.strict_device_target() else {
             state.record_skipped(
                 "translation",
                 "lower.device_instructions",
-                "no target device configured",
+                self.strict_device_skip_reason(),
             );
             return Ok(());
         };
@@ -354,11 +360,11 @@ impl CompilerWorkflow {
     }
 
     fn canonicalize_native_input(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        if self.device_target().is_none() {
+        if self.strict_device_target().is_none() {
             state.record_skipped(
                 "optimization",
                 "canonicalize.native_input",
-                "no target device configured",
+                self.strict_device_skip_reason(),
             );
             return Ok(());
         }
@@ -370,11 +376,11 @@ impl CompilerWorkflow {
     }
 
     fn optimize_native_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let Some(target) = self.device_target() else {
+        let Some(target) = self.strict_device_target() else {
             state.record_skipped(
                 "optimization",
                 "optimize.native_fixed_point",
-                "no target device configured",
+                self.strict_device_skip_reason(),
             );
             return Ok(());
         };
@@ -423,11 +429,11 @@ impl CompilerWorkflow {
     }
 
     fn validate_device(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let Some(target) = self.device_target() else {
+        let Some(target) = self.strict_device_target() else {
             state.record_skipped(
                 "validation",
                 "validate.device",
-                "no target device configured",
+                self.strict_device_skip_reason(),
             );
             return Ok(());
         };
@@ -494,7 +500,7 @@ impl CompilerWorkflow {
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.unitary_decompose_config_for_state(state);
         let decomposer = if let Some(target) = self
-            .device_target()
+            .strict_device_target()
             .filter(|_| state.analysis.has_unitary_gates)
         {
             let context = DeviceTwoQubitSynthesisContext::build(
@@ -534,7 +540,7 @@ impl CompilerWorkflow {
     ) -> Result<(), CompilerError> {
         let config = self.two_qubit_resynthesis_config_for_state(state);
         let resynthesizer = if let Some(target) = self
-            .device_target()
+            .strict_device_target()
             .filter(|_| ResynthesizeTwoQubitBlocks::is_applicable(&state.current))
         {
             let context =
@@ -552,7 +558,7 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
-        if self.device_target().is_none() {
+        if self.routing_device_target().is_none() {
             state.record_skipped(
                 "optimization",
                 "resynthesize.two_qubit_blocks.post_routing",
@@ -586,7 +592,7 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
-        if self.device_target().is_none() {
+        if self.routing_device_target().is_none() {
             state.record_skipped(
                 "translation",
                 "decompose.routing_basis",
@@ -595,10 +601,13 @@ impl CompilerWorkflow {
             return Ok(());
         }
 
+        let preferred_basis = state.target_basis.clone();
         state.apply_transform(
             "translation",
             "decompose.routing_basis",
-            |circuit, analysis| LowerToRoutingBasis::new(None).transform(circuit, Some(analysis)),
+            |circuit, analysis| {
+                LowerToRoutingBasis::new(preferred_basis).transform(circuit, Some(analysis))
+            },
         )
     }
 
@@ -612,7 +621,7 @@ impl CompilerWorkflow {
     fn resource_limits(&self) -> ResourceLimits {
         ResourceLimits {
             max_total_qubits: self
-                .device_target()
+                .routing_device_target()
                 .map(|target| target.device.num_usable_qubits()),
         }
     }
@@ -653,12 +662,13 @@ impl CompilerWorkflow {
     /// the same SABRE router and trial settings. Without a supplied layout, the
     /// workflow derives a layout objective from the configured target device.
     fn apply_layout_and_routing(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let Some(target) = self.device_target() else {
+        let Some(target) = self.routing_device_target() else {
             state.record_skipped("routing", "route.sabre", "no target device configured");
             return Ok(());
         };
 
-        let device = &target.device;
+        let routing_device = self.routing_device(target)?;
+        let device = &routing_device;
         let config = sabre_config_for_mode(self.config.mode, target.seed);
         let (route_changed, swap_count, trials_evaluated, supplied_layout) =
             if let Some(initial_layout) = target.initial_layout.as_ref() {
@@ -720,7 +730,7 @@ impl CompilerWorkflow {
     }
 
     fn apply_post_routing_cleanup(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        if self.device_target().is_none() {
+        if self.routing_device_target().is_none() {
             state.record_skipped(
                 "optimization",
                 "optimize.post_routing",
@@ -862,11 +872,19 @@ impl CompilerWorkflow {
     /// Resolves an explicit basis target. Device capabilities are local and
     /// ordered, so they are handled by the exact device-lowering stage.
     fn resolve_target_basis(&self) -> Result<Option<Vec<Instruction>>, CompilerError> {
-        if let CompileTarget::Basis(target_basis) = &self.config.target {
-            validate_workflow_target_basis_config(target_basis)?;
-            return Ok(Some(target_basis.to_vec()));
-        }
-        Ok(None)
+        let target_basis = match &self.config.target {
+            CompileTarget::Basis(target_basis)
+            | CompileTarget::TopologyBasis {
+                basis: target_basis,
+                ..
+            } => Some(target_basis),
+            CompileTarget::Logical | CompileTarget::Device(_) => None,
+        };
+        let Some(target_basis) = target_basis else {
+            return Ok(None);
+        };
+        validate_workflow_target_basis_config(target_basis)?;
+        Ok(Some(target_basis.to_vec()))
     }
 
     fn record_pre_init(&self, state: &mut WorkflowState) {
@@ -878,8 +896,12 @@ impl CompilerWorkflow {
             (CompileTarget::Device(_), _) => {
                 Some("resolved device target with ordered native capabilities".to_string())
             }
+            (CompileTarget::TopologyBasis { .. }, Some(basis)) => Some(format!(
+                "resolved device topology with explicit target basis containing {} instructions",
+                basis.len()
+            )),
             (CompileTarget::Logical, _) => Some("no target constraints configured".to_string()),
-            (CompileTarget::Basis(_), None) => None,
+            (CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. }, None) => None,
         };
 
         state.steps.push(WorkflowStepReport {
@@ -891,11 +913,82 @@ impl CompilerWorkflow {
         });
     }
 
-    fn device_target(&self) -> Option<&DeviceCompileTarget> {
+    fn routing_device_target(&self) -> Option<&DeviceCompileTarget> {
         match &self.config.target {
             CompileTarget::Device(target) => Some(target),
+            CompileTarget::TopologyBasis { device_target, .. } => Some(device_target),
             CompileTarget::Logical | CompileTarget::Basis(_) => None,
         }
+    }
+
+    fn strict_device_target(&self) -> Option<&DeviceCompileTarget> {
+        match &self.config.target {
+            CompileTarget::Device(target) => Some(target),
+            CompileTarget::Logical
+            | CompileTarget::Basis(_)
+            | CompileTarget::TopologyBasis { .. } => None,
+        }
+    }
+
+    fn strict_device_skip_reason(&self) -> &'static str {
+        if matches!(self.config.target, CompileTarget::TopologyBasis { .. }) {
+            "topology target does not require exact device-native output"
+        } else {
+            "no target device configured"
+        }
+    }
+
+    fn routing_device(&self, target: &DeviceCompileTarget) -> Result<Device, CompilerError> {
+        if matches!(self.config.target, CompileTarget::Device(_)) {
+            return Ok(target.device.clone());
+        }
+
+        let qubits = target.device.qubits().collect::<Vec<_>>();
+        let couplings = target
+            .device
+            .topology()
+            .undirected_edges()
+            .flat_map(|(a, b)| {
+                [
+                    (a, b, "loose-topology".to_string()),
+                    (b, a, "loose-topology".to_string()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let topology = Topology::new(qubits.clone(), couplings).map_err(|error| {
+            CompilerError::InvariantViolation(format!(
+                "failed to construct loose routing topology: {error}"
+            ))
+        })?;
+        let mut device = Device::new(
+            format!("{} (loose topology)", target.device.name()),
+            qubits.into_iter().collect(),
+            topology,
+        )
+        .map_err(|error| {
+            CompilerError::InvariantViolation(format!(
+                "failed to construct loose routing device: {error}"
+            ))
+        })?;
+        device
+            .set_invalid_qubits(target.device.invalid_qubits().collect())
+            .map_err(|error| {
+                CompilerError::InvariantViolation(format!(
+                    "failed to copy loose routing availability: {error}"
+                ))
+            })?;
+        let gates = match &self.config.target {
+            CompileTarget::TopologyBasis { basis, .. } => basis.clone(),
+            CompileTarget::Logical | CompileTarget::Basis(_) | CompileTarget::Device(_) => {
+                unreachable!("strict and non-routing targets returned before loose device setup")
+            }
+        };
+        device.set_native_gates(gates).map_err(|error| {
+            CompilerError::InvariantViolation(format!(
+                "failed to configure loose routing instructions: {error}"
+            ))
+        })?;
+        Ok(device)
     }
 }
 
