@@ -43,7 +43,7 @@
 //! lowering. Native optimization is re-legalized and costed on exact physical
 //! qargs; device validation remains terminal, with no transform after it.
 
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
 use crate::compile::CompilerError;
 use crate::compile::physical_target::PhysicalLayoutGraph;
 use crate::compile::resource::ResourceLimits;
@@ -58,8 +58,9 @@ use crate::compile::transform::decompose::{
 use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, DeviceLowerer, KnowledgeRewriter, LayoutObjective,
-    LowerToRoutingBasis, ResynthesizeTwoQubitBlocks, RewriteConfig, TargetBasisLowerer,
-    TransformResult, Transformer, TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
+    LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig,
+    TargetBasisLowerer, TransformResult, Transformer, TwoQubitBlockResynthesisConfig, route_sabre,
+    route_with_layout,
 };
 
 use super::{
@@ -90,6 +91,8 @@ struct WorkflowState {
     target_basis: Option<Vec<Instruction>>,
     two_qubit_target: TwoQubitSynthesisTarget,
     device_metadata: Option<DeviceCompilationMetadata>,
+    one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
+    pending_one_qubit_resynthesis: bool,
 }
 
 impl WorkflowState {
@@ -159,6 +162,13 @@ impl CompilerWorkflow {
     /// execution metadata.
     pub fn run(&self, circuit: &Circuit) -> Result<CompileResult, CompilerError> {
         let resolved_target = self.resolve_target_basis()?;
+        let one_qubit_optimizer = match &self.config.target {
+            CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
+            CompileTarget::Basis(target_basis) => {
+                Some(OptimizeOneQubitRuns::basis(target_basis.clone())?)
+            }
+            CompileTarget::Device(_) => None,
+        };
         let two_qubit_target =
             TwoQubitSynthesisTarget::from_instructions(resolved_target.as_deref())?;
         let mut state = WorkflowState {
@@ -169,6 +179,8 @@ impl CompilerWorkflow {
             target_basis: resolved_target,
             two_qubit_target,
             device_metadata: None,
+            one_qubit_optimizer,
+            pending_one_qubit_resynthesis: false,
         };
 
         self.record_pre_init(&mut state);
@@ -231,7 +243,10 @@ impl CompilerWorkflow {
             "optimization",
             "resynthesize.two_qubit_blocks",
             DeviceSynthesisPlacement::PreLayoutEnvelope,
-        )
+        )?;
+        state.pending_one_qubit_resynthesis =
+            self.apply_one_qubit_optimization(state, "optimize.one_qubit.post_decomposition")?;
+        Ok(())
     }
 
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -243,7 +258,8 @@ impl CompilerWorkflow {
             |circuit, analysis| {
                 KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
             },
-        )
+        )?;
+        self.close_one_qubit_resynthesis(state)
     }
 
     /// Applies optional routing-basis lowering before physical routing.
@@ -282,6 +298,34 @@ impl CompilerWorkflow {
                     KnowledgeRewriter::new(cleanup_config).transform(circuit, Some(analysis))
                 },
             )?;
+        }
+        if matches!(self.config.target, CompileTarget::Basis(_)) {
+            let changed =
+                self.apply_one_qubit_optimization(state, "optimize.one_qubit.post_translation")?;
+            if changed {
+                self.apply_target_translation_named(
+                    state,
+                    "translate.target_basis.after_one_qubit",
+                )?;
+            } else {
+                state.record_skipped(
+                    "translation",
+                    "translate.target_basis.after_one_qubit",
+                    "post-translation one-qubit optimization was stable",
+                );
+            }
+            self.validate_explicit_target_basis(state)?;
+        } else {
+            state.record_skipped(
+                "optimization",
+                "optimize.one_qubit.post_translation",
+                "no explicit basis target configured",
+            );
+            state.record_skipped(
+                "translation",
+                "translate.target_basis.after_one_qubit",
+                "no explicit basis target configured",
+            );
         }
         Ok(())
     }
@@ -695,23 +739,124 @@ impl CompilerWorkflow {
         )
     }
 
-    fn apply_target_translation(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let Some(target_basis) = state.target_basis.as_deref() else {
+    fn apply_one_qubit_optimization(
+        &self,
+        state: &mut WorkflowState,
+        name: &'static str,
+    ) -> Result<bool, CompilerError> {
+        let Some(optimizer) = state.one_qubit_optimizer.take() else {
             state.record_skipped(
-                "translation",
-                "translate.target_basis",
-                "no target basis configured",
+                "optimization",
+                name,
+                "device target uses exact-physical native one-qubit optimization",
             );
+            return Ok(false);
+        };
+        let result = state.apply_transform("optimization", name, |circuit, analysis| {
+            optimizer.transform(circuit, Some(analysis))
+        });
+        state.one_qubit_optimizer = Some(optimizer);
+        result?;
+        Ok(state.steps.last().is_some_and(|step| step.changed))
+    }
+
+    fn close_one_qubit_resynthesis(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        if matches!(self.config.target, CompileTarget::Device(_)) {
+            state.record_skipped(
+                "optimization",
+                "optimize.one_qubit_fixed_point",
+                "device target closes local optimization after exact native lowering",
+            );
+            state.pending_one_qubit_resynthesis = false;
+            return Ok(());
+        }
+
+        let max_rounds = match self.config.mode {
+            CompileMode::Normal => 2,
+            CompileMode::Enhanced => 4,
+        };
+        let before = state.current.clone();
+        let mut rounds = 0u8;
+        let mut needs_resynthesis = state.pending_one_qubit_resynthesis;
+        while rounds < max_rounds {
+            rounds += 1;
+            let local_changed =
+                self.apply_one_qubit_optimization(state, "optimize.one_qubit.after_rewrite")?;
+            needs_resynthesis |= local_changed;
+            if !needs_resynthesis {
+                break;
+            }
+
+            let before_resynthesis = state.current.clone();
+            self.apply_two_qubit_resynthesis(
+                state,
+                "optimization",
+                "resynthesize.two_qubit_blocks.after_one_qubit",
+                DeviceSynthesisPlacement::PreLayoutEnvelope,
+            )?;
+            let resynthesis_changed = state.current != before_resynthesis;
+            let cleanup_changed = if resynthesis_changed {
+                self.apply_one_qubit_optimization(state, "optimize.one_qubit.after_resynthesis")?
+            } else {
+                state.record_skipped(
+                    "optimization",
+                    "optimize.one_qubit.after_resynthesis",
+                    "two-qubit resynthesis was stable",
+                );
+                false
+            };
+            needs_resynthesis = cleanup_changed;
+            if !resynthesis_changed && !cleanup_changed {
+                break;
+            }
+        }
+        state.pending_one_qubit_resynthesis = false;
+        state.steps.push(WorkflowStepReport {
+            stage: "optimization",
+            name: "optimize.one_qubit_fixed_point",
+            changed: state.current != before,
+            skipped: false,
+            reason: Some(format!("rounds={rounds}; max_rounds={max_rounds}")),
+        });
+        Ok(())
+    }
+
+    fn apply_target_translation(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        self.apply_target_translation_named(state, "translate.target_basis")
+    }
+
+    fn apply_target_translation_named(
+        &self,
+        state: &mut WorkflowState,
+        name: &'static str,
+    ) -> Result<(), CompilerError> {
+        let Some(target_basis) = state.target_basis.as_deref() else {
+            state.record_skipped("translation", name, "no target basis configured");
             return Ok(());
         };
         let target_basis = target_basis.to_vec();
         let lowerer = TargetBasisLowerer::new(target_basis)?;
 
-        state.apply_transform(
-            "translation",
-            "translate.target_basis",
-            |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
-        )
+        state.apply_transform("translation", name, |circuit, analysis| {
+            lowerer.transform(circuit, Some(analysis))
+        })
+    }
+
+    fn validate_explicit_target_basis(
+        &self,
+        state: &mut WorkflowState,
+    ) -> Result<(), CompilerError> {
+        let Some(target_basis) = state.target_basis.as_deref() else {
+            return Ok(());
+        };
+        let allowed = target_basis
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Standard(gate) => Some(*gate),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        validate_operations_in_target_basis(state.current.operations(), &allowed)
     }
 
     /// Resolves an explicit basis target. Device capabilities are local and
@@ -797,6 +942,54 @@ fn validate_workflow_target_basis_config(
             return Err(CompilerError::InvalidInput(format!(
                 "unsupported workflow target instruction {instruction:?}"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_operations_in_target_basis(
+    operations: &[Operation],
+    allowed: &std::collections::HashSet<StandardGate>,
+) -> Result<(), CompilerError> {
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(gate)
+                if *gate != StandardGate::GPhase && !allowed.contains(gate) =>
+            {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "target-basis one-qubit cleanup left gate {gate:?} outside the configured basis"
+                )));
+            }
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    validate_operations_in_target_basis(op.then_body().operations(), allowed)?;
+                    if let Some(body) = op.else_body() {
+                        validate_operations_in_target_basis(body.operations(), allowed)?;
+                    }
+                }
+                ClassicalControlOp::While(op) => {
+                    validate_operations_in_target_basis(op.body().operations(), allowed)?;
+                }
+                ClassicalControlOp::For(op) => {
+                    validate_operations_in_target_basis(op.body().operations(), allowed)?;
+                }
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        validate_operations_in_target_basis(case.body().operations(), allowed)?;
+                    }
+                    if let Some(body) = op.default() {
+                        validate_operations_in_target_basis(body.operations(), allowed)?;
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "target-basis one-qubit cleanup left gate-like instruction {} outside the configured basis",
+                    operation.instruction
+                )));
+            }
+            _ => {}
         }
     }
     Ok(())

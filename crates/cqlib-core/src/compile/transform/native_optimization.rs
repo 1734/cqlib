@@ -38,6 +38,7 @@ use crate::compile::transform::decompose::unitary::{
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::resynthesis::TwoQubitBlockResynthesisConfig;
+use crate::compile::transform::target_basis::{TargetBasisCost, TargetBasisCostModel};
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, DeviceLowerer, ResynthesizeTwoQubitBlocks, TransformResult,
     Transformer,
@@ -334,13 +335,30 @@ impl Transformer for OptimizeNativeLocalGates {
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
     ) -> Result<TransformResult, CompilerError> {
-        NativeLocalPass::run(circuit, &self.device_context)
+        let policy = LocalOptimizationPolicy::Device(self.device_context.clone());
+        LocalOneQPass::run(circuit, &policy)
     }
 }
 
-struct NativeLocalPass<'a> {
-    source: &'a Circuit,
-    context: &'a DeviceTwoQubitSynthesisContext,
+/// Cost policy used by the shared one-qubit/frame optimization engine.
+#[derive(Debug, Clone)]
+pub(crate) enum LocalOptimizationPolicy {
+    Logical,
+    Basis(TargetBasisCostModel),
+    Device(DeviceTwoQubitSynthesisContext),
+}
+
+/// Runs the shared one-qubit/frame optimizer with an explicit cost policy.
+pub(crate) fn optimize_one_qubit_runs_with_policy(
+    circuit: &Circuit,
+    policy: &LocalOptimizationPolicy,
+) -> Result<TransformResult, CompilerError> {
+    LocalOneQPass::run(circuit, policy)
+}
+
+struct LocalOneQPass<'source, 'policy> {
+    source: &'source Circuit,
+    policy: &'policy LocalOptimizationPolicy,
     rebuild: CircuitRebuildContext,
 }
 
@@ -350,16 +368,16 @@ struct SequenceRewrite {
     changed: bool,
 }
 
-impl<'a> NativeLocalPass<'a> {
+impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
     fn run(
-        source: &'a Circuit,
-        context: &'a DeviceTwoQubitSynthesisContext,
+        source: &'source Circuit,
+        policy: &'policy LocalOptimizationPolicy,
     ) -> Result<TransformResult, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut pass = Self {
             source,
-            context,
+            policy,
             rebuild,
         };
         let rewrite = pass.process_sequence(source.operations(), &root_classical)?;
@@ -405,12 +423,27 @@ impl<'a> NativeLocalPass<'a> {
             }
         }
 
-        let framed = propagate_frames(values)?;
-        let fused = fuse_one_qubit_runs(framed.operations, self.context)?;
+        let optimized = match self.policy {
+            LocalOptimizationPolicy::Device(_) => {
+                // Preserve the existing native behavior: frame movement is
+                // speculative within a native round, while the outer minimum
+                // point controller decides whether the whole round survives.
+                let framed = propagate_frames(values)?;
+                let fused = fuse_one_qubit_runs(framed.operations, self.policy)?;
+                ValueRewrite {
+                    operations: fused.operations,
+                    phase_delta: framed.phase_delta + fused.phase_delta,
+                    changed: framed.changed || fused.changed,
+                }
+            }
+            LocalOptimizationPolicy::Logical | LocalOptimizationPolicy::Basis(_) => {
+                optimize_transactional(values, self.policy)?
+            }
+        };
         Ok(SequenceRewrite {
-            operations: fused.operations,
-            phase_delta: framed.phase_delta + fused.phase_delta,
-            changed: nested_changed || framed.changed || fused.changed,
+            operations: optimized.operations,
+            phase_delta: optimized.phase_delta,
+            changed: nested_changed || optimized.changed,
         })
     }
 
@@ -523,11 +556,146 @@ struct ValueRewrite {
     changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct LogicalOneQCost {
+    one_qubit_ops: usize,
+    affected_region_depth: usize,
+    total_gate_ops: usize,
+}
+
+impl LocalOptimizationPolicy {
+    fn strictly_better(
+        &self,
+        candidate: &[ValueOperation],
+        source: &[ValueOperation],
+    ) -> Result<bool, CompilerError> {
+        Ok(match self {
+            Self::Logical => logical_one_qubit_cost(candidate) < logical_one_qubit_cost(source),
+            Self::Basis(model) => {
+                let Some(before) = basis_cost(model, source)? else {
+                    return Ok(false);
+                };
+                let Some(after) = basis_cost(model, candidate)? else {
+                    return Ok(false);
+                };
+                after.two_qubit_ops <= before.two_qubit_ops
+                    && compare_basis_cost(after, before).is_lt()
+            }
+            Self::Device(context) => {
+                let Some(before) = context.exact_sequence_cost(source) else {
+                    return Ok(false);
+                };
+                let Some(after) = context.exact_sequence_cost(candidate) else {
+                    return Ok(false);
+                };
+                after.strictly_better_than(before)
+            }
+        })
+    }
+}
+
+fn optimize_transactional(
+    operations: Vec<ValueOperation>,
+    policy: &LocalOptimizationPolicy,
+) -> Result<ValueRewrite, CompilerError> {
+    let framed = propagate_frames(operations.clone())?;
+    let fused_after_frames = fuse_one_qubit_runs(framed.operations, policy)?;
+    let combined_phase = framed.phase_delta + fused_after_frames.phase_delta;
+    let combined_changed = framed.changed || fused_after_frames.changed;
+    if combined_changed && policy.strictly_better(&fused_after_frames.operations, &operations)? {
+        return Ok(ValueRewrite {
+            operations: fused_after_frames.operations,
+            phase_delta: combined_phase,
+            changed: true,
+        });
+    }
+
+    // A neutral or harmful frame movement must not hide an independently
+    // useful one-qubit fusion on the original sequence.
+    fuse_one_qubit_runs(operations, policy)
+}
+
+fn logical_one_qubit_cost(operations: &[ValueOperation]) -> LogicalOneQCost {
+    let mut depths = HashMap::<Qubit, usize>::new();
+    let mut cost = LogicalOneQCost::default();
+    for operation in operations {
+        let ValueInstruction::Instruction(Instruction::Standard(gate)) = operation.instruction
+        else {
+            continue;
+        };
+        if gate == StandardGate::GPhase {
+            continue;
+        }
+        cost.total_gate_ops += 1;
+        if gate.num_qubits() == 1 && operation.qubits.len() == 1 {
+            cost.one_qubit_ops += 1;
+        }
+        if operation.qubits.is_empty() {
+            continue;
+        }
+        let next = operation
+            .qubits
+            .iter()
+            .filter_map(|qubit| depths.get(qubit))
+            .max()
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        for &qubit in &operation.qubits {
+            depths.insert(qubit, next);
+        }
+        cost.affected_region_depth = cost.affected_region_depth.max(next);
+    }
+    cost
+}
+
+fn basis_cost(
+    model: &TargetBasisCostModel,
+    operations: &[ValueOperation],
+) -> Result<Option<TargetBasisCost>, CompilerError> {
+    let operations = operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation.instruction,
+                ValueInstruction::Instruction(Instruction::Standard(_))
+            ) && operation.params.iter().all(
+                |parameter| matches!(parameter, ParameterValue::Fixed(value) if value.is_finite()),
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if operations.is_empty() {
+        return Ok(Some(TargetBasisCost::default()));
+    }
+    let mut qubits = operations
+        .iter()
+        .flat_map(|operation| operation.qubits.iter().copied())
+        .collect::<Vec<_>>();
+    qubits.sort_by_key(|qubit| qubit.index());
+    qubits.dedup();
+    match model.cost_of_fixed_operations(qubits, operations) {
+        Ok(cost) => Ok(Some(cost)),
+        Err(CompilerError::InvalidInput(_)) | Err(CompilerError::TransformFailed { .. }) => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn compare_basis_cost(left: TargetBasisCost, right: TargetBasisCost) -> std::cmp::Ordering {
+    left.two_qubit_ops
+        .cmp(&right.two_qubit_ops)
+        .then_with(|| left.depth.cmp(&right.depth))
+        .then_with(|| left.total_ops.cmp(&right.total_ops))
+        .then_with(|| left.parameterized_ops.cmp(&right.parameterized_ops))
+}
+
 /// Replaces fixed numeric 1Q runs only when the synthesized unitary has a
 /// strictly better exact-physical device cost than the original run.
 fn fuse_one_qubit_runs(
     operations: Vec<ValueOperation>,
-    context: &DeviceTwoQubitSynthesisContext,
+    policy: &LocalOptimizationPolicy,
 ) -> Result<ValueRewrite, CompilerError> {
     let runs = collect_one_qubit_runs(&operations);
     let mut replacements = HashMap::<usize, (Vec<usize>, Vec<ValueOperation>)>::new();
@@ -538,9 +706,6 @@ fn fuse_one_qubit_runs(
             .iter()
             .map(|order| operations[*order].clone())
             .collect::<Vec<_>>();
-        let Some(before_cost) = context.exact_sequence_cost(&source_ops) else {
-            continue;
-        };
         let Some(matrix) = one_qubit_run_matrix(&source_ops) else {
             continue;
         };
@@ -555,10 +720,7 @@ fn fuse_one_qubit_runs(
         {
             candidate.push(u_operation(qubit, decomposition));
         }
-        let Some(after_cost) = context.exact_sequence_cost(&candidate) else {
-            continue;
-        };
-        if !after_cost.strictly_better_than(before_cost) {
+        if !policy.strictly_better(&candidate, &source_ops)? {
             continue;
         }
         phase_delta += decomposition.global_phase;

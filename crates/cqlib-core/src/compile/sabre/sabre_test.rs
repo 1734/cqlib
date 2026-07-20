@@ -11,6 +11,7 @@
 // that they have been altered from the originals.
 
 use super::*;
+use crate::circuit::circuit_to_matrix;
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Directive,
     Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
@@ -22,6 +23,57 @@ use crate::device::{
 };
 use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
+
+fn basis_index_under_layout(index: usize, layout: &Layout, width: usize) -> usize {
+    let mut mapped = 0usize;
+    for logical in 0..width {
+        if index & (1usize << logical) == 0 {
+            continue;
+        }
+        let physical = layout
+            .get_physical(LogicalQubit::new(logical as u32))
+            .expect("test layout must map every logical qubit");
+        mapped |= 1usize << physical.id() as usize;
+    }
+    mapped
+}
+
+#[test]
+fn routing_matrix_matches_initial_and_final_layout_permutations() {
+    let mut circuit = Circuit::new(4);
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.ry(Qubit::new(3), -0.37).unwrap();
+    circuit.rzz(Qubit::new(1), Qubit::new(3), 0.41).unwrap();
+    circuit.cx(Qubit::new(2), Qubit::new(1)).unwrap();
+    let initial = Layout::from_pairs(&[(0, 3), (1, 0), (2, 2), (3, 1)], 4).unwrap();
+    let device = Device::line("semantic-line", 4).unwrap();
+
+    let routed = sabre_route(
+        &circuit,
+        &device,
+        &initial,
+        &SabreConfig::deterministic_seeded(29),
+    )
+    .unwrap();
+    let logical_matrix = circuit_to_matrix(&circuit, None).unwrap();
+    let physical_matrix = circuit_to_matrix(&routed.circuit, None).unwrap();
+    let dimension = 1usize << 4;
+
+    for logical_input in 0..dimension {
+        let physical_input = basis_index_under_layout(logical_input, &routed.initial_layout, 4);
+        for logical_output in 0..dimension {
+            let physical_output = basis_index_under_layout(logical_output, &routed.final_layout, 4);
+            let difference = (physical_matrix[[physical_output, physical_input]]
+                - logical_matrix[[logical_output, logical_input]])
+            .norm();
+            assert!(
+                difference < 1e-9,
+                "routing changed semantics at logical ({logical_output}, {logical_input}): {difference}"
+            );
+        }
+    }
+}
 
 #[test]
 fn validate_config_reports_invalid_trial_counts() {

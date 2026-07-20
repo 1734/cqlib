@@ -32,6 +32,7 @@ from . import analysis as analysis
 from . import decompose as decompose
 from . import device_lowering as device_lowering
 from . import layout as layout
+from . import one_qubit_optimization as one_qubit_optimization
 from . import routing as routing
 from . import resynthesis as resynthesis
 from . import target_basis as target_basis
@@ -65,6 +66,7 @@ from .layout import trivial_layout as trivial_layout
 from .layout import trivial_layout_prepared as trivial_layout_prepared
 from .layout import vf2_perfect_layout as vf2_perfect_layout
 from .layout import vf2_perfect_layout_prepared as vf2_perfect_layout_prepared
+from .one_qubit_optimization import OptimizeOneQubitRuns as OptimizeOneQubitRuns
 from .routing import RoutedCircuit as RoutedCircuit
 from .routing import SabreRouteResult as SabreRouteResult
 from .routing import route_sabre as route_sabre
@@ -88,6 +90,7 @@ __all__ = [
     "decompose",
     "device_lowering",
     "layout",
+    "one_qubit_optimization",
     "routing",
     "resynthesis",
     "target_basis",
@@ -98,6 +101,7 @@ __all__ = [
     "Canonicalizer",
     "CanonicalizeResult",
     "canonicalize_circuit",
+    "OptimizeOneQubitRuns",
     "LayoutObjective",
     "Interaction",
     "InteractionGraph",

@@ -60,6 +60,7 @@ pub mod decompose;
 pub mod device_lowering;
 pub mod layout;
 pub(crate) mod native_optimization;
+pub mod one_qubit_optimization;
 pub mod rebuild;
 pub mod resynthesis;
 pub mod rewrite;
@@ -80,6 +81,7 @@ pub use layout::{
     prepare_sabre_circuit, prepare_sabre_device_target, sabre_layout, sabre_layout_prepared,
     trivial_layout, trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
+pub use one_qubit_optimization::OptimizeOneQubitRuns;
 pub use resynthesis::{
     ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
 };

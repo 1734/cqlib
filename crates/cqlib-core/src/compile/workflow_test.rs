@@ -21,8 +21,8 @@ use crate::compile::resource::ResourcePolicy;
 use crate::compile::test_utils::{
     assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
 };
-use crate::compile::transform::CircuitAnalysis;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::{CircuitAnalysis, OptimizeOneQubitRuns};
 use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
     SabreRoutingFailure, compile,
@@ -50,6 +50,7 @@ fn run_workflow(circuit: &Circuit, mode: CompileMode) -> super::CompileResult {
 fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowState {
     let current = Circuit::new(1);
     let two_qubit_target = TwoQubitSynthesisTarget::from_instructions(Some(&target_basis)).unwrap();
+    let one_qubit_optimizer = Some(OptimizeOneQubitRuns::basis(target_basis.clone()).unwrap());
     WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
@@ -58,6 +59,8 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         target_basis: Some(target_basis),
         two_qubit_target,
         device_metadata: None,
+        one_qubit_optimizer,
+        pending_one_qubit_resynthesis: false,
     }
 }
 
@@ -161,10 +164,15 @@ fn normal_workflow_reports_staged_order() {
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "resynthesize.two_qubit_blocks",
+            "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
+            "optimize.one_qubit.after_rewrite",
+            "optimize.one_qubit_fixed_point",
             "decompose.routing_basis",
             "route.sabre",
             "translate.target_basis",
+            "optimize.one_qubit.post_translation",
+            "translate.target_basis.after_one_qubit",
             "canonicalize.output",
             "lower.device_instructions",
             "canonicalize.native_input",
@@ -172,13 +180,28 @@ fn normal_workflow_reports_staged_order() {
             "validate.device",
         ]
     );
-    assert!(result.steps[10].skipped);
-    assert!(result.steps[11].skipped);
-    assert!(result.steps[12].skipped);
-    assert!(result.steps[14].skipped);
-    assert!(result.steps[15].skipped);
-    assert!(result.steps[16].skipped);
-    assert!(result.steps[17].skipped);
+    for name in [
+        "decompose.routing_basis",
+        "route.sabre",
+        "translate.target_basis",
+        "optimize.one_qubit.post_translation",
+        "translate.target_basis.after_one_qubit",
+        "lower.device_instructions",
+        "canonicalize.native_input",
+        "optimize.native_fixed_point",
+        "validate.device",
+    ] {
+        assert!(result.step(name).unwrap().skipped, "{name}");
+    }
+    assert!(
+        result
+            .step("optimize.one_qubit_fixed_point")
+            .unwrap()
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("max_rounds=2")
+    );
 }
 
 #[test]
@@ -241,13 +264,18 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "resynthesize.two_qubit_blocks",
+            "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
+            "optimize.one_qubit.after_rewrite",
+            "optimize.one_qubit_fixed_point",
             "decompose.routing_basis",
             "route.sabre",
             "resynthesize.two_qubit_blocks.post_routing",
             "optimize.post_routing",
             "translate.target_basis",
             "optimize.target_cleanup",
+            "optimize.one_qubit.post_translation",
+            "translate.target_basis.after_one_qubit",
             "canonicalize.output",
             "lower.device_instructions",
             "canonicalize.native_input",
@@ -255,11 +283,24 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "validate.device",
         ]
     );
-    assert!(enhanced.steps[10].skipped);
-    assert!(enhanced.steps[11].skipped);
-    assert!(enhanced.steps[12].skipped);
-    assert!(enhanced.steps[13].skipped);
-    assert!(enhanced.steps[14].skipped);
+    for name in [
+        "decompose.routing_basis",
+        "route.sabre",
+        "resynthesize.two_qubit_blocks.post_routing",
+        "optimize.post_routing",
+        "translate.target_basis",
+    ] {
+        assert!(enhanced.step(name).unwrap().skipped, "{name}");
+    }
+    assert!(
+        enhanced
+            .step("optimize.one_qubit_fixed_point")
+            .unwrap()
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("max_rounds=4")
+    );
     assert!(enhanced.circuit.operations().is_empty());
 }
 
