@@ -22,11 +22,14 @@ from cqlib.compile import (
     CompileConfig,
     CompileMode,
     CompileResult,
+    CompileTarget,
     CompilerConfigError,
     CompilerError,
     CompilerInternalError,
     CompilerTransformError,
     CompilerWorkflow,
+    DeviceCompilationMetadata,
+    DeviceCompileTarget,
     WorkflowStepReport,
     compile,
 )
@@ -70,28 +73,28 @@ def test_compile_config_exposes_immutable_defaults_and_copy_protocol() -> None:
     config = CompileConfig()
 
     assert config.mode == CompileMode.normal()
-    assert config.target_basis is None
-    assert config.device is None
-    assert config.initial_layout is None
+    assert config.target.kind == "logical"
+    assert config.target.basis_instructions is None
+    assert config.target.device_target is None
     assert config.resource_policy == ResourcePolicy()
-    assert config.seed is None
     assert copy.copy(config) is not config
     assert copy.deepcopy(config) is not config
     assert repr(config).startswith("CompileConfig(mode=CompileMode.Normal,")
 
     with pytest.raises(AttributeError):
-        config.seed = 3
+        config.target = CompileTarget.logical()
 
 
-def test_compile_config_takes_target_basis_and_device_snapshots() -> None:
+def test_compile_config_takes_basis_and_device_target_snapshots() -> None:
     basis = ["H"]
     device = Device.line("line-2", 2)
     layout = Layout.from_pairs([(0, 0)], physical_count=2)
     policy = ResourcePolicy(max_pre_layout_clean_ancillas=2)
-    config = CompileConfig(
-        target_basis=basis,
-        device=device,
-        initial_layout=layout,
+    basis_config = CompileConfig(target=CompileTarget.basis(basis))
+    device_config = CompileConfig(
+        target=CompileTarget.device(
+            DeviceCompileTarget(device, initial_layout=layout, seed=7)
+        ),
         resource_policy=policy,
     )
 
@@ -99,22 +102,24 @@ def test_compile_config_takes_target_basis_and_device_snapshots() -> None:
     device.native_gates = [Instruction.from_standard_gate(StandardGate.X)]
     layout.bind(1, 1)
 
-    assert instruction_names(config.target_basis) == ["H"]
-    assert config.device is not None
-    assert config.device.native_gates == []
-    assert config.initial_layout is not None
-    assert config.initial_layout.num_logical == 1
-    assert config.resource_policy == policy
+    assert instruction_names(basis_config.target.basis_instructions) == ["H"]
+    target = device_config.target.device_target
+    assert target is not None
+    assert target.device.native_gates == []
+    assert target.initial_layout is not None
+    assert target.initial_layout.num_logical == 1
+    assert target.seed == 7
+    assert device_config.resource_policy == policy
 
-    returned_device = config.device
-    assert returned_device is not None
+    returned_device = target.device
     returned_device.native_gates = [Instruction.from_standard_gate(StandardGate.Z)]
-    assert config.device is not None
-    assert config.device.native_gates == []
+    target = device_config.target.device_target
+    assert target is not None
+    assert target.device.native_gates == []
 
 
 def test_compiler_workflow_owns_config_snapshot_and_is_reusable() -> None:
-    config = CompileConfig(mode=CompileMode.enhanced(), seed=7)
+    config = CompileConfig(mode=CompileMode.enhanced())
     workflow = CompilerWorkflow(config)
     circuit = Circuit(1)
     circuit.h(0)
@@ -129,7 +134,7 @@ def test_compiler_workflow_owns_config_snapshot_and_is_reusable() -> None:
     assert len(first.circuit.operations) == 0
     assert len(second.circuit.operations) == 0
     assert len(circuit.operations) == 2
-    assert workflow.config.seed == 7
+    assert workflow.config.target.kind == "logical"
     assert workflow.config is not workflow.config
     assert all(isinstance(step, WorkflowStepReport) for step in first.steps)
     assert any(step.name == "optimize.target_cleanup" for step in first.steps)
@@ -140,8 +145,9 @@ def test_compile_and_explicit_workflow_have_equivalent_results() -> None:
     circuit.cx(0, 1)
     basis = ["H", "CZ"]
 
-    direct = compile(circuit, target_basis=basis)
-    explicit = CompilerWorkflow(CompileConfig(target_basis=basis)).run(circuit)
+    target = CompileTarget.basis(basis)
+    direct = compile(circuit, target=target)
+    explicit = CompilerWorkflow(CompileConfig(target=target)).run(circuit)
 
     direct_names = [
         str(operation.instruction) for operation in direct.circuit.operations
@@ -186,24 +192,31 @@ def test_compiler_entry_points_release_gil(run) -> None:
     assert progressed.is_set()
 
 
-def test_workflow_validates_cross_field_configuration_when_run() -> None:
-    config = CompileConfig(
-        initial_layout=Layout.from_pairs([(0, 0)], physical_count=1),
-    )
+def test_device_compile_returns_layout_metadata() -> None:
+    circuit = Circuit(1)
+    circuit.h(0)
+    device = Device.line("native-h", 1)
+    device.native_gates = [Instruction.from_standard_gate(StandardGate.H)]
+    target = CompileTarget.device(DeviceCompileTarget(device, seed=7))
 
-    with pytest.raises(
-        CompilerConfigError, match="initial layout requires a target device"
-    ):
-        CompilerWorkflow(config).run(Circuit(1))
+    result = compile(circuit, target=target)
+
+    assert isinstance(result.device_metadata, DeviceCompilationMetadata)
+    assert result.device_metadata.initial_layout.num_logical == 1
+    assert result.device_metadata.final_layout.num_logical == 1
+    assert copy.copy(result.device_metadata) == result.device_metadata
+    assert result.step("validate.device") is not None
+    assert result.step("missing") is None
+    assert result.step_changed("route.sabre") is False
 
 
 def test_compile_config_rejects_unknown_target_gate_name() -> None:
     with pytest.raises(CompilerConfigError, match="unknown standard gate"):
-        CompileConfig(target_basis=["not-a-gate"])
+        CompileTarget.basis(["not-a-gate"])
 
 
 def test_workflow_rejects_non_standard_target_instruction_when_run() -> None:
-    config = CompileConfig(target_basis=(Instruction.delay(),))
+    config = CompileConfig(target=CompileTarget.basis((Instruction.delay(),)))
 
     with pytest.raises(
         CompilerConfigError, match="unsupported workflow target instruction"

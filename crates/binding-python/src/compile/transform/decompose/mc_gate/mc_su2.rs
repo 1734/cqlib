@@ -11,9 +11,9 @@
 // that they have been altered from the originals.
 
 use super::{compiler_error, into_py_operations};
-use crate::circuit::PyValueOperation;
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit};
 use crate::circuit::operation::extract_parameter_value;
+use crate::circuit::{PyStandardGate, PyValueOperation};
 use cqlib_core::circuit::{ParameterValue, Qubit};
 use cqlib_core::compile::transform::decompose::mc_gate::{
     Su2RotationAxis, decompose_mc_su2_n_clean, decompose_mc_su2_no_aux,
@@ -52,6 +52,16 @@ impl PySu2RotationAxis {
         Self {
             inner: Su2RotationAxis::Z,
         }
+    }
+
+    #[getter]
+    fn rotation_gate(&self) -> PyStandardGate {
+        PyStandardGate::from(self.inner.rotation_gate(), Vec::new())
+    }
+
+    #[getter]
+    fn controlled_rotation_gate(&self) -> PyStandardGate {
+        PyStandardGate::from(self.inner.controlled_rotation_gate(), Vec::new())
     }
 
     fn __repr__(&self) -> &'static str {

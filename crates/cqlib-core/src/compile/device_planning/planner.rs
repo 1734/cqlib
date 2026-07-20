@@ -356,8 +356,9 @@ impl<'a> DevicePlanner<'a> {
         let mut explored = vec![HashSet::<Vec<PlanId>>::new(); self.edges.len()];
         loop {
             let mut changed = false;
-            for edge_id in 0..self.edges.len() {
-                let edge = self.edges[edge_id].clone();
+            let edges = self.edges.clone();
+            for (edge, explored_set) in edges.iter().zip(explored.iter_mut()) {
+                let edge = edge.clone();
                 let child_frontiers = edge
                     .children
                     .iter()
@@ -367,7 +368,7 @@ impl<'a> DevicePlanner<'a> {
                     continue;
                 }
                 for children in PlanCombinations::new(&child_frontiers) {
-                    if !explored[edge_id].insert(children.clone()) {
+                    if !explored_set.insert(children.clone()) {
                         continue;
                     }
                     self.generated_candidates += 1;
@@ -467,11 +468,11 @@ impl<'a> DevicePlanner<'a> {
             .iter()
             .filter(|existing| {
                 let existing = &self.nodes[existing.0];
-                !candidate.dominates(existing)
-                    && !(candidate.physical_cost == existing.physical_cost
+                !(candidate.dominates(existing)
+                    || (candidate.physical_cost == existing.physical_cost
                         && candidate.schedule_profile == existing.schedule_profile
                         && (candidate.derivation_steps, &candidate.stable_key)
-                            < (existing.derivation_steps, &existing.stable_key))
+                            < (existing.derivation_steps, &existing.stable_key)))
             })
             .copied()
             .collect::<Vec<_>>();

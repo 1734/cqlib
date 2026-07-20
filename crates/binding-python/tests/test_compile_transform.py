@@ -285,9 +285,7 @@ def test_rewrite_rejects_invalid_configuration_and_unsatisfied_basis() -> None:
         mode=RewriteMode.lowering(),
         target_instructions=[Instruction.from_standard_gate(StandardGate.CZ)],
     )
-    with pytest.raises(
-        CompilerConfigError, match="target instruction basis not satisfied"
-    ):
+    with pytest.raises(CompilerConfigError, match="lowering incomplete"):
         rewrite_circuit(circuit, config)
 
 
@@ -325,7 +323,9 @@ def test_lower_to_routing_basis_prefers_cz_only_basis() -> None:
         for operation in result.circuit.operations
     ]
 
-    assert transform.preferred_basis == basis
+    assert [instruction.name for instruction in transform.preferred_basis] == [
+        instruction.name for instruction in basis
+    ]
     assert "CCX" not in names
     assert "CX" not in names
     assert "CZ" in names
@@ -333,7 +333,7 @@ def test_lower_to_routing_basis_prefers_cz_only_basis() -> None:
 
 def test_lower_to_routing_basis_reports_route_sabre_contract() -> None:
     circuit = Circuit(3)
-    circuit.unitary(UnitaryGate("three_q", 3), [0, 1, 2])
+    circuit.append_unitary_gate(UnitaryGate("three_q", 3), [0, 1, 2])
 
     with pytest.raises(
         CompilerConfigError,

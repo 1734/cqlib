@@ -30,7 +30,9 @@
 //!   -> optional physical layout and SABRE routing
 //!   -> optional target-basis translation
 //!   -> canonicalized output
-//!   -> exact device instruction lowering and validation
+//!   -> exact device instruction lowering
+//!   -> native-input canonicalization and fixed-point optimization
+//!   -> final device validation
 //! ```
 //!
 //! # Public Entry Points

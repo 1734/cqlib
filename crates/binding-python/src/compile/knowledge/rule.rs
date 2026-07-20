@@ -249,6 +249,11 @@ impl PyVerifyResult {
         matches!(self.status, "equivalent" | "sampled_equal")
     }
 
+    /// Returns whether equivalence verification succeeded.
+    fn is_verified(&self) -> bool {
+        self.passed()
+    }
+
     #[getter]
     fn num_bindings(&self) -> Option<usize> {
         self.num_bindings

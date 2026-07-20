@@ -98,8 +98,9 @@ class Canonicalizer:
         """Canonicalize ``circuit`` without modifying it.
 
         Raises:
-            ValueError: If the circuit is invalid or canonicalization does not
-                reach its declared fixed point.
+            CompilerConfigError: If the configuration is invalid or
+                canonicalization does not reach its declared fixed point.
+            CircuitError: If circuit rebuilding fails.
         """
         ...
     def __repr__(self) -> str:
@@ -148,8 +149,9 @@ def canonicalize_circuit(circuit: Circuit) -> CanonicalizeResult:
         The canonical circuit and fixed-point metadata.
 
     Raises:
-        ValueError: If the circuit is invalid or canonicalization does not
-            reach its declared fixed point.
+        CompilerConfigError: If canonicalization does not reach its declared
+            fixed point.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 

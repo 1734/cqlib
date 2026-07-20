@@ -112,7 +112,9 @@ def expand_definitions(circuit: Circuit) -> TransformResult:
     """Expand circuit-backed definitions without modifying the input.
 
     Raises:
-        ValueError: If a definition is malformed or exceeds recursion limits.
+        CompilerConfigError: If a definition is malformed or exceeds recursion
+            limits.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
@@ -123,7 +125,9 @@ def decompose_unitaries(
     """Synthesize matrix-backed one- and two-qubit unitary gates.
 
     Raises:
-        ValueError: If a unitary is unresolved, invalid, or unsupported.
+        CompilerConfigError: If a unitary is unresolved, invalid, or
+            unsupported.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
@@ -141,7 +145,9 @@ def decompose_mc_gates(
     :func:`decompose_mc_gates_for_device` when decomposition must fit a device.
 
     Raises:
-        ValueError: If decomposition or ancillary-resource validation fails.
+        CompilerConfigError: If decomposition or ancillary-resource validation
+            fails.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
@@ -160,7 +166,9 @@ def decompose_mc_gates_for_device(
     """Decompose multi-controlled gates while enforcing usable device capacity.
 
     Raises:
-        ValueError: If the circuit exceeds device capacity or decomposition fails.
+        CompilerConfigError: If the circuit exceeds device capacity or
+            decomposition fails.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 

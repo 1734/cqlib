@@ -21,8 +21,8 @@ pub mod sabre;
 pub mod transform;
 
 pub use compiler::{
-    PyCompileConfig, PyCompileMode, PyCompileResult, PyCompilerWorkflow, PyWorkflowStepReport,
-    py_compile,
+    PyCompileConfig, PyCompileMode, PyCompileResult, PyCompileTarget, PyCompilerWorkflow,
+    PyDeviceCompilationMetadata, PyDeviceCompileTarget, PyWorkflowStepReport, py_compile,
 };
 
 use pyo3::prelude::*;
@@ -33,8 +33,11 @@ pub(crate) fn register_compile_module(parent: &Bound<'_, PyModule>) -> PyResult<
 
     error::register_errors(&m)?;
     m.add_class::<PyCompileMode>()?;
+    m.add_class::<PyDeviceCompileTarget>()?;
+    m.add_class::<PyCompileTarget>()?;
     m.add_class::<PyCompileConfig>()?;
     m.add_class::<PyWorkflowStepReport>()?;
+    m.add_class::<PyDeviceCompilationMetadata>()?;
     m.add_class::<PyCompileResult>()?;
     m.add_class::<PyCompilerWorkflow>()?;
     m.add_function(pyo3::wrap_pyfunction!(py_compile, &m)?)?;

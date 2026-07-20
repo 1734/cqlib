@@ -67,10 +67,10 @@ pub fn verify_sampling_tolerance() -> f64 {
 ///
 /// | Outcome | Meaning |
 /// |---------|---------|
-/// | [`Equivalent`] | Symbolic or fixed-parameter numeric matrix comparison proved equivalence |
-/// | [`SampledEqual`] | Symbolic verification was insufficient, but parameter sampling passed |
-/// | [`NotEquivalent`] | Symbolic and sampling both failed — suspected rule bug |
-/// | [`Inconclusive`] | Could not generate parameter bindings satisfying `require` conditions |
+/// | [`VerifyResult::Equivalent`] | Symbolic or fixed-parameter numeric matrix comparison proved equivalence |
+/// | [`VerifyResult::SampledEqual`] | Symbolic verification was insufficient, but parameter sampling passed |
+/// | [`VerifyResult::NotEquivalent`] | Symbolic and sampling both failed — suspected rule bug |
+/// | [`VerifyResult::Inconclusive`] | Could not generate parameter bindings satisfying `require` conditions |
 ///
 /// Bare symbolic comparison alone is not sufficient for parametric rules, rules with
 /// `require` / `mod` conditions, or many commutation rules. [`Rule::verify`] falls back

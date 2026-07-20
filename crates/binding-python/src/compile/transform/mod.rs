@@ -12,20 +12,25 @@
 
 //! Python bindings for reusable compiler transforms.
 
+mod analysis;
 mod canonicalize;
 pub mod decompose;
+mod device_lowering;
 pub mod layout;
 pub mod result;
 mod resynthesis;
 mod rewrite;
 pub mod routing;
 mod routing_basis;
+mod target_basis;
 
 use pyo3::prelude::*;
 
+use analysis::register_analysis_module;
 use canonicalize::{
     PyCanonicalizeConfig, PyCanonicalizeResult, PyCanonicalizer, py_canonicalize_circuit,
 };
+use device_lowering::register_device_lowering_module;
 pub(crate) use result::PyTransformResult;
 use resynthesis::register_resynthesis_module;
 use rewrite::{
@@ -33,6 +38,7 @@ use rewrite::{
     PyRewriteMode, py_rewrite_circuit,
 };
 use routing_basis::{PyLowerToRoutingBasis, py_lower_to_routing_basis};
+use target_basis::register_target_basis_module;
 
 /// Registers transform bindings as `_native.compile.transform`.
 pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -53,9 +59,12 @@ pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResul
     m.add_function(pyo3::wrap_pyfunction!(py_lower_to_routing_basis, &m)?)?;
 
     decompose::register_decompose_module(&m)?;
+    register_analysis_module(&m)?;
+    register_device_lowering_module(&m)?;
     layout::register_layout_module(&m)?;
     routing::register_routing_module(&m)?;
     register_resynthesis_module(&m)?;
+    register_target_basis_module(&m)?;
 
     parent.add_submodule(&m)?;
     parent
