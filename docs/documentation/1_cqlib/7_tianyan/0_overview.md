@@ -111,7 +111,7 @@ classDiagram
         +display_name
         +status
         +toll
-        +num_qubits
+        +num_qubits()
         +is_available()
         +run(circuits, shots)
         +run_raw(circuits, shots)
