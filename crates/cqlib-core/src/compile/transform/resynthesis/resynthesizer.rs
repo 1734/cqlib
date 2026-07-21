@@ -22,6 +22,7 @@ use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::collect_two_qubit_blocks_dag;
 use super::selector::{BlockPatch, select_patches_with_device};
+use super::synthesis_cache::{TwoQubitSynthesisCache, TwoQubitSynthesisCacheStats};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
     StandardGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
@@ -126,6 +127,7 @@ fn resynthesize_two_qubit_blocks_with_device(
         rebuild: CircuitRebuildContext::new(circuit),
         config,
         device_context,
+        synthesis_cache: TwoQubitSynthesisCache::default(),
     };
     pass.run()
 }
@@ -135,6 +137,7 @@ struct ResynthesisPass<'a> {
     rebuild: CircuitRebuildContext,
     config: TwoQubitBlockResynthesisConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
+    synthesis_cache: TwoQubitSynthesisCache,
 }
 
 struct SequenceRewrite {
@@ -144,7 +147,13 @@ struct SequenceRewrite {
 }
 
 impl<'a> ResynthesisPass<'a> {
-    fn run(mut self) -> Result<TransformResult, CompilerError> {
+    fn run(self) -> Result<TransformResult, CompilerError> {
+        self.run_with_stats().map(|(result, _)| result)
+    }
+
+    fn run_with_stats(
+        mut self,
+    ) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
         let root_classical = self.rebuild.root_classical().clone();
         let rewrite = self.process_sequence(self.source.operations(), &root_classical)?;
         let mut global_phase = self.source.global_phase();
@@ -154,10 +163,14 @@ impl<'a> ResynthesisPass<'a> {
         let circuit =
             self.rebuild
                 .finish(self.source.qubits(), rewrite.operations, global_phase)?;
-        Ok(TransformResult {
-            circuit,
-            changed: rewrite.changed,
-        })
+        let stats = self.synthesis_cache.stats();
+        Ok((
+            TransformResult {
+                circuit,
+                changed: rewrite.changed,
+            },
+            stats,
+        ))
     }
 
     fn process_sequence(
@@ -174,6 +187,7 @@ impl<'a> ResynthesisPass<'a> {
             &commutation,
             &self.config,
             self.device_context.as_ref(),
+            &mut self.synthesis_cache,
         )?;
 
         if patches.is_empty() {

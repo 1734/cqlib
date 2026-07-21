@@ -12,7 +12,41 @@
 use super::*;
 use crate::circuit::{ClassicalExpr, Qubit};
 use crate::compile::test_utils::assert_compiled_circuit_equivalent;
-use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
+};
+use crate::device::Device;
+
+fn resynthesize_two_qubit_blocks_with_cache_budget(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    budget: usize,
+) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
+    let pass = ResynthesisPass {
+        source: circuit,
+        rebuild: CircuitRebuildContext::new(circuit),
+        config,
+        device_context: None,
+        synthesis_cache: TwoQubitSynthesisCache::new(budget),
+    };
+    pass.run_with_stats()
+}
+
+fn resynthesize_two_qubit_blocks_with_device_cache_budget(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: DeviceTwoQubitSynthesisContext,
+    budget: usize,
+) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
+    ResynthesisPass {
+        source: circuit,
+        rebuild: CircuitRebuildContext::new(circuit),
+        config,
+        device_context: Some(device_context),
+        synthesis_cache: TwoQubitSynthesisCache::new(budget),
+    }
+    .run_with_stats()
+}
 
 fn cx_config() -> TwoQubitBlockResynthesisConfig {
     config_for_native_2q(StandardGate::CX)
@@ -385,4 +419,183 @@ fn numeric_rotation_mixed_block_preserves_semantics() {
     let result = resynthesize_two_qubit_blocks(&circuit, cx_config()).unwrap();
 
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn repeated_blocks_hit_pass_local_synthesis_cache() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.barrier(vec![q0, q1]).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let (result, stats) =
+        resynthesize_two_qubit_blocks_with_cache_budget(&circuit, cx_config(), 4096).unwrap();
+
+    assert!(result.changed);
+    assert!(stats.generic_misses > 0);
+    assert!(stats.generic_hits > 0);
+    assert_eq!(
+        stats.generic_lookups,
+        stats.generic_hits + stats.generic_misses
+    );
+}
+
+#[test]
+fn root_and_control_flow_body_share_synthesis_cache() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit
+        .if_else(
+            ClassicalExpr::bool_literal(true),
+            |body| {
+                body.cx(q0, q1)?;
+                body.cx(q0, q1)
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    let (_, stats) =
+        resynthesize_two_qubit_blocks_with_cache_budget(&circuit, cx_config(), 4096).unwrap();
+
+    assert!(stats.generic_hits > 0);
+    assert_eq!(stats.generic_entries, 1);
+}
+
+#[test]
+fn sibling_control_flow_bodies_share_synthesis_cache() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit
+        .if_else(
+            ClassicalExpr::bool_literal(true),
+            |body| {
+                body.cx(q0, q1)?;
+                body.cx(q0, q1)
+            },
+            |body| {
+                body.cx(q0, q1)?;
+                body.cx(q0, q1)
+            },
+        )
+        .unwrap();
+
+    let (_, stats) =
+        resynthesize_two_qubit_blocks_with_cache_budget(&circuit, cx_config(), 4096).unwrap();
+
+    assert_eq!(stats.generic_misses, 1);
+    assert_eq!(stats.generic_hits, 1);
+    assert_eq!(stats.generic_entries, 1);
+}
+
+#[test]
+fn independent_transforms_do_not_share_synthesis_cache() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let (_, first) =
+        resynthesize_two_qubit_blocks_with_cache_budget(&circuit, cx_config(), 4096).unwrap();
+    let (_, second) =
+        resynthesize_two_qubit_blocks_with_cache_budget(&circuit, cx_config(), 4096).unwrap();
+
+    assert_eq!(first.generic_misses, 1);
+    assert_eq!(second.generic_misses, 1);
+    assert_eq!(first.generic_hits, second.generic_hits);
+}
+
+#[test]
+fn cached_and_uncached_resynthesis_are_bit_exact() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    for _ in 0..3 {
+        circuit.h(q0).unwrap();
+        circuit.cx(q0, q1).unwrap();
+        circuit.rz(q1, 0.37).unwrap();
+        circuit.cx(q0, q1).unwrap();
+        circuit.barrier(vec![q0, q1]).unwrap();
+    }
+
+    let configs = [
+        ("cx", config_for_native_2q(StandardGate::CX)),
+        ("cz", config_for_native_2q(StandardGate::CZ)),
+        ("rzz", config_for_native_2q(StandardGate::RZZ)),
+        ("pauli-fallback", TwoQubitBlockResynthesisConfig::default()),
+    ];
+    for (name, config) in configs {
+        let (cached, cached_stats) =
+            resynthesize_two_qubit_blocks_with_cache_budget(&circuit, config.clone(), 4096)
+                .unwrap();
+        let (uncached, uncached_stats) =
+            resynthesize_two_qubit_blocks_with_cache_budget(&circuit, config, 0).unwrap();
+
+        assert_eq!(cached.changed, uncached.changed, "target={name}");
+        assert_eq!(cached.circuit, uncached.circuit, "target={name}");
+        assert!(cached_stats.generic_hits > 0, "target={name}");
+        assert_eq!(uncached_stats.generic_hits, 0, "target={name}");
+        assert_eq!(
+            uncached_stats.capacity_rejections, uncached_stats.generic_misses,
+            "target={name}"
+        );
+    }
+}
+
+#[test]
+fn device_cached_and_uncached_resynthesis_are_bit_exact() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    for _ in 0..3 {
+        circuit.cx(q0, q1).unwrap();
+        circuit.cx(q0, q1).unwrap();
+        circuit.barrier(vec![q0, q1]).unwrap();
+    }
+    let device = Device::line("resynthesis-device-cache", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    for placement in [
+        DeviceSynthesisPlacement::ExactPhysical,
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+    ] {
+        let context = DeviceTwoQubitSynthesisContext::build(&device, &circuit, placement).unwrap();
+        let (cached, cached_stats) = resynthesize_two_qubit_blocks_with_device_cache_budget(
+            &circuit,
+            cx_config(),
+            context.clone(),
+            4096,
+        )
+        .unwrap();
+        let (uncached, uncached_stats) = resynthesize_two_qubit_blocks_with_device_cache_budget(
+            &circuit,
+            cx_config(),
+            context,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(cached.changed, uncached.changed, "placement={placement:?}");
+        assert_eq!(cached.circuit, uncached.circuit, "placement={placement:?}");
+        assert!(cached_stats.device_hits > 0, "placement={placement:?}");
+        assert_eq!(uncached_stats.device_hits, 0, "placement={placement:?}");
+        assert_eq!(
+            uncached_stats.capacity_rejections, uncached_stats.device_misses,
+            "placement={placement:?}"
+        );
+    }
 }

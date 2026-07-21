@@ -21,6 +21,7 @@ use super::collector::TwoQubitNumericBlock;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::cost::{ResynthesisCost, cost_of_source_ops, value_operations_of_source_ops};
+use super::synthesis_cache::{CachedPlanView, TwoQubitSynthesisCache};
 use crate::circuit::{
     Circuit, Instruction, Parameter, ParameterValue, ValueInstruction, ValueOperation,
     circuit_to_matrix,
@@ -67,7 +68,14 @@ pub(crate) fn select_patches(
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
 ) -> Result<Vec<BlockPatch>, CompilerError> {
-    select_patches_with_device(blocks, ops, commutation, config, None)
+    select_patches_with_device(
+        blocks,
+        ops,
+        commutation,
+        config,
+        None,
+        &mut TwoQubitSynthesisCache::default(),
+    )
 }
 
 pub(crate) fn select_patches_with_device(
@@ -76,6 +84,7 @@ pub(crate) fn select_patches_with_device(
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
     device_context: Option<&DeviceTwoQubitSynthesisContext>,
+    synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<Vec<BlockPatch>, CompilerError> {
     let mut seen = HashSet::new();
     let mut blocks = blocks
@@ -86,8 +95,14 @@ pub(crate) fn select_patches_with_device(
 
     let mut patches = Vec::new();
     for block in blocks {
-        if let Some(patch) = try_synthesize_block(&block, ops, commutation, config, device_context)?
-        {
+        if let Some(patch) = try_synthesize_block(
+            &block,
+            ops,
+            commutation,
+            config,
+            device_context,
+            synthesis_cache,
+        )? {
             patches.push(patch);
         }
     }
@@ -157,6 +172,7 @@ fn try_synthesize_block(
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
     device_context: Option<&DeviceTwoQubitSynthesisContext>,
+    synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<Option<BlockPatch>, CompilerError> {
     let matrix = match block_matrix(block, ops) {
         Ok(matrix) => matrix,
@@ -187,45 +203,53 @@ fn try_synthesize_block(
             commutation,
             device_context,
             before_cost,
+            synthesis_cache,
         );
     }
-    let candidates = match plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
-        matrix: &matrix,
-        qubits: block.qubits,
-        target: config.two_qubit_target.clone(),
-    }) {
-        Ok(candidates) => candidates,
-        Err(_) => return Ok(None),
-    };
+    synthesis_cache.with_generic_plan(
+        &matrix,
+        block.qubits,
+        || {
+            plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+                matrix: &matrix,
+                qubits: block.qubits,
+                target: config.two_qubit_target.clone(),
+            })
+        },
+        |plan| {
+            let CachedPlanView::Candidates(candidates) = plan else {
+                return Ok(None);
+            };
+            for candidate in candidates {
+                if candidate.cost >= before_cost {
+                    continue;
+                }
+                if !commutation.replacements_commute_with_crossed(&crossed, &candidate.operations) {
+                    continue;
+                }
+                if !patch_preserves_relevant_span(
+                    block,
+                    ops,
+                    &candidate.operations,
+                    candidate.global_phase,
+                )? {
+                    continue;
+                }
 
-    for candidate in candidates {
-        if candidate.cost >= before_cost {
-            continue;
-        }
-        if !commutation.replacements_commute_with_crossed(&crossed, &candidate.operations) {
-            continue;
-        }
-        if !patch_preserves_relevant_span(
-            block,
-            ops,
-            &candidate.operations,
-            candidate.global_phase,
-        )? {
-            continue;
-        }
-
-        return Ok(Some(BlockPatch {
-            first_order: block.first_order(),
-            matched_orders: block.matched_orders.clone(),
-            crossed_orders: block.crossed_orders.clone(),
-            replacement: candidate.operations,
-            before_cost,
-            after_cost: candidate.cost,
-            device_after_cost: None,
-            synthesis_phase: candidate.global_phase,
-        }));
-    }
-    Ok(None)
+                return Ok(Some(BlockPatch {
+                    first_order: block.first_order(),
+                    matched_orders: block.matched_orders.clone(),
+                    crossed_orders: block.crossed_orders.clone(),
+                    replacement: candidate.operations.clone(),
+                    before_cost,
+                    after_cost: candidate.cost,
+                    device_after_cost: None,
+                    synthesis_phase: candidate.global_phase,
+                }));
+            }
+            Ok(None)
+        },
+    )?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -238,6 +262,7 @@ fn try_synthesize_device_block(
     commutation: &CachedCommutation,
     context: &DeviceTwoQubitSynthesisContext,
     before_cost: ResynthesisCost,
+    synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<Option<BlockPatch>, CompilerError> {
     let source_operations = match value_operations_of_source_ops(matched) {
         Ok(operations) => operations,
@@ -258,76 +283,81 @@ fn try_synthesize_device_block(
             (cost, None)
         }
     };
-    let candidates = match plan_numeric_2q_unitary_for_device(matrix, block.qubits, context) {
-        Ok(candidates) => candidates,
-        Err(_) => return Ok(None),
-    };
-
-    let mut best: Option<(DeviceTwoQubitSynthesisCandidate, DevicePhysicalCost)> = None;
-    for candidate in candidates {
-        let device_after_cost = match context.placement() {
-            DeviceSynthesisPlacement::PreLayoutEnvelope => {
-                let Some(source_domain) = source_domain.as_ref() else {
-                    continue;
+    synthesis_cache.with_device_plan(
+        matrix,
+        block.qubits,
+        || plan_numeric_2q_unitary_for_device(matrix, block.qubits, context),
+        |plan| {
+            let CachedPlanView::Candidates(candidates) = plan else {
+                return Ok(None);
+            };
+            let mut best: Option<(&DeviceTwoQubitSynthesisCandidate, DevicePhysicalCost)> = None;
+            for candidate in candidates {
+                let device_after_cost = match context.placement() {
+                    DeviceSynthesisPlacement::PreLayoutEnvelope => {
+                        let Some(source_domain) = source_domain.as_ref() else {
+                            continue;
+                        };
+                        let Some(evaluation) = candidate.pre_layout.as_ref() else {
+                            continue;
+                        };
+                        if !source_domain.is_subset(&evaluation.domain) {
+                            continue;
+                        }
+                        let Some(cost) = context.worst_cost_on_domain(
+                            &candidate.candidate.operations,
+                            block.qubits,
+                            source_domain,
+                        ) else {
+                            continue;
+                        };
+                        cost
+                    }
+                    DeviceSynthesisPlacement::ExactPhysical => candidate.physical_cost,
                 };
-                let Some(evaluation) = candidate.pre_layout.as_ref() else {
-                    continue;
-                };
-                if !source_domain.is_subset(&evaluation.domain) {
+                if !device_after_cost.strictly_better_than(device_before_cost) {
                     continue;
                 }
-                let Some(cost) = context.worst_cost_on_domain(
-                    &candidate.candidate.operations,
-                    block.qubits,
-                    source_domain,
-                ) else {
+                if !commutation
+                    .replacements_commute_with_crossed(crossed, &candidate.candidate.operations)
+                {
                     continue;
-                };
-                cost
+                }
+                if !patch_preserves_relevant_span(
+                    block,
+                    ops,
+                    &candidate.candidate.operations,
+                    candidate.candidate.global_phase,
+                )? {
+                    continue;
+                }
+
+                let replace = best.as_ref().is_none_or(|(current, current_cost)| {
+                    device_after_cost
+                        .compare(*current_cost)
+                        .then_with(|| candidate.candidate.cost.cmp(&current.candidate.cost))
+                        .is_lt()
+                });
+                if replace {
+                    best = Some((candidate, device_after_cost));
+                }
             }
-            DeviceSynthesisPlacement::ExactPhysical => candidate.physical_cost,
-        };
-        if !device_after_cost.strictly_better_than(device_before_cost) {
-            continue;
-        }
-        if !commutation.replacements_commute_with_crossed(crossed, &candidate.candidate.operations)
-        {
-            continue;
-        }
-        if !patch_preserves_relevant_span(
-            block,
-            ops,
-            &candidate.candidate.operations,
-            candidate.candidate.global_phase,
-        )? {
-            continue;
-        }
 
-        let replace = best.as_ref().is_none_or(|(current, current_cost)| {
-            device_after_cost
-                .compare(*current_cost)
-                .then_with(|| candidate.candidate.cost.cmp(&current.candidate.cost))
-                .is_lt()
-        });
-        if replace {
-            best = Some((candidate, device_after_cost));
-        }
-    }
-
-    let Some((candidate, device_after_cost)) = best else {
-        return Ok(None);
-    };
-    let after_cost = candidate.candidate.cost;
-    Ok(Some(BlockPatch {
-        first_order: block.first_order(),
-        matched_orders: block.matched_orders.clone(),
-        crossed_orders: block.crossed_orders.clone(),
-        replacement: candidate.candidate.operations,
-        before_cost,
-        after_cost,
-        device_after_cost: Some(device_after_cost),
-        synthesis_phase: candidate.candidate.global_phase,
-    }))
+            let Some((candidate, device_after_cost)) = best else {
+                return Ok(None);
+            };
+            Ok(Some(BlockPatch {
+                first_order: block.first_order(),
+                matched_orders: block.matched_orders.clone(),
+                crossed_orders: block.crossed_orders.clone(),
+                replacement: candidate.candidate.operations.clone(),
+                before_cost,
+                after_cost: candidate.candidate.cost,
+                device_after_cost: Some(device_after_cost),
+                synthesis_phase: candidate.candidate.global_phase,
+            }))
+        },
+    )?
 }
 
 // Matrix construction uses the same convention as `circuit_to_matrix`: source

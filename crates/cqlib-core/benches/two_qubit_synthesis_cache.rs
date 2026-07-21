@@ -12,9 +12,12 @@
 
 use cqlib_core::circuit::{Circuit, Qubit, StandardGate, UnitaryGate};
 use cqlib_core::compile::transform::decompose::unitary::{
-    UnitaryDecomposeConfig, decompose_unitaries_with_rule_stats,
+    TwoQubitSynthesisTarget, UnitaryDecomposeConfig, decompose_unitaries_with_rule_stats,
 };
-use criterion::{Criterion, criterion_group, criterion_main};
+use cqlib_core::compile::transform::{
+    TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
+};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn repeated_two_qubit_unitaries(repetitions: usize) -> Circuit {
     let matrix = StandardGate::FSIM
@@ -50,6 +53,62 @@ fn benchmark_repeated_two_qubit_synthesis_cache(criterion: &mut Criterion) {
             });
         },
     );
+
+    let repeated = repeated_resynthesis_blocks(128, false);
+    let unique = repeated_resynthesis_blocks(128, true);
+    let config = resynthesis_config();
+    criterion.bench_function("2q_resynthesis/repeated_exact_keys", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                resynthesize_two_qubit_blocks(&repeated, config.clone())
+                    .expect("repeated 2q block resynthesis"),
+            );
+        });
+    });
+    criterion.bench_function("2q_resynthesis/unique_exact_keys", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                resynthesize_two_qubit_blocks(&unique, config.clone())
+                    .expect("unique 2q block resynthesis"),
+            );
+        });
+    });
+}
+
+fn resynthesis_config() -> TwoQubitBlockResynthesisConfig {
+    TwoQubitBlockResynthesisConfig::normal(
+        TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::U, StandardGate::H, StandardGate::RZ],
+            vec![StandardGate::CX],
+            true,
+        )
+        .expect("valid benchmark synthesis target"),
+    )
+}
+
+fn repeated_resynthesis_blocks(blocks: usize, unique: bool) -> Circuit {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    for index in 0..blocks {
+        // Barriers create independent collector regions. The repeated workload
+        // therefore presents the planner with the same exact block key many
+        // times, while the unique workload changes one matrix parameter per
+        // region and measures cache-miss overhead.
+        let angle = if unique {
+            0.1 + index as f64 * 0.001
+        } else {
+            0.37
+        };
+        circuit.h(q0).expect("benchmark H");
+        circuit.cx(q0, q1).expect("benchmark CX");
+        circuit.rz(q1, angle).expect("benchmark RZ");
+        circuit.cx(q0, q1).expect("benchmark CX");
+        circuit
+            .barrier(vec![q0, q1])
+            .expect("benchmark block boundary");
+    }
+    circuit
 }
 
 criterion_group!(benches, benchmark_repeated_two_qubit_synthesis_cache);

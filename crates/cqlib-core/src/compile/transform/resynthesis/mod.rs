@@ -63,6 +63,7 @@ mod cost;
 mod dag_collector;
 mod resynthesizer;
 mod selector;
+mod synthesis_cache;
 
 pub use config::TwoQubitBlockResynthesisConfig;
 pub use resynthesizer::{ResynthesizeTwoQubitBlocks, resynthesize_two_qubit_blocks};

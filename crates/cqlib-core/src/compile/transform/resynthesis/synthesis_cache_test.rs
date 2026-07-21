@@ -1,0 +1,376 @@
+// This code is part of Cqlib.
+//
+// (C) Copyright China Telecom Quantum Group 2026
+//
+// This code is licensed under the Apache License, Version 2.0. You may
+// obtain a copy of this license in the LICENSE.txt file in the root directory
+// of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
+//
+// Any modifications or derivative works of this code must retain this
+// copyright notice, and modified files need to carry a notice indicating
+// that they have been altered from the originals.
+
+use super::*;
+use crate::circuit::{Circuit, Instruction, StandardGate, ValueInstruction, ValueOperation};
+use crate::compile::transform::decompose::unitary::unitary_2q::{
+    TargetAwareSynthesisCost, plan_numeric_2q_unitary_for_device,
+};
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitUnitaryDecomposeBasis,
+};
+use crate::device::Device;
+use smallvec::smallvec;
+
+fn matrix_with(real: f64) -> Array2<Complex64> {
+    let mut matrix = Array2::eye(4);
+    matrix[(0, 0)] = Complex64::new(real, 0.0);
+    matrix
+}
+
+#[test]
+fn exact_key_distinguishes_qargs_bits_and_signed_zero() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let plus_zero = matrix_with(0.0);
+    let minus_zero = matrix_with(-0.0);
+    let next_bit = matrix_with(f64::from_bits(1));
+    let nan_payload_one = matrix_with(f64::from_bits(0x7ff8_0000_0000_0001));
+    let nan_payload_two = matrix_with(f64::from_bits(0x7ff8_0000_0000_0002));
+
+    let base = ExactTwoQubitSynthesisKey::new(&plus_zero, [q0, q1]).unwrap();
+    assert_eq!(
+        base,
+        ExactTwoQubitSynthesisKey::new(&plus_zero, [q0, q1]).unwrap()
+    );
+    assert_ne!(
+        base,
+        ExactTwoQubitSynthesisKey::new(&plus_zero, [q1, q0]).unwrap()
+    );
+    assert_ne!(
+        base,
+        ExactTwoQubitSynthesisKey::new(&minus_zero, [q0, q1]).unwrap()
+    );
+    assert_ne!(
+        base,
+        ExactTwoQubitSynthesisKey::new(&next_bit, [q0, q1]).unwrap()
+    );
+    assert_ne!(
+        ExactTwoQubitSynthesisKey::new(&nan_payload_one, [q0, q1]).unwrap(),
+        ExactTwoQubitSynthesisKey::new(&nan_payload_two, [q0, q1]).unwrap()
+    );
+}
+
+#[test]
+fn key_rejects_non_four_by_four_matrix() {
+    let error = ExactTwoQubitSynthesisKey::new(&Array2::eye(2), [Qubit::new(0), Qubit::new(1)])
+        .unwrap_err();
+    assert!(matches!(error, CompilerError::InvariantViolation(_)));
+}
+
+#[test]
+fn failed_and_empty_generic_plans_are_cached() {
+    let matrix = Array2::eye(4);
+    let qubits = [Qubit::new(0), Qubit::new(1)];
+    let mut failed = TwoQubitSynthesisCache::new(2);
+    let mut calls = 0;
+    for _ in 0..2 {
+        let is_failed = failed
+            .with_generic_plan(
+                &matrix,
+                qubits,
+                || {
+                    calls += 1;
+                    Err(CompilerError::InvariantViolation("planned failure".into()))
+                },
+                |plan| matches!(plan, CachedPlanView::Failed),
+            )
+            .unwrap();
+        assert!(is_failed);
+    }
+    assert_eq!(calls, 1);
+    assert_eq!(failed.stats().generic_misses, 1);
+    assert_eq!(failed.stats().generic_hits, 1);
+    assert_eq!(failed.stats().failed_plan_hits, 1);
+
+    let mut empty = TwoQubitSynthesisCache::new(2);
+    let mut calls = 0;
+    for _ in 0..2 {
+        let length = empty
+            .with_generic_plan(
+                &matrix,
+                qubits,
+                || {
+                    calls += 1;
+                    Ok(Vec::new())
+                },
+                |plan| match plan {
+                    CachedPlanView::Candidates(candidates) => candidates.len(),
+                    CachedPlanView::Failed => usize::MAX,
+                },
+            )
+            .unwrap();
+        assert_eq!(length, 0);
+    }
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn successful_generic_plan_preserves_candidates_and_order() {
+    let matrix = Array2::eye(4);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut cache = TwoQubitSynthesisCache::new(4);
+    let mut calls = 0;
+    let (first, second) = {
+        let mut observe = || {
+            cache
+                .with_generic_plan(
+                    &matrix,
+                    [q0, q1],
+                    || {
+                        calls += 1;
+                        Ok(vec![
+                            TwoQubitSynthesisCandidate {
+                                backend: TwoQubitUnitaryDecomposeBasis::Cx,
+                                operations: Vec::new(),
+                                global_phase: 0.25,
+                                cost: TargetAwareSynthesisCost::default(),
+                            },
+                            TwoQubitSynthesisCandidate {
+                                backend: TwoQubitUnitaryDecomposeBasis::Cz,
+                                operations: Vec::new(),
+                                global_phase: -0.5,
+                                cost: TargetAwareSynthesisCost::default(),
+                            },
+                        ])
+                    },
+                    |plan| match plan {
+                        CachedPlanView::Candidates(candidates) => candidates
+                            .iter()
+                            .map(|candidate| (candidate.backend, candidate.global_phase.to_bits()))
+                            .collect::<Vec<_>>(),
+                        CachedPlanView::Failed => Vec::new(),
+                    },
+                )
+                .unwrap()
+        };
+        (observe(), observe())
+    };
+
+    assert_eq!(calls, 1);
+    assert_eq!(first, second);
+    assert_eq!(
+        first.iter().map(|item| item.0).collect::<Vec<_>>(),
+        vec![
+            TwoQubitUnitaryDecomposeBasis::Cx,
+            TwoQubitUnitaryDecomposeBasis::Cz
+        ]
+    );
+}
+
+#[test]
+fn successful_plan_does_not_reuse_operations_for_reversed_qargs() {
+    let matrix = Array2::eye(4);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut cache = TwoQubitSynthesisCache::new(4);
+    let mut calls = 0;
+
+    for qubits in [[q0, q1], [q0, q1], [q1, q0]] {
+        let cached_qubits = cache
+            .with_generic_plan(
+                &matrix,
+                qubits,
+                || {
+                    calls += 1;
+                    Ok(vec![TwoQubitSynthesisCandidate {
+                        backend: TwoQubitUnitaryDecomposeBasis::Cx,
+                        operations: vec![ValueOperation {
+                            instruction: ValueInstruction::from_instruction(Instruction::Standard(
+                                StandardGate::CX,
+                            )),
+                            qubits: smallvec![qubits[0], qubits[1]],
+                            params: Default::default(),
+                            label: None,
+                        }],
+                        global_phase: 0.0,
+                        cost: TargetAwareSynthesisCost::default(),
+                    }])
+                },
+                |plan| match plan {
+                    CachedPlanView::Candidates(candidates) => {
+                        candidates[0].operations[0].qubits.clone()
+                    }
+                    CachedPlanView::Failed => unreachable!("successful planner"),
+                },
+            )
+            .unwrap();
+        assert_eq!(cached_qubits.as_slice(), &qubits);
+    }
+
+    assert_eq!(calls, 2);
+    assert_eq!(cache.stats().generic_misses, 2);
+    assert_eq!(cache.stats().generic_hits, 1);
+}
+
+#[test]
+fn cache_lookup_is_bit_exact_for_matrix_values() {
+    let qubits = [Qubit::new(0), Qubit::new(1)];
+    let matrices = [
+        matrix_with(0.0),
+        matrix_with(-0.0),
+        matrix_with(f64::from_bits(1)),
+        matrix_with(f64::from_bits(0x7ff8_0000_0000_0001)),
+        matrix_with(f64::from_bits(0x7ff8_0000_0000_0002)),
+    ];
+    let mut cache = TwoQubitSynthesisCache::new(4);
+    let mut calls = 0;
+
+    for matrix in &matrices {
+        cache
+            .with_generic_plan(
+                matrix,
+                qubits,
+                || {
+                    calls += 1;
+                    Ok(Vec::new())
+                },
+                |_| (),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(calls, 5);
+    assert_eq!(cache.stats().generic_misses, 5);
+    assert_eq!(cache.stats().generic_hits, 0);
+}
+
+#[test]
+fn device_plan_is_cached_for_exact_matrix_and_qargs() {
+    let device = Device::line("resynthesis-cache", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    let context = DeviceTwoQubitSynthesisContext::build(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::ExactPhysical,
+    )
+    .unwrap();
+    let matrix = StandardGate::CX.matrix(&[]).unwrap().into_owned();
+    let mut cache = TwoQubitSynthesisCache::new(4);
+    let mut calls = 0;
+
+    for _ in 0..2 {
+        let count = cache
+            .with_device_plan(
+                &matrix,
+                [q0, q1],
+                || {
+                    calls += 1;
+                    plan_numeric_2q_unitary_for_device(&matrix, [q0, q1], &context)
+                },
+                |plan| match plan {
+                    CachedPlanView::Candidates(candidates) => candidates.len(),
+                    CachedPlanView::Failed => 0,
+                },
+            )
+            .unwrap();
+        assert!(count > 0);
+    }
+
+    let reversed_count = cache
+        .with_device_plan(
+            &matrix,
+            [q1, q0],
+            || {
+                calls += 1;
+                plan_numeric_2q_unitary_for_device(&matrix, [q1, q0], &context)
+            },
+            |plan| match plan {
+                CachedPlanView::Candidates(candidates) => candidates.len(),
+                CachedPlanView::Failed => 0,
+            },
+        )
+        .unwrap();
+    assert!(reversed_count > 0);
+
+    assert_eq!(calls, 2);
+    assert_eq!(cache.stats().device_misses, 2);
+    assert_eq!(cache.stats().device_hits, 1);
+    assert_eq!(cache.stats().device_entries, 2);
+}
+
+#[test]
+fn failed_device_plan_is_cached() {
+    let matrix = Array2::eye(4);
+    let qubits = [Qubit::new(0), Qubit::new(1)];
+    let mut cache = TwoQubitSynthesisCache::new(1);
+    let mut calls = 0;
+
+    for _ in 0..2 {
+        let failed = cache
+            .with_device_plan(
+                &matrix,
+                qubits,
+                || {
+                    calls += 1;
+                    Err(CompilerError::InvariantViolation("planned failure".into()))
+                },
+                |plan| matches!(plan, CachedPlanView::Failed),
+            )
+            .unwrap();
+        assert!(failed);
+    }
+
+    assert_eq!(calls, 1);
+    assert_eq!(cache.stats().device_misses, 1);
+    assert_eq!(cache.stats().device_hits, 1);
+    assert_eq!(cache.stats().failed_plan_hits, 1);
+}
+
+#[test]
+fn admission_budget_does_not_change_uncached_result() {
+    let qubits = [Qubit::new(0), Qubit::new(1)];
+    let mut cache = TwoQubitSynthesisCache::new(1);
+    for value in [1.0, 2.0, 2.0] {
+        let matrix = matrix_with(value);
+        let failed = cache
+            .with_generic_plan(
+                &matrix,
+                qubits,
+                || Err(CompilerError::InvariantViolation("failure".into())),
+                |plan| matches!(plan, CachedPlanView::Failed),
+            )
+            .unwrap();
+        assert!(failed);
+    }
+    assert_eq!(cache.stats().generic_entries, 1);
+    assert_eq!(cache.stats().generic_misses, 3);
+    assert_eq!(cache.stats().capacity_rejections, 2);
+}
+
+#[test]
+fn production_budget_bounds_entry_count() {
+    let qubits = [Qubit::new(0), Qubit::new(1)];
+    let mut cache = TwoQubitSynthesisCache::default();
+    for index in 0..=RESYNTHESIS_SYNTHESIS_CACHE_BUDGET {
+        let matrix = matrix_with(f64::from_bits(index as u64));
+        cache
+            .with_generic_plan(&matrix, qubits, || Ok(Vec::new()), |_| ())
+            .unwrap();
+    }
+
+    assert_eq!(
+        cache.stats().generic_entries,
+        RESYNTHESIS_SYNTHESIS_CACHE_BUDGET
+    );
+    assert_eq!(cache.stats().capacity_rejections, 1);
+}
