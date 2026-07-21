@@ -28,6 +28,7 @@ fn resynthesize_two_qubit_blocks_with_cache_budget(
         config,
         device_context: None,
         synthesis_cache: TwoQubitSynthesisCache::new(budget),
+        incremental: None,
     };
     pass.run_with_stats()
 }
@@ -44,6 +45,7 @@ fn resynthesize_two_qubit_blocks_with_device_cache_budget(
         config,
         device_context: Some(device_context),
         synthesis_cache: TwoQubitSynthesisCache::new(budget),
+        incremental: None,
     }
     .run_with_stats()
 }

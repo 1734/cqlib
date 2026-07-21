@@ -213,6 +213,46 @@ fn native_optimizer_reuse_matches_rebuild_on_calibrated_two_qubit_workload() {
 }
 
 #[test]
+fn incremental_resynthesis_matches_full_scan_and_reuses_clean_flat_anchors() {
+    let device = Device::bidirectional_line("native-incremental-reference", 6)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let mut circuit = Circuit::new(6);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    circuit.cx(Qubit::new(2), Qubit::new(3)).unwrap();
+    circuit.cx(Qubit::new(4), Qubit::new(5)).unwrap();
+    let optimizer = NativeOptimizer::new(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        4,
+        2,
+    );
+
+    let (incremental, incremental_stats) = optimizer
+        .run_with_policy(&circuit, NativeResynthesisPolicy::Incremental)
+        .unwrap();
+    let (full_scan, full_stats) = optimizer
+        .run_with_policy(&circuit, NativeResynthesisPolicy::FullScan)
+        .unwrap();
+
+    assert_same_native_result(&incremental, &full_scan);
+    assert!(
+        incremental_stats.anchors_reused >= 2,
+        "incremental result={incremental:?}, stats={incremental_stats:?}"
+    );
+    assert_eq!(full_stats.anchors_reused, 0);
+    assert_eq!(
+        full_stats.anchors_recomputed, full_stats.anchors_total,
+        "the reference policy must recompute every anchor"
+    );
+}
+
+#[test]
 fn native_optimizer_rebuilds_unprepared_candidate_context() {
     let device = Device::line("native-context-fallback", 2)
         .unwrap()

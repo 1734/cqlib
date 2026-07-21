@@ -37,16 +37,20 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::sabre::MetricAvailability;
+#[cfg(test)]
+use crate::compile::transform::ResynthesizeTwoQubitBlocks;
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
     OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::resynthesis::TwoQubitBlockResynthesisConfig;
+use crate::compile::transform::resynthesis::{
+    NativeResynthesisPolicy, NativeResynthesisSession, NativeWorksetStats,
+    TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks_incremental,
+};
 use crate::compile::transform::target_basis::{TargetBasisCost, TargetBasisCostModel};
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, DeviceLowerer, ResynthesizeTwoQubitBlocks, TransformResult,
-    Transformer,
+    Canonicalizer, CircuitAnalysis, DeviceLowerer, TransformResult, Transformer,
 };
 use crate::device::Device;
 use ndarray::Array2;
@@ -102,6 +106,15 @@ impl<'a> NativeOptimizer<'a> {
     }
 
     pub(crate) fn run(&self, circuit: &Circuit) -> Result<NativeOptimizationResult, CompilerError> {
+        self.run_with_policy(circuit, NativeResynthesisPolicy::Incremental)
+            .map(|(result, _)| result)
+    }
+
+    pub(crate) fn run_with_policy(
+        &self,
+        circuit: &Circuit,
+        policy: NativeResynthesisPolicy,
+    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
         let initial = Canonicalizer::production()
             .transform(circuit, None)?
             .circuit;
@@ -120,14 +133,16 @@ impl<'a> NativeOptimizer<'a> {
         let mut rounds = 0;
         let mut stale = 0;
         let mut restored_best = false;
+        let mut resynthesis_session = NativeResynthesisSession::new(policy);
 
         while rounds < self.max_rounds && stale < self.max_stale_rounds {
             rounds += 1;
-            let resynthesized = ResynthesizeTwoQubitBlocks::new_device_aware(
+            let resynthesized = resynthesize_two_qubit_blocks_incremental(
+                &current,
                 self.resynthesis.clone(),
                 context.clone(),
-            )
-            .transform(&current, None)?
+                &mut resynthesis_session,
+            )?
             .circuit;
             let locally_optimized = OptimizeNativeLocalGates::new(context.clone())
                 .transform(&resynthesized, None)?
@@ -170,14 +185,15 @@ impl<'a> NativeOptimizer<'a> {
             restored_best = true;
         }
         let after = summarize_scope_costs(&best_costs);
-        Ok(NativeOptimizationResult {
+        let result = NativeOptimizationResult {
             changed: best != *circuit,
             circuit: best,
             rounds,
             restored_best,
             before,
             after,
-        })
+        };
+        Ok((result, resynthesis_session.stats()))
     }
 
     /// Costs a candidate with the run-scoped context, rebuilding transactionally

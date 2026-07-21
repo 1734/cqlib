@@ -266,7 +266,7 @@ fn operations_equal(lhs: &Operation, rhs: &Operation) -> bool {
         && lhs.label == rhs.label
 }
 
-fn instructions_equal(lhs: &Instruction, rhs: &Instruction) -> bool {
+pub(crate) fn instructions_equal(lhs: &Instruction, rhs: &Instruction) -> bool {
     match (lhs, rhs) {
         (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
         (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,

@@ -21,6 +21,7 @@
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::collect_two_qubit_blocks_dag;
+use super::incremental::{NativeResynthesisSession, NativeScopeId, NativeScopeSegment};
 use super::selector::{BlockPatch, select_patches_with_device};
 use super::synthesis_cache::{TwoQubitSynthesisCache, TwoQubitSynthesisCacheStats};
 use crate::circuit::{
@@ -128,16 +129,40 @@ fn resynthesize_two_qubit_blocks_with_device(
         config,
         device_context,
         synthesis_cache: TwoQubitSynthesisCache::default(),
+        incremental: None,
     };
     pass.run()
 }
 
-struct ResynthesisPass<'a> {
+pub(crate) fn resynthesize_two_qubit_blocks_incremental(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: DeviceTwoQubitSynthesisContext,
+    session: &mut NativeResynthesisSession,
+) -> Result<TransformResult, CompilerError> {
+    session.begin_round(&config);
+    let result = ResynthesisPass {
+        source: circuit,
+        rebuild: CircuitRebuildContext::new(circuit),
+        config,
+        device_context: Some(device_context),
+        synthesis_cache: TwoQubitSynthesisCache::default(),
+        incremental: Some(session),
+    }
+    .run();
+    if result.is_ok() {
+        session.finish_round();
+    }
+    result
+}
+
+struct ResynthesisPass<'a, 'session> {
     source: &'a Circuit,
     rebuild: CircuitRebuildContext,
     config: TwoQubitBlockResynthesisConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
     synthesis_cache: TwoQubitSynthesisCache,
+    incremental: Option<&'session mut NativeResynthesisSession>,
 }
 
 struct SequenceRewrite {
@@ -146,7 +171,7 @@ struct SequenceRewrite {
     changed: bool,
 }
 
-impl<'a> ResynthesisPass<'a> {
+impl<'a, 'session> ResynthesisPass<'a, 'session> {
     fn run(self) -> Result<TransformResult, CompilerError> {
         self.run_with_stats().map(|(result, _)| result)
     }
@@ -155,7 +180,11 @@ impl<'a> ResynthesisPass<'a> {
         mut self,
     ) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
         let root_classical = self.rebuild.root_classical().clone();
-        let rewrite = self.process_sequence(self.source.operations(), &root_classical)?;
+        let rewrite = self.process_sequence(
+            self.source.operations(),
+            &root_classical,
+            &NativeScopeId::default(),
+        )?;
         let mut global_phase = self.source.global_phase();
         if rewrite.phase_delta.abs() > PHASE_EPS {
             global_phase = global_phase + Parameter::from(rewrite.phase_delta);
@@ -177,10 +206,22 @@ impl<'a> ResynthesisPass<'a> {
         &mut self,
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
+        scope: &NativeScopeId,
     ) -> Result<SequenceRewrite, CompilerError> {
         let views = self.build_views(operations)?;
         let mut commutation = CachedCommutation::new(self.config.commutation.clone());
-        let blocks = collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?;
+        let blocks = if let Some(incremental) = self.incremental.as_deref_mut() {
+            incremental.collect_blocks(
+                scope,
+                self.source,
+                operations,
+                &views,
+                &mut commutation,
+                &self.config,
+            )?
+        } else {
+            collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?
+        };
         let patches = select_patches_with_device(
             blocks,
             &views,
@@ -191,14 +232,14 @@ impl<'a> ResynthesisPass<'a> {
         )?;
 
         if patches.is_empty() {
-            return self.preserve_sequence(operations, classical_remap);
+            return self.preserve_sequence(operations, classical_remap, scope);
         }
 
         let mut phase_delta = 0.0;
         for patch in &patches {
             phase_delta += patch.synthesis_phase;
         }
-        let rebuilt = self.emit_patched_sequence(operations, classical_remap, patches)?;
+        let rebuilt = self.emit_patched_sequence(operations, classical_remap, patches, scope)?;
         Ok(SequenceRewrite {
             operations: rebuilt,
             phase_delta,
@@ -240,13 +281,14 @@ impl<'a> ResynthesisPass<'a> {
         &mut self,
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
+        scope: &NativeScopeId,
     ) -> Result<SequenceRewrite, CompilerError> {
         let mut output = Vec::with_capacity(operations.len());
         let mut phase_delta = 0.0;
         let mut changed = false;
-        for operation in operations {
+        for (order, operation) in operations.iter().enumerate() {
             let (rebuilt, body_phase, body_changed) =
-                self.rebuild_operation(operation, classical_remap)?;
+                self.rebuild_operation(operation, classical_remap, scope, order)?;
             output.push(rebuilt);
             phase_delta += body_phase;
             changed |= body_changed;
@@ -263,6 +305,7 @@ impl<'a> ResynthesisPass<'a> {
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
         patches: Vec<BlockPatch>,
+        scope: &NativeScopeId,
     ) -> Result<Vec<ValueOperation>, CompilerError> {
         let mut patches_by_first = HashMap::new();
         let mut skipped = HashSet::new();
@@ -290,7 +333,8 @@ impl<'a> ResynthesisPass<'a> {
             if skipped.contains(&order) {
                 continue;
             }
-            let (rebuilt, _, _) = self.rebuild_operation(operation, classical_remap)?;
+            let (rebuilt, _, _) =
+                self.rebuild_operation(operation, classical_remap, scope, order)?;
             output.push(rebuilt);
         }
         debug_assert!(
@@ -305,11 +349,19 @@ impl<'a> ResynthesisPass<'a> {
         &mut self,
         operation: &Operation,
         classical_remap: &ClassicalRemap,
+        scope: &NativeScopeId,
+        operation_order: usize,
     ) -> Result<(ValueOperation, f64, bool), CompilerError> {
         if self.config.recurse_control_flow
             && let Instruction::ClassicalControl(control) = &operation.instruction
         {
-            let (instruction, changed) = self.rebuild_control_flow(control, classical_remap)?;
+            let operation_key = self
+                .incremental
+                .as_deref()
+                .and_then(|session| session.current_operation_key(scope, operation_order))
+                .unwrap_or(operation_order as u64);
+            let (instruction, changed) =
+                self.rebuild_control_flow(control, classical_remap, scope, operation_key)?;
             let qubits = instruction.used_qubits().into_iter().collect();
             return Ok((
                 ValueOperation {
@@ -337,14 +389,25 @@ impl<'a> ResynthesisPass<'a> {
         &mut self,
         control: &ClassicalControlOp,
         classical_remap: &ClassicalRemap,
+        scope: &NativeScopeId,
+        operation_key: u64,
     ) -> Result<(ValueClassicalControlOp, bool), CompilerError> {
         Ok(match control {
             ClassicalControlOp::If(op) => {
-                let (then_ops, then_changed) =
-                    self.rebuild_body(op.then_body().operations(), classical_remap)?;
+                let (then_ops, then_changed) = self.rebuild_body(
+                    op.then_body().operations(),
+                    classical_remap,
+                    &scope.child(NativeScopeSegment::IfThen(operation_key)),
+                )?;
                 let else_rewrite = op
                     .else_body()
-                    .map(|body| self.rebuild_body(body.operations(), classical_remap))
+                    .map(|body| {
+                        self.rebuild_body(
+                            body.operations(),
+                            classical_remap,
+                            &scope.child(NativeScopeSegment::IfElse(operation_key)),
+                        )
+                    })
                     .transpose()?;
                 let else_changed = else_rewrite
                     .as_ref()
@@ -359,7 +422,11 @@ impl<'a> ResynthesisPass<'a> {
                 )
             }
             ClassicalControlOp::While(op) => {
-                let (body, changed) = self.rebuild_body(op.body().operations(), classical_remap)?;
+                let (body, changed) = self.rebuild_body(
+                    op.body().operations(),
+                    classical_remap,
+                    &scope.child(NativeScopeSegment::WhileBody(operation_key)),
+                )?;
                 (
                     ValueClassicalControlOp::While {
                         condition: classical_remap.remap_expr(op.condition())?,
@@ -369,7 +436,11 @@ impl<'a> ResynthesisPass<'a> {
                 )
             }
             ClassicalControlOp::For(op) => {
-                let (body, changed) = self.rebuild_body(op.body().operations(), classical_remap)?;
+                let (body, changed) = self.rebuild_body(
+                    op.body().operations(),
+                    classical_remap,
+                    &scope.child(NativeScopeSegment::ForBody(operation_key)),
+                )?;
                 (
                     ValueClassicalControlOp::For {
                         var: classical_remap.remap_var(op.var())?,
@@ -386,9 +457,16 @@ impl<'a> ResynthesisPass<'a> {
                 let cases = op
                     .cases()
                     .iter()
-                    .map(|case| {
-                        let (body, body_changed) =
-                            self.rebuild_body(case.body().operations(), classical_remap)?;
+                    .enumerate()
+                    .map(|(case_index, case)| {
+                        let (body, body_changed) = self.rebuild_body(
+                            case.body().operations(),
+                            classical_remap,
+                            &scope.child(NativeScopeSegment::SwitchCase {
+                                operation: operation_key,
+                                case: case_index,
+                            }),
+                        )?;
                         changed |= body_changed;
                         Ok(ValueSwitchCase::new(
                             case.value(),
@@ -398,7 +476,13 @@ impl<'a> ResynthesisPass<'a> {
                     .collect::<Result<Vec<_>, CompilerError>>()?;
                 let default_rewrite = op
                     .default()
-                    .map(|body| self.rebuild_body(body.operations(), classical_remap))
+                    .map(|body| {
+                        self.rebuild_body(
+                            body.operations(),
+                            classical_remap,
+                            &scope.child(NativeScopeSegment::SwitchDefault(operation_key)),
+                        )
+                    })
                     .transpose()?;
                 changed |= default_rewrite
                     .as_ref()
@@ -421,8 +505,9 @@ impl<'a> ResynthesisPass<'a> {
         &mut self,
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
+        scope: &NativeScopeId,
     ) -> Result<(Vec<ValueOperation>, bool), CompilerError> {
-        let mut rewrite = self.process_sequence(operations, classical_remap)?;
+        let mut rewrite = self.process_sequence(operations, classical_remap, scope)?;
         if rewrite.phase_delta.abs() > PHASE_EPS {
             rewrite.operations.insert(
                 0,

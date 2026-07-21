@@ -28,97 +28,154 @@ use crate::compile::CompilerError;
 use indexmap::IndexSet;
 use rustworkx_core::petgraph::prelude::NodeIndex;
 use smallvec::SmallVec;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
-pub(super) fn collect_two_qubit_blocks_dag(
-    ops: &[OperationView<'_>],
-    commutation: &mut CachedCommutation,
-    config: &TwoQubitBlockResynthesisConfig,
-) -> Result<Vec<TwoQubitNumericBlock>, CompilerError> {
-    let mut qubits = IndexSet::new();
-    let operations = ops
-        .iter()
-        .map(|view| {
-            qubits.extend(view.operation.qubits.iter().copied());
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct AnchorDependencyTrace {
+    pub(super) observed_orders: BTreeSet<usize>,
+    pub(super) adjacency: BTreeSet<(usize, usize)>,
+}
 
-            // The DAG collector only needs dependency edges. Standard gates
-            // retain their instruction and resolved numeric parameters so the
-            // normal DAG validation path remains active. Non-standard and
-            // classical operations are represented as barriers on the same
-            // qubits: they are hard boundaries for collection, while their
-            // qubit footprint still preserves dependency ordering.
-            if matches!(view.operation.instruction, Instruction::Standard(_)) {
-                Operation {
-                    instruction: view.operation.instruction.clone(),
-                    qubits: view.operation.qubits.clone(),
-                    params: view
-                        .params
-                        .iter()
-                        .map(|param| {
-                            CircuitParam::Fixed(
-                                param
-                                    .evaluate(&None)
-                                    .ok()
-                                    .filter(|value| value.is_finite())
-                                    .unwrap_or(0.0),
-                            )
-                        })
-                        .collect::<SmallVec<[_; 1]>>(),
-                    label: view.operation.label.clone(),
+pub(super) struct DagCollectionContext {
+    dag: CircuitDag,
+}
+
+impl DagCollectionContext {
+    pub(super) fn build(ops: &[OperationView<'_>]) -> Result<Self, CompilerError> {
+        let mut qubits = IndexSet::new();
+        let operations = ops
+            .iter()
+            .map(|view| {
+                qubits.extend(view.operation.qubits.iter().copied());
+
+                if matches!(view.operation.instruction, Instruction::Standard(_)) {
+                    Operation {
+                        instruction: view.operation.instruction.clone(),
+                        qubits: view.operation.qubits.clone(),
+                        params: view
+                            .params
+                            .iter()
+                            .map(|param| {
+                                CircuitParam::Fixed(
+                                    param
+                                        .evaluate(&None)
+                                        .ok()
+                                        .filter(|value| value.is_finite())
+                                        .unwrap_or(0.0),
+                                )
+                            })
+                            .collect::<SmallVec<[_; 1]>>(),
+                        label: view.operation.label.clone(),
+                    }
+                } else {
+                    Operation {
+                        instruction: Instruction::Directive(Directive::Barrier),
+                        qubits: view.operation.qubits.clone(),
+                        params: SmallVec::new(),
+                        label: view.operation.label.clone(),
+                    }
                 }
-            } else {
-                Operation {
-                    instruction: Instruction::Directive(Directive::Barrier),
-                    qubits: view.operation.qubits.clone(),
-                    params: SmallVec::new(),
-                    label: view.operation.label.clone(),
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    let dag = CircuitDag::from_operations(qubits, &operations).map_err(CompilerError::Circuit)?;
+            })
+            .collect::<Vec<_>>();
+        let dag =
+            CircuitDag::from_operations(qubits, &operations).map_err(CompilerError::Circuit)?;
+        Ok(Self { dag })
+    }
 
-    let mut blocks = Vec::new();
-    for anchor in 0..ops.len() {
-        let anchor_view = &ops[anchor];
-        if is_hard_boundary(anchor_view, config) || !is_fixed_numeric_standard(anchor_view) {
-            continue;
-        }
-        let Instruction::Standard(_) = anchor_view.operation.instruction else {
-            continue;
+    pub(super) fn collect_anchor(
+        &self,
+        ops: &[OperationView<'_>],
+        anchor: usize,
+        commutation: &mut CachedCommutation,
+        config: &TwoQubitBlockResynthesisConfig,
+    ) -> Result<(Option<TwoQubitNumericBlock>, AnchorDependencyTrace), CompilerError> {
+        let mut trace = AnchorDependencyTrace::default();
+        let Some(anchor_view) = ops.get(anchor) else {
+            return Err(CompilerError::InvariantViolation(format!(
+                "resynthesis anchor order {anchor} is out of bounds"
+            )));
         };
-        if anchor_view.operation.qubits.len() != 2 {
-            continue;
+        if !is_two_qubit_anchor(anchor_view, config) {
+            return Ok((None, trace));
         }
 
         let qubits = [
             anchor_view.operation.qubits[0],
             anchor_view.operation.qubits[1],
         ];
-        let Some(node) = dag.node_for_order(anchor) else {
+        let Some(node) = self.dag.node_for_order(anchor) else {
             return Err(CompilerError::InvariantViolation(format!(
                 "resynthesis DAG is missing operation order {anchor}"
             )));
         };
+        trace.observed_orders.insert(anchor);
         let mut builder = BlockBuilder::new(qubits, anchor, ops);
-        collect_dag_direction(
-            &dag,
+        self.collect_direction(
             &mut builder,
             node,
             Direction::Left,
             commutation,
             config,
+            &mut trace,
         );
-        collect_dag_direction(
-            &dag,
+        self.collect_direction(
             &mut builder,
             node,
             Direction::Right,
             commutation,
             config,
+            &mut trace,
         );
+        if let Some(adjacency) = self.adjacency_for_orders(trace.observed_orders.iter().copied()) {
+            trace.adjacency = adjacency;
+        }
         let block = builder.finish();
-        if block.is_promising() {
+        Ok((block.is_promising().then_some(block), trace))
+    }
+
+    pub(super) fn adjacency_for_orders(
+        &self,
+        orders: impl IntoIterator<Item = usize>,
+    ) -> Option<BTreeSet<(usize, usize)>> {
+        let mut adjacency = BTreeSet::new();
+        for order in orders {
+            let node = self.dag.node_for_order(order)?;
+            for neighbor in self.dag.predecessors(node).chain(self.dag.successors(node)) {
+                if let Some(neighbor_order) = self.dag.operation_order(neighbor) {
+                    let edge = if order <= neighbor_order {
+                        (order, neighbor_order)
+                    } else {
+                        (neighbor_order, order)
+                    };
+                    adjacency.insert(edge);
+                }
+            }
+        }
+        Some(adjacency)
+    }
+}
+
+pub(super) fn is_two_qubit_anchor(
+    view: &OperationView<'_>,
+    config: &TwoQubitBlockResynthesisConfig,
+) -> bool {
+    !is_hard_boundary(view, config)
+        && is_fixed_numeric_standard(view)
+        && matches!(view.operation.instruction, Instruction::Standard(_))
+        && view.operation.qubits.len() == 2
+}
+
+pub(super) fn collect_two_qubit_blocks_dag(
+    ops: &[OperationView<'_>],
+    commutation: &mut CachedCommutation,
+    config: &TwoQubitBlockResynthesisConfig,
+) -> Result<Vec<TwoQubitNumericBlock>, CompilerError> {
+    let context = DagCollectionContext::build(ops)?;
+
+    let mut blocks = Vec::new();
+    for anchor in 0..ops.len() {
+        let (block, _) = context.collect_anchor(ops, anchor, commutation, config)?;
+        if let Some(block) = block {
             blocks.push(block);
         }
     }
@@ -131,128 +188,120 @@ enum Direction {
     Right,
 }
 
-fn collect_dag_direction(
-    dag: &CircuitDag,
-    builder: &mut BlockBuilder<'_>,
-    anchor: NodeIndex,
-    direction: Direction,
-    commutation: &mut CachedCommutation,
-    config: &TwoQubitBlockResynthesisConfig,
-) {
-    let Some(anchor_order) = dag.operation_order(anchor) else {
-        return;
-    };
-    let mut frontier = VecDeque::from(sorted_neighbors(dag, anchor, direction));
-    let mut seen = HashSet::new();
-    let mut accepted = HashSet::from([anchor_order]);
-    let mut visited = 0usize;
-
-    while visited < config.max_scan_span {
-        let Some(node) = frontier.pop_front() else {
-            break;
+impl DagCollectionContext {
+    fn collect_direction(
+        &self,
+        builder: &mut BlockBuilder<'_>,
+        anchor: NodeIndex,
+        direction: Direction,
+        commutation: &mut CachedCommutation,
+        config: &TwoQubitBlockResynthesisConfig,
+        trace: &mut AnchorDependencyTrace,
+    ) {
+        let Some(anchor_order) = self.dag.operation_order(anchor) else {
+            return;
         };
-        if !seen.insert(node) {
-            continue;
-        }
-        let Some(order) = dag.operation_order(node) else {
-            continue;
-        };
-        visited += 1;
+        let mut frontier = VecDeque::from(self.sorted_neighbors(anchor, direction));
+        let mut seen = HashSet::new();
+        let mut accepted = HashSet::from([anchor_order]);
+        let mut visited = 0usize;
 
-        if !dependencies_are_accepted(dag, node, direction, anchor_order, &accepted) {
-            if matches!(direction, Direction::Left) {
+        while visited < config.max_scan_span {
+            let Some(node) = frontier.pop_front() else {
                 break;
+            };
+            if !seen.insert(node) {
+                continue;
             }
-            continue;
-        }
+            let Some(order) = self.dag.operation_order(node) else {
+                continue;
+            };
+            trace.observed_orders.insert(order);
+            visited += 1;
 
-        let view = &builder.ops[order];
-        if is_hard_boundary(view, config) {
-            if matches!(direction, Direction::Left) {
-                break;
+            if !self.dependencies_are_accepted(node, direction, anchor_order, &accepted) {
+                if matches!(direction, Direction::Left) {
+                    break;
+                }
+                continue;
             }
-            continue;
-        }
 
-        if is_block_candidate(view, builder.qubits) {
-            if builder.matched_len() >= config.max_block_ops
-                || !builder.can_add_candidate(order, commutation)
+            let view = &builder.ops[order];
+            if is_hard_boundary(view, config) {
+                if matches!(direction, Direction::Left) {
+                    break;
+                }
+                continue;
+            }
+
+            if is_block_candidate(view, builder.qubits) {
+                if builder.matched_len() >= config.max_block_ops
+                    || !builder.can_add_candidate(order, commutation)
+                {
+                    if matches!(direction, Direction::Left) {
+                        break;
+                    }
+                    continue;
+                }
+                builder.add_matched(order);
+                accepted.insert(order);
+                frontier.extend(self.sorted_neighbors(node, direction));
+                continue;
+            }
+
+            if builder.crossed_len() >= config.max_crossed_ops
+                || !builder.can_cross(order, commutation)
             {
                 if matches!(direction, Direction::Left) {
                     break;
                 }
                 continue;
             }
-            builder.add_matched(order);
+            builder.add_crossed(order);
             accepted.insert(order);
-            for neighbor in sorted_neighbors(dag, node, direction) {
-                frontier.push_back(neighbor);
-            }
-            continue;
-        }
-
-        if builder.crossed_len() >= config.max_crossed_ops || !builder.can_cross(order, commutation)
-        {
-            if matches!(direction, Direction::Left) {
-                break;
-            }
-            continue;
-        }
-        builder.add_crossed(order);
-        accepted.insert(order);
-        for neighbor in sorted_neighbors(dag, node, direction) {
-            frontier.push_back(neighbor);
+            frontier.extend(self.sorted_neighbors(node, direction));
         }
     }
-}
 
-/// Ensures a candidate's intervening DAG dependencies have already been
-/// accepted into this block expansion.
-///
-/// For right expansion this means every predecessor between the anchor and the
-/// candidate has been matched or crossed. For left expansion the same condition
-/// is applied to successors. This prevents the collector from jumping over a
-/// non-commuting dependency just because it is not adjacent in source order.
-fn dependencies_are_accepted(
-    dag: &CircuitDag,
-    node: NodeIndex,
-    direction: Direction,
-    anchor_order: usize,
-    accepted: &HashSet<usize>,
-) -> bool {
-    let dependencies = match direction {
-        Direction::Left => dag.successors(node).collect::<Vec<_>>(),
-        Direction::Right => dag.predecessors(node).collect::<Vec<_>>(),
-    };
-    dependencies.into_iter().all(|dependency| {
-        let Some(order) = dag.operation_order(dependency) else {
-            return true;
+    /// Ensures that intervening dependencies were accepted into the block.
+    fn dependencies_are_accepted(
+        &self,
+        node: NodeIndex,
+        direction: Direction,
+        anchor_order: usize,
+        accepted: &HashSet<usize>,
+    ) -> bool {
+        let dependencies = match direction {
+            Direction::Left => self.dag.successors(node).collect::<Vec<_>>(),
+            Direction::Right => self.dag.predecessors(node).collect::<Vec<_>>(),
         };
-        let between_anchor_and_node = match direction {
-            Direction::Left => order <= anchor_order,
-            Direction::Right => order >= anchor_order,
-        };
-        !between_anchor_and_node || accepted.contains(&order)
-    })
-}
+        dependencies.into_iter().all(|dependency| {
+            let Some(order) = self.dag.operation_order(dependency) else {
+                return true;
+            };
+            let between_anchor_and_node = match direction {
+                Direction::Left => order <= anchor_order,
+                Direction::Right => order >= anchor_order,
+            };
+            !between_anchor_and_node || accepted.contains(&order)
+        })
+    }
 
-/// Returns operation neighbors in deterministic source order.
-///
-/// Left expansion visits larger source orders first while moving backward, and
-/// right expansion visits smaller source orders first while moving forward.
-fn sorted_neighbors(dag: &CircuitDag, node: NodeIndex, direction: Direction) -> Vec<NodeIndex> {
-    let mut neighbors = match direction {
-        Direction::Left => dag.predecessors(node).collect::<Vec<_>>(),
-        Direction::Right => dag.successors(node).collect::<Vec<_>>(),
-    };
-    neighbors.sort_by_key(|neighbor| {
-        let order = dag.operation_order(*neighbor).unwrap_or(usize::MAX);
-        match direction {
-            Direction::Left => (usize::MAX - order, neighbor.index()),
-            Direction::Right => (order, neighbor.index()),
-        }
-    });
-    neighbors
+    /// Returns operation neighbors in deterministic source order.
+    fn sorted_neighbors(&self, node: NodeIndex, direction: Direction) -> Vec<NodeIndex> {
+        let mut neighbors = match direction {
+            Direction::Left => self.dag.predecessors(node).collect::<Vec<_>>(),
+            Direction::Right => self.dag.successors(node).collect::<Vec<_>>(),
+        };
+        neighbors.sort_by_key(|neighbor| {
+            let order = self.dag.operation_order(*neighbor).unwrap_or(usize::MAX);
+            match direction {
+                Direction::Left => (usize::MAX - order, neighbor.index()),
+                Direction::Right => (order, neighbor.index()),
+            }
+        });
+        neighbors
+    }
 }
 
 #[cfg(test)]

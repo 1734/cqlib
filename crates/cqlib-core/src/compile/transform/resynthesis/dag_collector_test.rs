@@ -241,3 +241,37 @@ fn block_size_budget_bounds_dag_collection() {
 
     assert!(blocks.iter().all(|block| block.matched_orders.len() <= 2));
 }
+
+#[test]
+fn per_anchor_collection_matches_full_scan_order_and_blocks() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let q3 = Qubit::new(3);
+    let mut circuit = Circuit::new(4);
+    circuit.cz(q0, q1).unwrap();
+    circuit.rz(q0, 0.25).unwrap();
+    circuit.cz(q0, q1).unwrap();
+    circuit.cx(q2, q3).unwrap();
+    circuit.h(q3).unwrap();
+    circuit.cx(q2, q3).unwrap();
+    let views = views(&circuit);
+    let config = config();
+
+    let mut full_checker = checker();
+    let expected = collect_two_qubit_blocks_dag(&views, &mut full_checker, &config).unwrap();
+
+    let context = DagCollectionContext::build(&views).unwrap();
+    let mut anchor_checker = checker();
+    let mut actual = Vec::new();
+    for anchor in 0..views.len() {
+        let (block, _) = context
+            .collect_anchor(&views, anchor, &mut anchor_checker, &config)
+            .unwrap();
+        if let Some(block) = block {
+            actual.push(block);
+        }
+    }
+
+    assert_eq!(actual, expected);
+}
