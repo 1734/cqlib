@@ -24,6 +24,11 @@
 //! to conditional or loop bodies. The optimizer restores the best whole-circuit
 //! point seen; it does not splice independently optimal bodies from different
 //! rounds.
+//!
+//! One immutable exact-physical synthesis context is shared by resynthesis,
+//! local optimization, and scope costing for the lifetime of a single run. The
+//! catalog is rebuilt transactionally only when scope costing finds an
+//! unprepared root; a prepared-but-unsupported root remains a real failure.
 
 use crate::circuit::{
     Circuit, ClassicalControlOp, Directive, Instruction, Operation, Parameter, ParameterValue,
@@ -33,8 +38,8 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::sabre::MetricAvailability;
 use crate::compile::transform::decompose::unitary::{
-    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, OneQubitUnitaryDecomposition,
-    synthesize_numeric_1q_unitary,
+    DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
+    OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::resynthesis::TwoQubitBlockResynthesisConfig;
@@ -103,7 +108,14 @@ impl<'a> NativeOptimizer<'a> {
         self.device.validate_circuit(&initial)?;
         let mut current = initial.clone();
         let mut best = initial;
-        let mut best_costs = scope_costs(self.device, &best)?;
+        // This exact-physical context is immutable and run-scoped. All consumers
+        // share its Arc-backed catalog until a candidate exposes missing coverage.
+        let mut context = DeviceTwoQubitSynthesisContext::build(
+            self.device,
+            &best,
+            DeviceSynthesisPlacement::ExactPhysical,
+        )?;
+        let mut best_costs = scope_costs_with_context(&best, &context).map_err(scope_cost_error)?;
         let before = summarize_scope_costs(&best_costs);
         let mut rounds = 0;
         let mut stale = 0;
@@ -111,21 +123,13 @@ impl<'a> NativeOptimizer<'a> {
 
         while rounds < self.max_rounds && stale < self.max_stale_rounds {
             rounds += 1;
-            let context = DeviceTwoQubitSynthesisContext::build(
-                self.device,
-                &current,
-                DeviceSynthesisPlacement::ExactPhysical,
-            )?;
-            let resynthesized =
-                ResynthesizeTwoQubitBlocks::new_device_aware(self.resynthesis.clone(), context)
-                    .transform(&current, None)?
-                    .circuit;
-            let local_context = DeviceTwoQubitSynthesisContext::build(
-                self.device,
-                &resynthesized,
-                DeviceSynthesisPlacement::ExactPhysical,
-            )?;
-            let locally_optimized = OptimizeNativeLocalGates::new(local_context)
+            let resynthesized = ResynthesizeTwoQubitBlocks::new_device_aware(
+                self.resynthesis.clone(),
+                context.clone(),
+            )
+            .transform(&current, None)?
+            .circuit;
+            let locally_optimized = OptimizeNativeLocalGates::new(context.clone())
                 .transform(&resynthesized, None)?
                 .circuit;
             let legalized =
@@ -151,7 +155,7 @@ impl<'a> NativeOptimizer<'a> {
                 current = candidate;
                 break;
             }
-            let candidate_costs = scope_costs(self.device, &candidate)?;
+            let candidate_costs = self.candidate_costs_with_reuse(&candidate, &mut context)?;
             if scope_costs_dominate(&candidate_costs, &best_costs) {
                 best = candidate.clone();
                 best_costs = candidate_costs;
@@ -175,19 +179,68 @@ impl<'a> NativeOptimizer<'a> {
             after,
         })
     }
+
+    /// Costs a candidate with the run-scoped context, rebuilding transactionally
+    /// at most once when (and only when) the catalog did not prepare a required root.
+    fn candidate_costs_with_reuse(
+        &self,
+        candidate: &Circuit,
+        context: &mut DeviceTwoQubitSynthesisContext,
+    ) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, CompilerError>
+    {
+        match scope_costs_with_context(candidate, context) {
+            Ok(costs) => Ok(costs),
+            Err(ScopeCostError::Context(DeviceContextCostFailure::Unprepared(_))) => {
+                let rebuilt = DeviceTwoQubitSynthesisContext::build(
+                    self.device,
+                    candidate,
+                    DeviceSynthesisPlacement::ExactPhysical,
+                )?;
+                let costs = match scope_costs_with_context(candidate, &rebuilt) {
+                    Ok(costs) => costs,
+                    Err(ScopeCostError::Context(DeviceContextCostFailure::Unprepared(state))) => {
+                        return Err(CompilerError::InvariantViolation(format!(
+                            "rebuilt native optimizer context was not prepared for {state:?}"
+                        )));
+                    }
+                    Err(error) => return Err(scope_cost_error(error)),
+                };
+                *context = rebuilt;
+                Ok(costs)
+            }
+            Err(error) => Err(scope_cost_error(error)),
+        }
+    }
 }
 
-fn scope_costs(
-    device: &Device,
+#[derive(Debug)]
+enum ScopeCostError {
+    Compiler(CompilerError),
+    Context(DeviceContextCostFailure),
+}
+
+impl From<CompilerError> for ScopeCostError {
+    fn from(error: CompilerError) -> Self {
+        Self::Compiler(error)
+    }
+}
+
+fn scope_cost_error(error: ScopeCostError) -> CompilerError {
+    match error {
+        ScopeCostError::Compiler(error) => error,
+        ScopeCostError::Context(_) => CompilerError::InvariantViolation(
+            "native optimizer could not cost a legalized control-flow scope".to_string(),
+        ),
+    }
+}
+
+fn scope_costs_with_context(
     circuit: &Circuit,
-) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, CompilerError> {
-    let context = DeviceTwoQubitSynthesisContext::build(
-        device,
-        circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )?;
+    context: &DeviceTwoQubitSynthesisContext,
+) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, ScopeCostError>
+{
     let mut costs = Vec::new();
-    collect_scope_costs(circuit.operations(), circuit, &context, &mut costs)?;
+    collect_scope_costs(circuit.operations(), circuit, context, &mut costs)?;
     Ok(costs)
 }
 
@@ -196,7 +249,7 @@ fn collect_scope_costs(
     circuit: &Circuit,
     context: &DeviceTwoQubitSynthesisContext,
     output: &mut Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>,
-) -> Result<(), CompilerError> {
+) -> Result<(), ScopeCostError> {
     let mut gate_operations = Vec::new();
     for operation in operations {
         match &operation.instruction {
@@ -242,12 +295,8 @@ fn collect_scope_costs(
         }
     }
     let cost = context
-        .exact_sequence_cost(&gate_operations)
-        .ok_or_else(|| {
-            CompilerError::InvariantViolation(
-                "native optimizer could not cost a legalized control-flow scope".to_string(),
-            )
-        })?;
+        .exact_sequence_cost_diagnostic(&gate_operations)
+        .map_err(ScopeCostError::Context)?;
     output.push(cost);
     Ok(())
 }
@@ -582,15 +631,44 @@ impl LocalOptimizationPolicy {
                     && compare_basis_cost(after, before).is_lt()
             }
             Self::Device(context) => {
-                let Some(before) = context.exact_sequence_cost(source) else {
+                let Some(before) = exact_local_sequence_cost(context, source, "source")? else {
                     return Ok(false);
                 };
-                let Some(after) = context.exact_sequence_cost(candidate) else {
+                let Some(after) = exact_local_sequence_cost(context, candidate, "candidate")?
+                else {
                     return Ok(false);
                 };
                 after.strictly_better_than(before)
             }
         })
+    }
+}
+
+fn exact_local_sequence_cost(
+    context: &DeviceTwoQubitSynthesisContext,
+    operations: &[ValueOperation],
+    role: &str,
+) -> Result<Option<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, CompilerError>
+{
+    match context.exact_sequence_cost_diagnostic(operations) {
+        Ok(cost) => Ok(Some(cost)),
+        Err(DeviceContextCostFailure::Unsupported(failure)) => {
+            let _ = failure;
+            Ok(None)
+        }
+        Err(DeviceContextCostFailure::Unprepared(state)) => {
+            Err(CompilerError::InvariantViolation(format!(
+                "native local optimization context was not prepared for {role} state {state:?}"
+            )))
+        }
+        Err(DeviceContextCostFailure::WrongPlacement) => Err(CompilerError::InvariantViolation(
+            "native local optimization requires an exact-physical context".to_string(),
+        )),
+        Err(DeviceContextCostFailure::InvalidOperation(reason)) => {
+            Err(CompilerError::InvariantViolation(format!(
+                "invalid native local optimization {role}: {reason}"
+            )))
+        }
     }
 }
 
@@ -1242,187 +1320,5 @@ fn flush_z(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_optimizer_stops_after_one_stable_round() {
-        let device = Device::line("native-fixed-point", 1)
-            .unwrap()
-            .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
-            .unwrap();
-        let q0 = Qubit::new(0);
-        let mut circuit = Circuit::new(1);
-        circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
-        let optimizer = NativeOptimizer::new(
-            &device,
-            TwoQubitBlockResynthesisConfig::normal(Default::default()),
-            8,
-            3,
-        );
-
-        let result = optimizer.run(&circuit).unwrap();
-
-        assert_eq!(result.rounds, 1);
-        assert!(!result.changed);
-        assert!(!result.restored_best);
-        assert_eq!(result.circuit, circuit);
-    }
-
-    #[test]
-    fn one_qubit_fusion_requires_exact_physical_improvement() {
-        let device = Device::line("native-fusion", 1)
-            .unwrap()
-            .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
-            .unwrap()
-            .with_default_single_qubit_error(0.001);
-        let q0 = Qubit::new(0);
-        let mut circuit = Circuit::new(1);
-        circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
-        circuit.u(q0, -0.1, 0.5, -0.2).unwrap();
-        let context = DeviceTwoQubitSynthesisContext::build(
-            &device,
-            &circuit,
-            DeviceSynthesisPlacement::ExactPhysical,
-        )
-        .unwrap();
-
-        let result = OptimizeNativeLocalGates::new(context)
-            .transform(&circuit, None)
-            .unwrap();
-
-        assert!(result.changed);
-        assert_eq!(result.circuit.operations().len(), 1);
-        assert!(matches!(
-            result.circuit.operations()[0].instruction,
-            Instruction::Standard(StandardGate::U)
-        ));
-    }
-
-    #[test]
-    fn cx_propagates_target_z_to_both_qubits() {
-        let q0 = Qubit::new(0);
-        let q1 = Qubit::new(1);
-        let operations = vec![
-            ValueOperation::from_standard(StandardGate::Z, [q1], []),
-            ValueOperation::from_standard(StandardGate::CX, [q0, q1], []),
-        ];
-
-        let rewrite = propagate_frames(operations).unwrap();
-        let gates = rewrite
-            .operations
-            .iter()
-            .filter_map(|operation| match operation.instruction {
-                ValueInstruction::Instruction(Instruction::Standard(gate)) => Some(gate),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            gates,
-            vec![StandardGate::CX, StandardGate::Z, StandardGate::Z]
-        );
-    }
-
-    #[test]
-    fn swap_exchanges_pending_frames() {
-        let q0 = Qubit::new(0);
-        let q1 = Qubit::new(1);
-        let rewrite = propagate_frames(vec![
-            ValueOperation::from_standard(StandardGate::Z, [q0], []),
-            ValueOperation::from_standard(StandardGate::SWAP, [q0, q1], []),
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            rewrite.operations[0].instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::SWAP))
-        ));
-        assert!(matches!(
-            rewrite.operations[1].instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::Z))
-        ));
-        assert_eq!(rewrite.operations[1].qubits.as_slice(), &[q1]);
-    }
-
-    #[test]
-    fn measurement_drops_a_pending_z_frame() {
-        let q0 = Qubit::new(0);
-        let measurement = ValueOperation {
-            instruction: ValueInstruction::from_instruction(Instruction::Directive(
-                Directive::Measure,
-            )),
-            qubits: smallvec![q0],
-            params: SmallVec::new(),
-            label: None,
-        };
-
-        let rewrite = propagate_frames(vec![
-            ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.4)]),
-            measurement,
-        ])
-        .unwrap();
-
-        assert_eq!(rewrite.operations.len(), 1);
-        assert!(matches!(
-            rewrite.operations[0].instruction,
-            ValueInstruction::Instruction(Instruction::Directive(Directive::Measure))
-        ));
-    }
-
-    #[test]
-    fn phase_carrier_records_rz_global_phase_difference() {
-        let q0 = Qubit::new(0);
-        let rewrite = propagate_frames(vec![ValueOperation::from_standard(
-            StandardGate::Phase,
-            [q0],
-            [ParameterValue::Fixed(0.6)],
-        )])
-        .unwrap();
-
-        assert!((rewrite.phase_delta - 0.3).abs() < PHASE_EPS);
-        assert!(matches!(
-            rewrite.operations[0].instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::RZ))
-        ));
-    }
-
-    #[test]
-    fn z_frame_is_absorbed_into_xy_axis() {
-        let q0 = Qubit::new(0);
-        let rewrite = propagate_frames(vec![
-            ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.2)]),
-            ValueOperation::from_standard(StandardGate::XY, [q0], [ParameterValue::Fixed(0.7)]),
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            rewrite.operations[0].instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::XY))
-        ));
-        let ParameterValue::Fixed(axis) = rewrite.operations[0].params[0] else {
-            panic!("XY axis must remain numeric");
-        };
-        assert!((axis - 0.5).abs() < PHASE_EPS);
-        assert!(matches!(
-            rewrite.operations[1].instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::RZ))
-        ));
-    }
-
-    #[test]
-    fn pauli_product_uses_circuit_time_order() {
-        let q0 = Qubit::new(0);
-        let rewrite = propagate_frames(vec![
-            ValueOperation::from_standard(StandardGate::X, [q0], []),
-            ValueOperation::from_standard(StandardGate::Z, [q0], []),
-        ])
-        .unwrap();
-
-        assert!((rewrite.phase_delta - FRAC_PI_2).abs() < PHASE_EPS);
-        assert!(matches!(
-            rewrite.operations[0].instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::Y))
-        ));
-    }
-}
+#[path = "native_optimization_test.rs"]
+mod native_optimization_test;

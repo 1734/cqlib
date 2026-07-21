@@ -61,6 +61,6 @@ pub use unitary_2q::{
 };
 
 pub(crate) use device_synthesis::{
-    DevicePhysicalCost, DevicePreLayoutEvaluation, DeviceSynthesisPlacement,
-    DeviceTwoQubitSynthesisContext,
+    DeviceContextCostFailure, DevicePhysicalCost, DevicePreLayoutEvaluation,
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
 };

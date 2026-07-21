@@ -387,7 +387,7 @@ pub(crate) fn plan_numeric_2q_unitary_for_device(
         qubits,
         target: target.clone(),
     })? {
-        push_device_candidate(&mut oriented, candidate, qubits, 0, context);
+        push_device_candidate(&mut oriented, candidate, qubits, 0, context)?;
     }
 
     let swap = StandardGate::SWAP
@@ -407,7 +407,7 @@ pub(crate) fn plan_numeric_2q_unitary_for_device(
             matrix,
             qubits,
         )? {
-            push_device_candidate(&mut oriented, candidate, qubits, 1, context);
+            push_device_candidate(&mut oriented, candidate, qubits, 1, context)?;
         }
     }
 
@@ -477,7 +477,7 @@ fn push_device_candidate(
     qubits: [Qubit; 2],
     direction_order: usize,
     context: &DeviceTwoQubitSynthesisContext,
-) {
+) -> Result<(), CompilerError> {
     match context.placement() {
         DeviceSynthesisPlacement::PreLayoutEnvelope => {
             if let Some(evaluation) = context.evaluate_pre_layout(&candidate.operations, qubits) {
@@ -490,16 +490,34 @@ fn push_device_candidate(
             }
         }
         DeviceSynthesisPlacement::ExactPhysical => {
-            if let Some(physical_cost) = context.exact_cost(&candidate.operations, qubits) {
-                output.push(DeviceTwoQubitSynthesisCandidate {
+            match context.exact_cost_diagnostic(&candidate.operations, qubits) {
+                Ok(physical_cost) => output.push(DeviceTwoQubitSynthesisCandidate {
                     candidate,
                     physical_cost,
                     pre_layout: None,
                     direction_order,
-                });
+                }),
+                Err(super::DeviceContextCostFailure::Unsupported(_)) => {}
+                Err(super::DeviceContextCostFailure::Unprepared(state)) => {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "device synthesis context was not prepared for generated state {state:?}"
+                    )));
+                }
+                Err(super::DeviceContextCostFailure::WrongPlacement) => {
+                    return Err(CompilerError::InvariantViolation(
+                        "exact device candidate was evaluated with a pre-layout context"
+                            .to_string(),
+                    ));
+                }
+                Err(super::DeviceContextCostFailure::InvalidOperation(reason)) => {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "invalid generated exact-device candidate: {reason}"
+                    )));
+                }
             }
         }
     }
+    Ok(())
 }
 
 fn compare_device_candidates(

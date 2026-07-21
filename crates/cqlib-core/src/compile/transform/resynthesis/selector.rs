@@ -34,8 +34,8 @@ use crate::compile::transform::decompose::unitary::unitary_2q::{
     TwoQubitMatrixOp, two_qubit_operation_matrix_product,
 };
 use crate::compile::transform::decompose::unitary::{
-    DevicePhysicalCost, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
-    TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
+    DeviceContextCostFailure, DevicePhysicalCost, DeviceSynthesisPlacement,
+    DeviceTwoQubitSynthesisContext, TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
 };
 use ndarray::Array2;
 use num_complex::Complex64;
@@ -277,10 +277,25 @@ fn try_synthesize_device_block(
             (evaluation.worst_cost, Some(evaluation.domain))
         }
         DeviceSynthesisPlacement::ExactPhysical => {
-            let Some(cost) = context.exact_cost(&source_operations, block.qubits) else {
-                return Ok(None);
-            };
-            (cost, None)
+            match context.exact_cost_diagnostic(&source_operations, block.qubits) {
+                Ok(cost) => (cost, None),
+                Err(DeviceContextCostFailure::Unsupported(_)) => return Ok(None),
+                Err(DeviceContextCostFailure::Unprepared(state)) => {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "device resynthesis context was not prepared for source state {state:?}"
+                    )));
+                }
+                Err(DeviceContextCostFailure::WrongPlacement) => {
+                    return Err(CompilerError::InvariantViolation(
+                        "exact device resynthesis used a pre-layout context".to_string(),
+                    ));
+                }
+                Err(DeviceContextCostFailure::InvalidOperation(reason)) => {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "invalid exact-device resynthesis source: {reason}"
+                    )));
+                }
+            }
         }
     };
     synthesis_cache.with_device_plan(

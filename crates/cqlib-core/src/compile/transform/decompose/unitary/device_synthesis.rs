@@ -20,10 +20,19 @@
 //! one exact ordered pair. This module keeps that distinction internal and
 //! evaluates source and synthesized sequences through the same exact-qargs
 //! plans later used by device lowering.
+//!
+//! Exact-physical catalogs are request-scoped rather than device-wide: they
+//! prepare the circuit's actual gate states plus the fixed synthesis families.
+//! Diagnostic cost APIs therefore distinguish a missing prepared root from a
+//! root that was prepared and proven unsupported.
 
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
-use crate::compile::device_planning::{CalibrationEstimator, DeviceGateState, NativePlanCatalog};
+use crate::compile::device_planning::{
+    CalibrationEstimator, DeviceGateState, NativePlanAvailability, NativePlanCatalog,
+    NativePlanSummary,
+};
+use crate::compile::error::DeviceLoweringFailure;
 use crate::device::{Device, PhysicalQubit};
 use smallvec::smallvec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -76,6 +85,19 @@ pub(crate) struct DeviceTwoQubitSynthesisContext {
     data: Arc<DeviceTwoQubitSynthesisData>,
 }
 
+/// Diagnostic reason why an operation sequence cannot be costed by a device context.
+#[derive(Debug, Clone)]
+pub(crate) enum DeviceContextCostFailure {
+    /// The requested exact cost was evaluated with a pre-layout context.
+    WrongPlacement,
+    /// The sequence contains an instruction or qarg shape outside the cost API contract.
+    InvalidOperation(String),
+    /// The catalog was not built with this exact gate state as a root.
+    Unprepared(DeviceGateState),
+    /// The root was prepared, but no native lowering plan exists.
+    Unsupported(DeviceLoweringFailure),
+}
+
 impl DeviceTwoQubitSynthesisContext {
     /// Builds one batched catalog for a synthesis pass.
     pub(crate) fn build(
@@ -101,7 +123,10 @@ impl DeviceTwoQubitSynthesisContext {
                 .collect(),
         };
         let source_gates = collect_source_standard_gates(circuit.operations());
-        let roots = catalog_roots(&root_qubits, &ordered_pairs, &source_gates);
+        let mut roots = catalog_roots(&root_qubits, &ordered_pairs, &source_gates);
+        if placement == DeviceSynthesisPlacement::ExactPhysical {
+            roots.extend(collect_exact_physical_gate_roots(circuit.operations()));
+        }
         let catalog = NativePlanCatalog::build(device, roots)?;
         let estimator = CalibrationEstimator::from_device(device, &physical_qubits);
         let (component_by_qubit, eligible_components, eligible_pairs) = match placement {
@@ -209,16 +234,26 @@ impl DeviceTwoQubitSynthesisContext {
             .max_by(|left, right| left.compare(*right))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn exact_cost(
         &self,
         operations: &[ValueOperation],
         physical_qubits: [Qubit; 2],
     ) -> Option<DevicePhysicalCost> {
+        self.exact_cost_diagnostic(operations, physical_qubits).ok()
+    }
+
+    /// Costs a two-qubit sequence and preserves the reason costing is unavailable.
+    pub(crate) fn exact_cost_diagnostic(
+        &self,
+        operations: &[ValueOperation],
+        physical_qubits: [Qubit; 2],
+    ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
         if self.data.placement != DeviceSynthesisPlacement::ExactPhysical {
-            return None;
+            return Err(DeviceContextCostFailure::WrongPlacement);
         }
         let pair = physical_qubits.map(PhysicalQubit::from_qubit);
-        self.cost_on_pair(operations, physical_qubits, pair)
+        self.cost_on_pair_diagnostic(operations, physical_qubits, pair)
     }
 
     /// Costs one flat operation sequence on the physical qargs carried by the
@@ -228,19 +263,33 @@ impl DeviceTwoQubitSynthesisContext {
     /// plan used by [`DeviceLowerer`](crate::compile::transform::DeviceLowerer).
     /// Control flow and non-gate instructions are deliberately outside this
     /// sequence-level API and make the sequence unavailable for costing.
+    #[allow(dead_code)]
     pub(crate) fn exact_sequence_cost(
         &self,
         operations: &[ValueOperation],
     ) -> Option<DevicePhysicalCost> {
+        self.exact_sequence_cost_diagnostic(operations).ok()
+    }
+
+    /// Costs a flat exact-physical sequence with explicit coverage diagnostics.
+    ///
+    /// Unlike [`Self::exact_sequence_cost`], this method distinguishes a missing
+    /// catalog root from a prepared root for which planning found no lowering.
+    pub(crate) fn exact_sequence_cost_diagnostic(
+        &self,
+        operations: &[ValueOperation],
+    ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
         if self.data.placement != DeviceSynthesisPlacement::ExactPhysical {
-            return None;
+            return Err(DeviceContextCostFailure::WrongPlacement);
         }
 
         let mut leaves = Vec::new();
         let mut aggregate = self.data.estimator.identity_cost();
         for operation in operations {
             let ValueInstruction::Instruction(instruction) = &operation.instruction else {
-                return None;
+                return Err(DeviceContextCostFailure::InvalidOperation(
+                    "device sequence cost requires gate-like instructions".to_string(),
+                ));
             };
             if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
                 continue;
@@ -251,16 +300,20 @@ impl DeviceTwoQubitSynthesisContext {
                 .copied()
                 .map(PhysicalQubit::from_qubit)
                 .collect();
-            let state = DeviceGateState::from_instruction(instruction, ordered_qargs)?;
-            let summary = self.data.catalog.summary(&state)?;
+            let state =
+                DeviceGateState::from_instruction(instruction, ordered_qargs).ok_or_else(|| {
+                    DeviceContextCostFailure::InvalidOperation(format!(
+                        "missing device-planning key for {instruction}"
+                    ))
+                })?;
+            let summary = self.catalog_summary(&state)?;
             aggregate = aggregate.combine(self.data.estimator.cost(summary));
             leaves.extend(summary.leaves.iter().cloned());
         }
-        Some(
-            self.data
-                .estimator
-                .schedule_physical_cost(&leaves, aggregate),
-        )
+        Ok(self
+            .data
+            .estimator
+            .schedule_physical_cost(&leaves, aggregate))
     }
 
     fn coverage_key(&self, domain: &OrderedPairDomain) -> DeviceCoverageKey {
@@ -286,11 +339,23 @@ impl DeviceTwoQubitSynthesisContext {
         circuit_qubits: [Qubit; 2],
         physical_pair: [PhysicalQubit; 2],
     ) -> Option<DevicePhysicalCost> {
+        self.cost_on_pair_diagnostic(operations, circuit_qubits, physical_pair)
+            .ok()
+    }
+
+    fn cost_on_pair_diagnostic(
+        &self,
+        operations: &[ValueOperation],
+        circuit_qubits: [Qubit; 2],
+        physical_pair: [PhysicalQubit; 2],
+    ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
         let mut leaves = Vec::new();
         let mut aggregate = self.data.estimator.identity_cost();
         for operation in operations {
             let ValueInstruction::Instruction(instruction) = &operation.instruction else {
-                return None;
+                return Err(DeviceContextCostFailure::InvalidOperation(
+                    "device pair cost requires gate-like instructions".to_string(),
+                ));
             };
             if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
                 continue;
@@ -307,17 +372,40 @@ impl DeviceTwoQubitSynthesisContext {
                         None
                     }
                 })
-                .collect::<Option<_>>()?;
-            let state = DeviceGateState::from_instruction(instruction, ordered_qargs)?;
-            let summary = self.data.catalog.summary(&state)?;
+                .collect::<Option<_>>()
+                .ok_or_else(|| {
+                    DeviceContextCostFailure::InvalidOperation(
+                        "device pair cost references a qubit outside the requested pair"
+                            .to_string(),
+                    )
+                })?;
+            let state =
+                DeviceGateState::from_instruction(instruction, ordered_qargs).ok_or_else(|| {
+                    DeviceContextCostFailure::InvalidOperation(format!(
+                        "missing device-planning key for {instruction}"
+                    ))
+                })?;
+            let summary = self.catalog_summary(&state)?;
             aggregate = aggregate.combine(self.data.estimator.cost(summary));
             leaves.extend(summary.leaves.iter().cloned());
         }
-        Some(
-            self.data
-                .estimator
-                .schedule_physical_cost(&leaves, aggregate),
-        )
+        Ok(self
+            .data
+            .estimator
+            .schedule_physical_cost(&leaves, aggregate))
+    }
+
+    fn catalog_summary(
+        &self,
+        state: &DeviceGateState,
+    ) -> Result<&NativePlanSummary, DeviceContextCostFailure> {
+        match self.data.catalog.availability(state) {
+            Some(NativePlanAvailability::Feasible(summary)) => Ok(summary),
+            Some(NativePlanAvailability::Unsupported(failure)) => {
+                Err(DeviceContextCostFailure::Unsupported(failure.clone()))
+            }
+            None => Err(DeviceContextCostFailure::Unprepared(state.clone())),
+        }
     }
 }
 
@@ -414,6 +502,59 @@ fn collect_source_standard_gates(
         }
     }
     gates
+}
+
+fn collect_exact_physical_gate_roots(
+    operations: &[crate::circuit::Operation],
+) -> Vec<DeviceGateState> {
+    use crate::circuit::ClassicalControlOp;
+
+    let mut roots = Vec::new();
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(StandardGate::GPhase) => {}
+            Instruction::Standard(_) | Instruction::McGate(_) => {
+                if let Some(state) = DeviceGateState::from_instruction(
+                    &operation.instruction,
+                    operation
+                        .qubits
+                        .iter()
+                        .copied()
+                        .map(PhysicalQubit::from_qubit)
+                        .collect(),
+                ) {
+                    roots.push(state);
+                }
+            }
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    roots.extend(collect_exact_physical_gate_roots(
+                        op.then_body().operations(),
+                    ));
+                    if let Some(body) = op.else_body() {
+                        roots.extend(collect_exact_physical_gate_roots(body.operations()));
+                    }
+                }
+                ClassicalControlOp::While(op) => {
+                    roots.extend(collect_exact_physical_gate_roots(op.body().operations()));
+                }
+                ClassicalControlOp::For(op) => {
+                    roots.extend(collect_exact_physical_gate_roots(op.body().operations()));
+                }
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        roots.extend(collect_exact_physical_gate_roots(case.body().operations()));
+                    }
+                    if let Some(body) = op.default() {
+                        roots.extend(collect_exact_physical_gate_roots(body.operations()));
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            _ => {}
+        }
+    }
+    roots
 }
 
 fn collect_exact_physical_pairs(
@@ -531,120 +672,5 @@ fn movement_components(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::circuit::{ParameterValue, UnitaryGate};
-    use crate::compile::device_planning::cost::MetricAvailability;
-    use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
-    use crate::compile::transform::decompose::unitary::unitary_2q::{
-        plan_numeric_2q_unitary_for_device, select_device_unitary_candidate,
-    };
-    use crate::device::{EdgeProp, InstructionProp};
-
-    #[test]
-    fn pre_layout_prefers_broad_family_over_single_calibrated_edge() {
-        let p1 = PhysicalQubit::new(1);
-        let p2 = PhysicalQubit::new(2);
-        let mut device = Device::bidirectional_line("coverage", 4)
-            .unwrap()
-            .with_native_gates(vec![
-                Instruction::Standard(StandardGate::U),
-                Instruction::Standard(StandardGate::CX),
-            ])
-            .unwrap();
-        for (control, target) in [(p1, p2), (p2, p1)] {
-            device
-                .add_edge_properties(
-                    control,
-                    target,
-                    EdgeProp::new()
-                        .with_native_instruction(InstructionProp::new(
-                            Instruction::Standard(StandardGate::CZ),
-                            0.0001,
-                        ))
-                        .unwrap(),
-                )
-                .unwrap();
-        }
-        let matrix = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
-        let gate = UnitaryGate::new("SWAP", 2, 0)
-            .with_matrix(matrix.clone())
-            .unwrap();
-        let mut circuit = Circuit::new(4);
-        circuit
-            .unitary(gate, vec![Qubit::new(0), Qubit::new(3)])
-            .unwrap();
-        let context = DeviceTwoQubitSynthesisContext::build(
-            &device,
-            &circuit,
-            DeviceSynthesisPlacement::PreLayoutEnvelope,
-        )
-        .unwrap();
-        let qubits = [Qubit::new(0), Qubit::new(3)];
-        let candidates = plan_numeric_2q_unitary_for_device(&matrix, qubits, &context).unwrap();
-        let selected = select_device_unitary_candidate(candidates, qubits, &context).unwrap();
-
-        assert_eq!(selected.backend, TwoQubitUnitaryDecomposeBasis::Cx);
-        assert!(selected.operations.iter().all(|operation| {
-            !matches!(
-                operation.instruction,
-                ValueInstruction::Instruction(Instruction::Standard(StandardGate::CZ))
-            )
-        }));
-        assert!(selected.operations.iter().all(|operation| {
-            operation
-                .params
-                .iter()
-                .all(|param| matches!(param, ParameterValue::Fixed(_)))
-        }));
-    }
-
-    #[test]
-    fn equal_physical_cost_is_not_a_strict_improvement() {
-        let cost = DevicePhysicalCost {
-            native_two_qubit_ops: 3,
-            native_two_qubit_depth: 3,
-            error: MetricAvailability::Disabled,
-            total_native_depth: 7,
-            native_total_ops: 11,
-            duration: MetricAvailability::Disabled,
-            makespan: MetricAvailability::Disabled,
-        };
-
-        assert!(!cost.strictly_better_than(cost));
-    }
-
-    #[test]
-    fn exact_sequence_cost_supports_one_qubit_only_circuits() {
-        let device = Device::line("one-qubit-sequence", 1)
-            .unwrap()
-            .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
-            .unwrap()
-            .with_default_single_qubit_error(0.001);
-        let q0 = Qubit::new(0);
-        let mut circuit = Circuit::new(1);
-        circuit.u(q0, 0.3, -0.2, 0.7).unwrap();
-        let context = DeviceTwoQubitSynthesisContext::build(
-            &device,
-            &circuit,
-            DeviceSynthesisPlacement::ExactPhysical,
-        )
-        .unwrap();
-        let operations = vec![ValueOperation {
-            instruction: ValueInstruction::from_instruction(Instruction::Standard(StandardGate::U)),
-            qubits: smallvec![q0],
-            params: smallvec![
-                ParameterValue::Fixed(0.3),
-                ParameterValue::Fixed(-0.2),
-                ParameterValue::Fixed(0.7),
-            ],
-            label: None,
-        }];
-
-        let cost = context.exact_sequence_cost(&operations).unwrap();
-
-        assert_eq!(cost.native_two_qubit_ops, 0);
-        assert_eq!(cost.native_total_ops, 1);
-        assert_eq!(cost.total_native_depth, 1);
-    }
-}
+#[path = "device_synthesis_test.rs"]
+mod device_synthesis_test;
