@@ -1,6 +1,6 @@
 # 后端与设备配置
 
-完成认证后，需要选择一个量子后端。天衍平台上的后端由 `TianyanBackend` 表示，它包含后端名称、显示名称、状态、计费类型、可用比特数，以及设备配置下载接口。
+完成认证后，需要选择一个量子后端。天衍平台上的后端由 `TianyanBackend` 表示，它提供后端名称、显示名称、状态和计费类型等属性，以及物理比特数查询和设备配置下载接口。
 
 ## 1. 列举后端
 
@@ -12,20 +12,20 @@ platform = TianyanPlatform.login(os.environ["TIANYAN_API_KEY"])
 backends = platform.list_backends()
 
 for backend in backends:
-    print(backend.name, backend.display_name, backend.status, backend.num_qubits)
+    print(backend.name, backend.display_name, backend.status, backend.toll)
 ```
 
 `list_backends()` 会返回 `TianyanBackend` 列表。
 
-## 2. 后端对象字段
+## 2. 后端对象属性与方法
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `name` | `str` | 后端设备标识，用于提交任务，例如 `tianyan-287` |
-| `display_name` | `str` | 用户友好的显示名称 |
-| `status` | `DeviceStatus` | 设备运行状态 |
-| `toll` | `DeviceToll` | 计费类型 |
-| `num_qubits` | `int | None` | 平台返回的物理比特数，可能为空 |
+| 成员 | 形式 | 返回类型 | 说明 |
+|---|---|---|---|
+| `name` | 属性 | `str` | 后端设备标识，用于提交任务，例如 `tianyan-287` |
+| `display_name` | 属性 | `str` | 用户友好的显示名称 |
+| `status` | 属性 | `DeviceStatus` | 设备运行状态 |
+| `toll` | 属性 | `DeviceToll` | 计费类型 |
+| `num_qubits()` | 方法 | `int` | 返回设备配置中的物理比特总数，包含已禁用比特；首次调用会下载设备配置，后续调用复用缓存 |
 
 示例：
 
@@ -35,8 +35,13 @@ for backend in platform.list_backends():
     print(f"display={backend.display_name}")
     print(f"status={backend.status}")
     print(f"toll={backend.toll}")
-    print(f"qubits={backend.num_qubits}")
+
+# 选定后端后，再查询其设备配置中的物理比特总数
+backend = platform.get_backend("tianyan-287")
+print(f"qubits={backend.num_qubits()}")
 ```
+
+`num_qubits()` 是方法而不是属性。该方法首次调用时可能发起网络请求以获取设备配置；如果需要判断当前可用的物理比特，应进一步检查 `device_config()` 返回的设备拓扑和禁用比特信息。
 
 ## 3. 后端状态
 
