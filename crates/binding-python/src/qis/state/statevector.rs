@@ -14,6 +14,7 @@
 
 use crate::circuit::{PyMeasurement, PyStandardGate, circuit_impl::PyCircuit};
 use crate::device::result::{PyExecutionResult, PyOutcome};
+use crate::qis::pauli::PyPauliString;
 use crate::qis::qis_error_to_py_err;
 use crate::qis::state::outcome_probabilities_to_py;
 use cqlib_core::qis::state::statevector::Statevector;
@@ -375,6 +376,17 @@ impl PyStatevector {
     /// Applies a global phase to the statevector.
     fn apply_gphase(&mut self, phi: f64) -> PyResult<()> {
         self.inner.apply_gphase(phi).map_err(qis_error_to_py_err)
+    }
+
+    /// Applies the native Pauli-string rotation exp(-i * theta / 2 * P).
+    ///
+    /// Args:
+    ///     pauli: Hermitian Pauli string acting on all statevector qubits.
+    ///     theta: Rotation angle in radians.
+    fn apply_pauli_rotation(&mut self, pauli: &PyPauliString, theta: f64) -> PyResult<()> {
+        self.inner
+            .apply_pauli_rotation(&pauli.inner, theta)
+            .map_err(qis_error_to_py_err)
     }
 
     /// Applies the SWAP gate between two qubits.
