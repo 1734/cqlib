@@ -14,7 +14,7 @@
 use super::LowerToRoutingBasis;
 use crate::circuit::{Circuit, Instruction, MCGate, ParameterValue, Qubit, StandardGate};
 use crate::compile::CompilerError;
-use crate::compile::test_utils::standard_ops;
+use crate::compile::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
 use crate::compile::transform::Transformer;
 
 fn assert_no_gate_like_operation_exceeds_two_qubits(circuit: &Circuit) {
@@ -49,8 +49,27 @@ fn routing_basis_lowers_ccx_to_two_qubit_operations() {
         .unwrap();
 
     assert!(result.changed);
-    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CCX));
-    assert!(standard_ops(&result.circuit).contains(&StandardGate::CX));
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![
+            StandardGate::H,
+            StandardGate::CX,
+            StandardGate::TDG,
+            StandardGate::CX,
+            StandardGate::T,
+            StandardGate::CX,
+            StandardGate::TDG,
+            StandardGate::CX,
+            StandardGate::T,
+            StandardGate::T,
+            StandardGate::H,
+            StandardGate::CX,
+            StandardGate::T,
+            StandardGate::TDG,
+            StandardGate::CX,
+        ]
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &source);
     assert_no_gate_like_operation_exceeds_two_qubits(&result.circuit);
 }
 

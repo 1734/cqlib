@@ -336,15 +336,26 @@ pub(super) fn select_rewrites_in_context(
     }
 
     // Rank candidate patches by the local objective before taking any patch.
-    // Lower `after` cost is preferred; for equal outputs, higher `before` cost
-    // means the patch removed more expensive work. The remaining keys make the
-    // choice deterministic and prefer broader, smaller replacement patches
-    // near the front of the block. After sorting, the greedy pass below keeps
-    // only non-overlapping spans, so a selected patch owns every operation
-    // position it covers for this rewrite round.
+    // With an explicit target, prefer the patch that legalizes more unsupported
+    // operations so a cheap single-gate rewrite cannot occupy part of a better
+    // multi-operation lowering. The remaining keys make the choice deterministic.
     candidates.sort_by(|lhs, rhs| {
-        lhs.after
-            .cmp(&rhs.after)
+        let lhs_unsupported_reduction = lhs
+            .before
+            .unsupported_ops
+            .saturating_sub(lhs.after.unsupported_ops);
+        let rhs_unsupported_reduction = rhs
+            .before
+            .unsupported_ops
+            .saturating_sub(rhs.after.unsupported_ops);
+        let target_reduction_order = if target_context.is_some() {
+            rhs_unsupported_reduction.cmp(&lhs_unsupported_reduction)
+        } else {
+            std::cmp::Ordering::Equal
+        };
+
+        target_reduction_order
+            .then_with(|| lhs.after.cmp(&rhs.after))
             .then_with(|| lhs.before.cmp(&rhs.before).reverse())
             .then_with(|| {
                 rhs.patch

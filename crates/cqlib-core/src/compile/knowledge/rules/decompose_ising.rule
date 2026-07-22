@@ -164,4 +164,3 @@ rule decompose_rzx_to_rx_ry_rzz {
     match { RZX(theta) 0 1 }
     rewrite { RY(-π/2) 1, RZZ(theta) 0 1, RY(π/2) 1 }
 }
-

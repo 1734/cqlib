@@ -13,7 +13,7 @@
 use super::{KnowledgeRewriter, RewriteConfig};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, Directive, Instruction, MCGate,
-    Parameter, Qubit, StandardGate,
+    Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::CompilerError;
 use crate::compile::knowledge::library::RuleKind;
@@ -424,6 +424,13 @@ fn two_rounds_continue_chain_beyond_first_replacement() {
 
     let config = RewriteConfig::lowering()
         .with_enabled_kinds(vec![RuleKind::Decompose])
+        .with_target_instructions(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+        ])
+        .unwrap()
         .with_max_rounds(2);
     let result = KnowledgeRewriter::new(config).run(&circuit).unwrap();
 
@@ -492,6 +499,467 @@ fn lowering_reaches_target_basis_through_multiple_steps() {
     )));
     assert!(result.stats.rules_applied >= 2);
     assert!(result.stats.rounds_executed >= 3);
+}
+
+#[test]
+fn lowers_ccx_directly_to_multiple_qiskit_basis_sets() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.ccx(q0, q1, q2).unwrap();
+
+    for basis in [
+        vec![StandardGate::U, StandardGate::CX],
+        vec![StandardGate::U, StandardGate::CZ],
+        vec![StandardGate::RZ, StandardGate::X2P, StandardGate::CX],
+        vec![
+            StandardGate::RZ,
+            StandardGate::X2P,
+            StandardGate::X,
+            StandardGate::CZ,
+        ],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::CX],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::CZ],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RXX],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+        vec![
+            StandardGate::RZ,
+            StandardGate::X2P,
+            StandardGate::X,
+            StandardGate::RZZ,
+        ],
+    ] {
+        let target_instructions = basis.iter().copied().map(Instruction::Standard).collect();
+        let result = KnowledgeRewriter::new(
+            RewriteConfig::lowering()
+                .with_enabled_kinds(vec![RuleKind::Decompose])
+                .with_target_instructions(target_instructions)
+                .unwrap(),
+        )
+        .run(&circuit)
+        .unwrap();
+
+        assert!(result.changed);
+        assert!(
+            standard_ops(&result.circuit)
+                .iter()
+                .all(|gate| basis.contains(gate)),
+            "CCX lowering emitted a gate outside basis {basis:?}"
+        );
+    }
+}
+
+#[test]
+fn qiskit_rzz_ccx_rule_uses_five_entanglers() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.ccx(q0, q1, q2).unwrap();
+
+    let result = KnowledgeRewriter::new(
+        RewriteConfig::lowering()
+            .with_enabled_kinds(vec![RuleKind::Decompose])
+            .with_target_instructions(vec![
+                Instruction::Standard(StandardGate::RX),
+                Instruction::Standard(StandardGate::RY),
+                Instruction::Standard(StandardGate::RZZ),
+            ])
+            .unwrap(),
+    )
+    .run(&circuit)
+    .unwrap();
+
+    assert_eq!(
+        standard_ops(&result.circuit)
+            .iter()
+            .filter(|&&gate| gate == StandardGate::RZZ)
+            .count(),
+        5
+    );
+}
+
+#[test]
+fn qiskit_cz_ccx_rule_uses_native_x2p_x_rz_cz_template() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.ccx(q0, q1, q2).unwrap();
+
+    let result = KnowledgeRewriter::new(
+        RewriteConfig::lowering()
+            .with_enabled_kinds(vec![RuleKind::Decompose])
+            .with_target_instructions(vec![
+                Instruction::Standard(StandardGate::RZ),
+                Instruction::Standard(StandardGate::X2P),
+                Instruction::Standard(StandardGate::X),
+                Instruction::Standard(StandardGate::CZ),
+            ])
+            .unwrap(),
+    )
+    .run(&circuit)
+    .unwrap();
+
+    let gates = standard_ops(&result.circuit);
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|&&gate| gate == StandardGate::RZ)
+            .count(),
+        15
+    );
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|&&gate| gate == StandardGate::X2P)
+            .count(),
+        12
+    );
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|&&gate| gate == StandardGate::X)
+            .count(),
+        3
+    );
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|&&gate| gate == StandardGate::CZ)
+            .count(),
+        6
+    );
+}
+
+fn lower_to_standard_basis(circuit: &Circuit, basis: &[StandardGate]) -> Circuit {
+    KnowledgeRewriter::new(
+        RewriteConfig::lowering()
+            .with_target_instructions(basis.iter().copied().map(Instruction::Standard).collect())
+            .unwrap(),
+    )
+    .run(circuit)
+    .unwrap()
+    .circuit
+}
+
+fn count_gate(circuit: &Circuit, gate: StandardGate) -> usize {
+    standard_ops(circuit)
+        .iter()
+        .filter(|&&candidate| candidate == gate)
+        .count()
+}
+
+#[test]
+fn benchpress_h_ccx_h_motif_uses_direct_target_templates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.h(q2).unwrap();
+    circuit.ccx(q0, q1, q2).unwrap();
+    circuit.h(q2).unwrap();
+
+    for (basis, entangler, expected_count) in [
+        (
+            vec![
+                StandardGate::RZ,
+                StandardGate::X2P,
+                StandardGate::X,
+                StandardGate::CZ,
+            ],
+            StandardGate::CZ,
+            6,
+        ),
+        (
+            vec![
+                StandardGate::RZ,
+                StandardGate::X2P,
+                StandardGate::X,
+                StandardGate::CX,
+            ],
+            StandardGate::CX,
+            6,
+        ),
+        (
+            vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+            StandardGate::RZZ,
+            5,
+        ),
+    ] {
+        let lowered = lower_to_standard_basis(&circuit, &basis);
+        assert_eq!(count_gate(&lowered, entangler), expected_count);
+        assert!(
+            standard_ops(&lowered)
+                .iter()
+                .all(|gate| basis.contains(gate))
+        );
+    }
+}
+
+#[test]
+fn benchpress_cx_rz_cx_motif_composes_to_one_rzz() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.rz(q1, 0.37).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let lowered = lower_to_standard_basis(
+        &circuit,
+        &[StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+    );
+
+    assert_eq!(standard_ops(&lowered), vec![StandardGate::RZZ]);
+}
+
+#[test]
+fn benchpress_cx_phase_cx_motif_composes_to_one_rzz() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.phase(q1, 0.37).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let lowered = lower_to_standard_basis(
+        &circuit,
+        &[StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+    );
+
+    assert_eq!(standard_ops(&lowered), vec![StandardGate::RZZ]);
+}
+
+#[test]
+fn cz_rx_cz_motifs_compose_to_oriented_rzx() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+
+    for (rotation_qubit, expected_qubits) in [(q1, [q0, q1]), (q0, [q1, q0])] {
+        let mut circuit = Circuit::new(2);
+        circuit.cz(q0, q1).unwrap();
+        circuit.rx(rotation_qubit, 0.37).unwrap();
+        circuit.cz(q0, q1).unwrap();
+
+        let lowered = lower_to_standard_basis(&circuit, &[StandardGate::RZX]);
+        assert_eq!(standard_ops(&lowered), vec![StandardGate::RZX]);
+        assert_eq!(
+            lowered.operations()[0].qubits.as_slice(),
+            expected_qubits.as_slice()
+        );
+    }
+}
+
+#[test]
+fn cx_cz_motifs_compose_to_one_controlled_pauli() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+
+    for (cx_first, cz_qubits) in [
+        (true, [q0, q1]),
+        (true, [q1, q0]),
+        (false, [q0, q1]),
+        (false, [q1, q0]),
+    ] {
+        let mut circuit = Circuit::new(2);
+        if cx_first {
+            circuit.cx(q0, q1).unwrap();
+        }
+        circuit.cz(cz_qubits[0], cz_qubits[1]).unwrap();
+        if !cx_first {
+            circuit.cx(q0, q1).unwrap();
+        }
+
+        let lowered = lower_to_standard_basis(&circuit, &[StandardGate::Phase, StandardGate::CY]);
+        assert_eq!(
+            standard_ops(&lowered),
+            vec![StandardGate::Phase, StandardGate::CY]
+        );
+    }
+}
+
+#[test]
+fn degenerate_u_and_fsim_lower_directly_to_specialized_targets() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+
+    let mut u_circuit = Circuit::new(1);
+    u_circuit.u(q0, 0.0, 0.23, -0.41).unwrap();
+    let lowered_u = lower_to_standard_basis(&u_circuit, &[StandardGate::Phase]);
+    assert_eq!(standard_ops(&lowered_u), vec![StandardGate::Phase]);
+
+    let mut fsim_circuit = Circuit::new(2);
+    fsim_circuit.fsim(q0, q1, 0.0, 0.37).unwrap();
+    let lowered_fsim =
+        lower_to_standard_basis(&fsim_circuit, &[StandardGate::Phase, StandardGate::CRZ]);
+    assert_eq!(
+        standard_ops(&lowered_fsim),
+        vec![StandardGate::Phase, StandardGate::CRZ]
+    );
+}
+
+#[test]
+fn cancels_symmetric_multi_controlled_gate_applications() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+
+    for qubits in [[q0, q1, q2], [q1, q0, q2]] {
+        circuit
+            .append(
+                Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+                qubits,
+                std::iter::empty::<ParameterValue>(),
+                None,
+            )
+            .unwrap();
+    }
+    for qubits in [[q0, q1, q2], [q0, q2, q1]] {
+        circuit
+            .append(
+                Instruction::McGate(Box::new(MCGate::new(1, StandardGate::SWAP))),
+                qubits,
+                std::iter::empty::<ParameterValue>(),
+                None,
+            )
+            .unwrap();
+    }
+
+    let result = KnowledgeRewriter::new(
+        RewriteConfig::production().with_enabled_kinds(vec![RuleKind::Cancel]),
+    )
+    .run(&circuit)
+    .unwrap();
+    assert!(result.changed);
+    assert!(result.circuit.operations().is_empty());
+}
+
+#[test]
+fn normalizes_periodic_controlled_rotations_and_phases() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+
+    for gate in [StandardGate::CRX, StandardGate::CRY, StandardGate::CRZ] {
+        circuit
+            .append(
+                Instruction::Standard(gate),
+                [q0, q1],
+                [ParameterValue::from(4.0 * std::f64::consts::PI)],
+                None,
+            )
+            .unwrap();
+    }
+    circuit
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(2, StandardGate::Phase))),
+            [q0, q1, q2],
+            [ParameterValue::from(2.0 * std::f64::consts::PI)],
+            None,
+        )
+        .unwrap();
+
+    let result = KnowledgeRewriter::new(
+        RewriteConfig::production().with_enabled_kinds(vec![RuleKind::Canonicalize]),
+    )
+    .run(&circuit)
+    .unwrap();
+    assert!(result.changed);
+    assert!(result.circuit.operations().is_empty());
+}
+
+#[test]
+fn benchpress_controlled_phase_uses_minimal_entangler_templates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(1, StandardGate::Phase))),
+            [q0, q1],
+            [ParameterValue::from(0.37)],
+            None,
+        )
+        .unwrap();
+
+    for (basis, entangler, expected_count) in [
+        (
+            vec![
+                StandardGate::RZ,
+                StandardGate::X2P,
+                StandardGate::X,
+                StandardGate::CZ,
+            ],
+            StandardGate::CZ,
+            2,
+        ),
+        (
+            vec![
+                StandardGate::RZ,
+                StandardGate::X2P,
+                StandardGate::X,
+                StandardGate::CX,
+            ],
+            StandardGate::CX,
+            2,
+        ),
+        (
+            vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+            StandardGate::RZZ,
+            1,
+        ),
+    ] {
+        let lowered = lower_to_standard_basis(&circuit, &basis);
+        assert_eq!(count_gate(&lowered, entangler), expected_count);
+    }
+}
+
+#[test]
+fn benchpress_controlled_swap_uses_seven_entanglers() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(1, StandardGate::SWAP))),
+            [q0, q1, q2],
+            std::iter::empty::<ParameterValue>(),
+            None,
+        )
+        .unwrap();
+
+    for (basis, entangler) in [
+        (
+            vec![
+                StandardGate::RZ,
+                StandardGate::X2P,
+                StandardGate::X,
+                StandardGate::CZ,
+            ],
+            StandardGate::CZ,
+        ),
+        (
+            vec![
+                StandardGate::RZ,
+                StandardGate::X2P,
+                StandardGate::X,
+                StandardGate::CX,
+            ],
+            StandardGate::CX,
+        ),
+        (
+            vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+            StandardGate::RZZ,
+        ),
+    ] {
+        let lowered = lower_to_standard_basis(&circuit, &basis);
+        assert_eq!(count_gate(&lowered, entangler), 7);
+    }
 }
 
 #[test]

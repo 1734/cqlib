@@ -515,7 +515,26 @@ rule decompose_mcphase1_to_phase_cx {
 
 rule decompose_mcphase1_to_rx_ry_rzz {
     match { MCPhase[1](theta) 0 1 }
-    rewrite { RX(-π/2) 0, RY(theta/2) 0, RX(π/2) 0, GPhase(theta/4), RX(-π/2) 1, RY(theta/2) 1, RX(π/2) 1, GPhase(theta/4), RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, GPhase(π), RX(-π/2) 1, RY(-theta/2) 1, RX(π/2) 1, GPhase(-theta/4), RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, GPhase(π) }
+    rewrite { RX(-π/2) 0, RY(theta/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(theta/2) 1, RX(π/2) 1, RZZ(-theta/2) 0 1, GPhase(theta/4) }
+}
+
+rule decompose_mcphase1_to_rz_cx {
+    match { MCPhase[1](theta) 0 1 }
+    rewrite { RZ(theta/2) 0, CX 0 1, RZ(-theta/2) 1, CX 0 1, RZ(theta/2) 1, GPhase(theta/4) }
+}
+
+rule decompose_mcphase1_to_rz_x2p_cz {
+    match { MCPhase[1](theta) 0 1 }
+    rewrite {
+        RZ(theta/2) 0,
+        RZ(π/2) 1, X2P 1, RZ(π) 1,
+        CZ 0 1,
+        X2P 1, RZ(π) 1, RZ(-theta/2) 1,
+        X2P 1, RZ(π) 1,
+        CZ 0 1,
+        X2P 1, RZ(π/2) 1, RZ(theta/2) 1,
+        GPhase(π + theta/4)
+    }
 }
 
 rule decompose_mcphase2_to_parity_phase {
@@ -534,6 +553,78 @@ rule decompose_mcphase2_to_parity_phase {
 rule decompose_mcswap1_to_ccx {
     match { MCSWAP[1] 0 1 2 }
     rewrite { CCX 0 1 2, CCX 0 2 1, CCX 0 1 2 }
+}
+
+rule decompose_mcswap1_to_rz_x2p_cz {
+    match { MCSWAP[1] 0 1 2 }
+    rewrite {
+        X2P 1,
+        CZ 2 1,
+        RZ(-π) 1, X2P 1, RZ(-π/4) 1,
+        X2P 2, RZ(-3*π/4) 2, X2P 2,
+        CZ 0 2,
+        X2P 2, RZ(5*π/4) 2, X2P 2, RZ(π) 2,
+        CZ 1 2,
+        X2P 1, RZ(π) 1,
+        X2P 2, RZ(3*π/4) 2, X2P 2, RZ(π) 2,
+        CZ 0 2,
+        CZ 0 1,
+        RZ(π/4) 0,
+        X2P 1, RZ(3*π/4) 1, X2P 1, RZ(π) 1,
+        CZ 0 1,
+        X2P 2, RZ(5*π/4) 2, X2P 2, RZ(π/2) 2,
+        CZ 2 1,
+        X2P 1, RZ(π/2) 1,
+        GPhase(15*π/8)
+    }
+}
+
+rule decompose_mcswap1_to_rz_x2p_cx {
+    match { MCSWAP[1] 0 1 2 }
+    rewrite {
+        X2P 1,
+        RZ(π/4) 2, X2P 2, RZ(π/2) 2,
+        CX 1 2,
+        RZ(-π) 1, X2P 1, RZ(-3*π/4) 1,
+        RZ(π/2) 2, X2P 2, RZ(-π/4) 2, X2P 2, RZ(π/4) 2,
+        CX 0 2, RZ(π/4) 2,
+        CX 1 2, RZ(-π/4) 2,
+        CX 0 2,
+        CX 0 1, RZ(π/4) 0, RZ(-π/4) 1,
+        CX 0 1,
+        RZ(3*π/4) 2, X2P 2, RZ(π/2) 2,
+        CX 2 1,
+        GPhase(7*π/8)
+    }
+}
+
+rule decompose_mcswap1_to_rx_ry_rzz {
+    match { MCSWAP[1] 0 1 2 }
+    rewrite {
+        RY(π/2) 1, RX(π) 1,
+        RZZ(π/2) 2 1,
+        RY(π/2) 1, RX(-π/2) 1,
+        RY(π/2) 2, RX(π/2) 2,
+        RZZ(π/4) 1 2,
+        RY(-π/2) 1, RX(π/4) 1,
+        RZZ(π/2) 0 1,
+        RX(π/2) 0, RY(π/2) 0, RX(-π/2) 0,
+        RX(-π/2) 1,
+        RX(-π/2) 2, RY(π/4) 2, RX(-π/2) 2,
+        RZZ(π/4) 1 2,
+        RY(-π/2) 1, RX(π/4) 1,
+        RZZ(π/2) 0 1,
+        RX(π/2) 0, RY(π/2) 0, RX(π/2) 0,
+        RX(π/2) 1, RY(π/2) 1, RX(-π/2) 1,
+        RX(-π/2) 2, RY(π/4) 2, RX(-π/2) 2,
+        RZZ(π/4) 0 2,
+        RX(π/2) 0, RY(π/4) 0, RX(π/2) 0,
+        RY(π/2) 2, RX(-3*π/4) 2,
+        RZZ(π/2) 2 1,
+        RY(π/2) 1, RX(π/2) 1,
+        RX(π/2) 2, RY(π/2) 2, RX(-π/2) 2,
+        GPhase(π/8)
+    }
 }
 
 rule decompose_mcrzz1_to_ccx_crz {
