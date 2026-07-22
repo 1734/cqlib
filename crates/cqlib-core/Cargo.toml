@@ -66,3 +66,7 @@ proptest.workspace = true
 [[bench]]
 name = "two_qubit_synthesis_cache"
 harness = false
+
+[[bench]]
+name = "knowledge_rewrite_incremental"
+harness = false

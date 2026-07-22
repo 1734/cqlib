@@ -1150,3 +1150,316 @@ fn operation_param(circuit: &Circuit, param: &CircuitParam) -> Parameter {
             .expect("parameter index should exist in rebuilt circuit"),
     }
 }
+
+#[test]
+fn incremental_matches_full_scan_for_multi_round_lowering() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+            [q0, q1, q2],
+            std::iter::empty::<crate::circuit::ParameterValue>(),
+            None,
+        )
+        .unwrap();
+    let config = RewriteConfig::lowering()
+        .with_enabled_kinds(vec![RuleKind::Decompose])
+        .with_target_instructions(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+        ])
+        .unwrap()
+        .with_max_rounds(4);
+
+    let full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&circuit)
+        .unwrap();
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+
+    assert_eq!(incremental.circuit, full.circuit);
+    assert_eq!(incremental.changed, full.changed);
+    assert_eq!(incremental.stats, full.stats);
+}
+
+#[test]
+fn parallel_incremental_matches_full_scan_on_large_block() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    for _ in 0..8_200 {
+        circuit.h(q0).unwrap();
+        circuit.h(q0).unwrap();
+    }
+    let config = RewriteConfig::production().with_enabled_kinds(vec![RuleKind::Cancel]);
+
+    let full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&circuit)
+        .unwrap();
+    let incremental = KnowledgeRewriter::new(config.clone())
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+    let automatic = KnowledgeRewriter::new(config.clone())
+        .run(&circuit)
+        .unwrap();
+    assert_eq!(incremental.circuit, full.circuit);
+    assert_eq!(incremental.stats, full.stats);
+    assert_eq!(automatic.circuit, full.circuit);
+    assert_eq!(automatic.changed, full.changed);
+    assert_eq!(automatic.stats, full.stats);
+
+    let single_thread = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(|| {
+            KnowledgeRewriter::new(config.clone())
+                .force_incremental()
+                .run(&circuit)
+                .unwrap()
+        });
+    let four_threads = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(|| {
+            KnowledgeRewriter::new(config)
+                .force_incremental()
+                .run(&circuit)
+                .unwrap()
+        });
+    assert_eq!(single_thread.circuit, four_threads.circuit);
+    assert_eq!(single_thread.stats, four_threads.stats);
+}
+
+#[test]
+fn incremental_matches_full_scan_with_root_phase_replacement() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.h(q0).unwrap();
+    circuit.y(q0).unwrap();
+    circuit.h(q0).unwrap();
+    let config = RewriteConfig::production();
+
+    let full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&circuit)
+        .unwrap();
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+
+    assert_eq!(incremental.circuit, full.circuit);
+    assert_eq!(incremental.stats, full.stats);
+}
+
+#[test]
+fn incremental_matches_full_scan_in_control_flow_scope() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.h(q0)?;
+            body.y(q0)?;
+            body.h(q0)?;
+            body.x(q0)?;
+            body.x(q0)
+        })
+        .unwrap();
+    let config = RewriteConfig::production();
+
+    let full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&circuit)
+        .unwrap();
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+
+    assert_eq!(incremental.circuit, full.circuit);
+    assert_eq!(incremental.stats, full.stats);
+}
+
+#[test]
+fn incremental_matches_full_scan_across_block_boundaries() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.h(q0).unwrap();
+    circuit.h(q0).unwrap();
+    circuit.barrier(vec![q0]).unwrap();
+    circuit.x(q0).unwrap();
+    circuit.x(q0).unwrap();
+    let config = RewriteConfig::production();
+
+    let full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&circuit)
+        .unwrap();
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+
+    assert_eq!(incremental.circuit, full.circuit);
+    assert_eq!(incremental.stats, full.stats);
+}
+
+#[test]
+fn deterministic_randomized_incremental_matches_full_scan() {
+    for seed in 0..16_u64 {
+        let mut state = seed.wrapping_add(1);
+        let mut circuit = Circuit::new(3);
+        for _ in 0..64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let qubit = Qubit::new(((state >> 32) % 3) as u32);
+            match state % 7 {
+                0 => circuit.h(qubit).unwrap(),
+                1 => circuit.x(qubit).unwrap(),
+                2 => circuit.y(qubit).unwrap(),
+                3 => circuit.z(qubit).unwrap(),
+                4 => circuit.s(qubit).unwrap(),
+                5 => circuit.t(qubit).unwrap(),
+                _ => circuit.rz(qubit, (state & 0xff) as f64 / 64.0).unwrap(),
+            }
+        }
+        let config = RewriteConfig::production();
+        let full = KnowledgeRewriter::new(config.clone())
+            .force_full_scan()
+            .run(&circuit)
+            .unwrap();
+        let incremental = KnowledgeRewriter::new(config)
+            .force_incremental()
+            .run(&circuit)
+            .unwrap();
+        assert_eq!(incremental.circuit, full.circuit, "seed={seed}");
+        assert_eq!(incremental.stats, full.stats, "seed={seed}");
+    }
+}
+
+/// Runs both execution engines over `circuit` and asserts bit-identical
+/// results, including all four public statistics fields.
+fn assert_incremental_matches_full_scan(config: RewriteConfig, circuit: &Circuit) {
+    let full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(circuit)
+        .unwrap();
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(circuit)
+        .unwrap();
+    assert_eq!(incremental.circuit, full.circuit);
+    assert_eq!(incremental.changed, full.changed);
+    assert_eq!(incremental.stats, full.stats);
+}
+
+#[test]
+fn incremental_matches_full_scan_with_symbolic_parameters() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    // merge_rx combines the pair into RX(θ + φ); the duplicate symbolic
+    // parameters and the resulting expression must be interned identically
+    // by both engines.
+    circuit.rx(q0, Parameter::symbol("theta")).unwrap();
+    circuit.rx(q0, Parameter::symbol("phi")).unwrap();
+    circuit.rz(q0, Parameter::symbol("theta")).unwrap();
+    circuit.rz(q0, Parameter::symbol("theta")).unwrap();
+
+    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+}
+
+#[test]
+fn incremental_matches_full_scan_with_top_level_gphase_across_rounds() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    // A source-level GPhase is absorbed into the circuit global phase on
+    // every round. The barrier makes the circuit ineligible for the linear
+    // workspace, so this exercises the round-based workset engine's
+    // full-scope fallback together with the H-Y-H global-phase replacement.
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::GPhase),
+            std::iter::empty::<Qubit>(),
+            [Parameter::from(0.25).into()],
+            None,
+        )
+        .unwrap();
+    circuit.h(q0).unwrap();
+    circuit.y(q0).unwrap();
+    circuit.h(q0).unwrap();
+    circuit.barrier(vec![q0]).unwrap();
+    circuit.x(q0).unwrap();
+    circuit.x(q0).unwrap();
+
+    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+}
+
+#[test]
+fn incremental_matches_full_scan_when_block_instruction_set_changes() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    // The first block keeps its X after both H gates cancel, so its
+    // instruction set changes {H, X} -> {X} without the block disappearing:
+    // the workset engine must mark it for a full rescan (BlockWorkset::Full)
+    // because static filter results may change for every anchor.
+    circuit.h(q0).unwrap();
+    circuit.h(q0).unwrap();
+    circuit.x(q0).unwrap();
+    circuit.barrier(vec![q0]).unwrap();
+    circuit.z(q0).unwrap();
+
+    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+}
+
+#[test]
+fn incremental_matches_full_scan_when_dirty_ratio_forces_full_scan() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    // A long chain of mergeable rotations: round one merges adjacent pairs
+    // everywhere, dirtying more than half of the eligible anchors and
+    // forcing the dirty-ratio full-scan fallback on the following round.
+    // Later rounds keep merging the shortened chain.
+    for index in 0..64 {
+        circuit.rz(q0, 0.0625 * (index % 4 + 1) as f64).unwrap();
+    }
+
+    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+}
+
+#[test]
+fn incremental_matches_full_scan_at_round_limits() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    // Sixteen mergeable rotations need more than four rounds to converge, so
+    // small round limits truncate the fixpoint before stability.
+    for _ in 0..16 {
+        circuit.rz(q0, 0.125).unwrap();
+    }
+
+    for max_rounds in 1..=4u8 {
+        let config = RewriteConfig::production().with_max_rounds(max_rounds);
+        let full = KnowledgeRewriter::new(config.clone())
+            .force_full_scan()
+            .run(&circuit)
+            .unwrap();
+        let incremental = KnowledgeRewriter::new(config)
+            .force_incremental()
+            .run(&circuit)
+            .unwrap();
+        assert_eq!(incremental.circuit, full.circuit, "max_rounds={max_rounds}");
+        assert_eq!(incremental.changed, full.changed, "max_rounds={max_rounds}");
+        assert_eq!(incremental.stats, full.stats, "max_rounds={max_rounds}");
+    }
+}
