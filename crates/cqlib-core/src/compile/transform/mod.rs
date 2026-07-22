@@ -59,6 +59,7 @@ pub mod canonicalize;
 pub mod decompose;
 pub mod device_lowering;
 pub mod layout;
+pub(crate) mod lowering_support;
 pub(crate) mod native_optimization;
 pub mod one_qubit_optimization;
 pub mod rebuild;

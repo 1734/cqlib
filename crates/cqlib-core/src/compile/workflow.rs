@@ -368,11 +368,15 @@ impl CompilerWorkflow {
             );
             return Ok(());
         }
-        state.apply_transform(
+        // The native optimizer canonicalizes its input on entry (paired with
+        // its entry device validation), so a separate workflow pass here would
+        // be an immediately duplicated full-circuit pass.
+        state.record_skipped(
             "optimization",
             "canonicalize.native_input",
-            |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
-        )
+            "native optimizer canonicalizes its input on entry",
+        );
+        Ok(())
     }
 
     fn optimize_native_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {

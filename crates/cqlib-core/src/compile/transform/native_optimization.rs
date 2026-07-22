@@ -142,11 +142,19 @@ impl<'a> NativeOptimizer<'a> {
                 self.resynthesis.clone(),
                 context.clone(),
                 &mut resynthesis_session,
-            )?
-            .circuit;
+            )?;
             let locally_optimized = OptimizeNativeLocalGates::new(context.clone())
-                .transform(&resynthesized, None)?
-                .circuit;
+                .transform(&resynthesized.circuit, None)?;
+            // A fully stable round makes the remaining passes deterministic
+            // no-ops: lowering and canonicalization reproduce `current` (the
+            // entry point already validated it as exact-native), so this is
+            // the `candidate == current` break below without paying for the
+            // full-circuit lowering, canonicalization, validation, and cost
+            // evaluation in between.
+            if !resynthesized.changed && !locally_optimized.changed {
+                break;
+            }
+            let locally_optimized = locally_optimized.circuit;
             let legalized =
                 match DeviceLowerer::new(self.device).transform(&locally_optimized, None) {
                     Ok(result) => result.circuit,
@@ -156,7 +164,7 @@ impl<'a> NativeOptimizer<'a> {
                     // that local candidate and retain this round's 2Q result.
                     Err(CompilerError::DeviceLoweringFailed(_)) => {
                         DeviceLowerer::new(self.device)
-                            .transform(&resynthesized, None)?
+                            .transform(&resynthesized.circuit, None)?
                             .circuit
                     }
                     Err(error) => return Err(error),
@@ -164,7 +172,14 @@ impl<'a> NativeOptimizer<'a> {
             let candidate = Canonicalizer::production()
                 .transform(&legalized, None)?
                 .circuit;
-            self.device.validate_circuit(&candidate)?;
+            // Debug builds validate every round to keep the safety net tight
+            // while developing; release builds validate only accepted
+            // candidates. The terminal workflow validation remains the final
+            // safety boundary either way.
+            let validate_every_round = cfg!(debug_assertions);
+            if validate_every_round {
+                self.device.validate_circuit(&candidate)?;
+            }
 
             if candidate == current {
                 current = candidate;
@@ -172,6 +187,9 @@ impl<'a> NativeOptimizer<'a> {
             }
             let candidate_costs = self.candidate_costs_with_reuse(&candidate, &mut context)?;
             if scope_costs_dominate(&candidate_costs, &best_costs) {
+                if !validate_every_round {
+                    self.device.validate_circuit(&candidate)?;
+                }
                 best = candidate.clone();
                 best_costs = candidate_costs;
                 stale = 0;
@@ -256,49 +274,42 @@ fn scope_costs_with_context(
 ) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, ScopeCostError>
 {
     let mut costs = Vec::new();
-    collect_scope_costs(circuit.operations(), circuit, context, &mut costs)?;
+    collect_scope_costs(circuit.operations(), context, &mut costs)?;
     Ok(costs)
 }
 
 fn collect_scope_costs(
     operations: &[Operation],
-    circuit: &Circuit,
     context: &DeviceTwoQubitSynthesisContext,
     output: &mut Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>,
 ) -> Result<(), ScopeCostError> {
-    let mut gate_operations = Vec::new();
+    let mut accumulator = context
+        .exact_sequence_cost_accumulator()
+        .map_err(ScopeCostError::Context)?;
     for operation in operations {
         match &operation.instruction {
-            Instruction::Standard(_) | Instruction::McGate(_) => {
-                gate_operations.push(ValueOperation {
-                    instruction: ValueInstruction::from_instruction(operation.instruction.clone()),
-                    qubits: operation.qubits.clone(),
-                    params: CircuitRebuildContext::resolve_source_params(
-                        circuit,
-                        &operation.params,
-                    )?,
-                    label: operation.label.clone(),
-                });
-            }
+            Instruction::Standard(_) | Instruction::McGate(_) => accumulator
+                .add_gate(&operation.instruction, &operation.qubits)
+                .map_err(ScopeCostError::Context)?,
             Instruction::ClassicalControl(control) => match control {
                 ClassicalControlOp::If(op) => {
-                    collect_scope_costs(op.then_body().operations(), circuit, context, output)?;
+                    collect_scope_costs(op.then_body().operations(), context, output)?;
                     if let Some(body) = op.else_body() {
-                        collect_scope_costs(body.operations(), circuit, context, output)?;
+                        collect_scope_costs(body.operations(), context, output)?;
                     }
                 }
                 ClassicalControlOp::While(op) => {
-                    collect_scope_costs(op.body().operations(), circuit, context, output)?;
+                    collect_scope_costs(op.body().operations(), context, output)?;
                 }
                 ClassicalControlOp::For(op) => {
-                    collect_scope_costs(op.body().operations(), circuit, context, output)?;
+                    collect_scope_costs(op.body().operations(), context, output)?;
                 }
                 ClassicalControlOp::Switch(op) => {
                     for case in op.cases() {
-                        collect_scope_costs(case.body().operations(), circuit, context, output)?;
+                        collect_scope_costs(case.body().operations(), context, output)?;
                     }
                     if let Some(body) = op.default() {
-                        collect_scope_costs(body.operations(), circuit, context, output)?;
+                        collect_scope_costs(body.operations(), context, output)?;
                     }
                 }
                 ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
@@ -310,10 +321,7 @@ fn collect_scope_costs(
             | Instruction::Delay => {}
         }
     }
-    let cost = context
-        .exact_sequence_cost_diagnostic(&gate_operations)
-        .map_err(ScopeCostError::Context)?;
-    output.push(cost);
+    output.push(accumulator.finish());
     Ok(())
 }
 

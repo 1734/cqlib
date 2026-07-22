@@ -29,6 +29,7 @@ use crate::compile::transform::rewrite::matcher::{
     select_rewrites_for_anchor_ranges,
 };
 
+use crate::compile::transform::lowering_support::LoweringTarget;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{TransformResult, Transformer};
 use smallvec::SmallVec;
@@ -428,17 +429,6 @@ pub fn rewrite_circuit(
     KnowledgeRewriter::new(config).run(circuit)
 }
 
-enum SequenceTarget<'a> {
-    TopLevel {
-        output: &'a mut Vec<ValueOperation>,
-        phase_delta: &'a mut Parameter,
-    },
-    ControlFlowBody {
-        output: &'a mut Vec<ValueOperation>,
-        phase_delta: &'a mut Parameter,
-    },
-}
-
 struct RoundRewriter<'a> {
     source: &'a Circuit,
     rules: &'a CompiledRuleSet,
@@ -478,10 +468,7 @@ impl<'a> RoundRewriter<'a> {
             source.operations(),
             &root_classical,
             &ScopeId::default(),
-            SequenceTarget::TopLevel {
-                output: &mut operations,
-                phase_delta: &mut phase_delta,
-            },
+            LoweringTarget::top_level(&mut operations, &mut phase_delta),
         )?;
         let global_phase = &source.global_phase() + &phase_delta;
         let circuit = rewriter
@@ -496,7 +483,7 @@ impl<'a> RoundRewriter<'a> {
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
         scope: &ScopeId,
-        mut target: SequenceTarget<'_>,
+        mut target: LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         let mut cursor = 0;
         let mut block_slot = 0;
@@ -559,7 +546,7 @@ impl<'a> RoundRewriter<'a> {
                 self.next_workset
                     .caches
                     .insert(block_id.clone(), Arc::clone(&cache));
-                if matches!(target, SequenceTarget::TopLevel { .. })
+                if target.is_top_level()
                     && block
                         .iter()
                         .any(|operation| is_gphase_instruction(&operation.instruction))
@@ -672,7 +659,7 @@ impl<'a> RoundRewriter<'a> {
         block: &[Operation],
         patches: Vec<RewritePatch>,
         classical_remap: &ClassicalRemap,
-        target: &mut SequenceTarget<'_>,
+        target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         // Drives off the shared patch application plan; see
         // `patch_application_plan` for the application order.
@@ -708,7 +695,7 @@ impl<'a> RoundRewriter<'a> {
         classical_remap: &ClassicalRemap,
         scope: &ScopeId,
         control_slot: usize,
-        target: &mut SequenceTarget<'_>,
+        target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         if !self.config.recurses_control_flow() {
             return self.emit_preserved_operation(operation, classical_remap, target);
@@ -749,10 +736,7 @@ impl<'a> RoundRewriter<'a> {
                     op.then_body().operations(),
                     classical_remap,
                     &then_scope,
-                    SequenceTarget::ControlFlowBody {
-                        output: &mut then_body,
-                        phase_delta: &mut then_phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut then_body, &mut then_phase),
                 )?;
                 if !then_phase.is_zero() {
                     self.next_workset.mark_full_scope(then_scope);
@@ -769,10 +753,7 @@ impl<'a> RoundRewriter<'a> {
                             body.operations(),
                             classical_remap,
                             &else_scope,
-                            SequenceTarget::ControlFlowBody {
-                                output: &mut rewritten,
-                                phase_delta: &mut body_phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut rewritten, &mut body_phase),
                         )?;
                         if !body_phase.is_zero() {
                             self.next_workset.mark_full_scope(else_scope);
@@ -796,10 +777,7 @@ impl<'a> RoundRewriter<'a> {
                     op.body().operations(),
                     classical_remap,
                     &body_scope,
-                    SequenceTarget::ControlFlowBody {
-                        output: &mut body,
-                        phase_delta: &mut body_phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut body, &mut body_phase),
                 )?;
                 if !body_phase.is_zero() {
                     self.next_workset.mark_full_scope(body_scope);
@@ -819,10 +797,7 @@ impl<'a> RoundRewriter<'a> {
                     op.body().operations(),
                     classical_remap,
                     &body_scope,
-                    SequenceTarget::ControlFlowBody {
-                        output: &mut body,
-                        phase_delta: &mut body_phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut body, &mut body_phase),
                 )?;
                 if !body_phase.is_zero() {
                     self.next_workset.mark_full_scope(body_scope);
@@ -853,10 +828,7 @@ impl<'a> RoundRewriter<'a> {
                             case.body().operations(),
                             classical_remap,
                             &case_scope,
-                            SequenceTarget::ControlFlowBody {
-                                output: &mut rewritten,
-                                phase_delta: &mut body_phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut rewritten, &mut body_phase),
                         )?;
                         if !body_phase.is_zero() {
                             self.next_workset.mark_full_scope(case_scope);
@@ -879,10 +851,7 @@ impl<'a> RoundRewriter<'a> {
                             body.operations(),
                             classical_remap,
                             &default_scope,
-                            SequenceTarget::ControlFlowBody {
-                                output: &mut rewritten,
-                                phase_delta: &mut body_phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut rewritten, &mut body_phase),
                         )?;
                         if !body_phase.is_zero() {
                             self.next_workset.mark_full_scope(default_scope);
@@ -912,13 +881,13 @@ impl<'a> RoundRewriter<'a> {
         params: &[CircuitParam],
         label: Option<Box<str>>,
         classical_remap: &ClassicalRemap,
-        target: &mut SequenceTarget<'_>,
+        target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         if is_gphase_instruction(&instruction) {
-            if matches!(target, SequenceTarget::TopLevel { .. }) {
+            if target.is_top_level() {
                 self.stats.representation_changes += 1;
             }
-            Self::accumulate_phase(target, self.source_gphase_param(params)?);
+            target.accumulate_phase(self.source_gphase_param(params)?);
             return Ok(());
         }
 
@@ -933,20 +902,20 @@ impl<'a> RoundRewriter<'a> {
         &mut self,
         operation: &Operation,
         classical_remap: &ClassicalRemap,
-        target: &mut SequenceTarget<'_>,
+        target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         if is_gphase_instruction(&operation.instruction) {
-            if matches!(target, SequenceTarget::TopLevel { .. }) {
+            if target.is_top_level() {
                 self.stats.representation_changes += 1;
             }
-            Self::accumulate_phase(target, self.source_gphase_param(&operation.params)?);
+            target.accumulate_phase(self.source_gphase_param(&operation.params)?);
             return Ok(());
         }
 
         let operation =
             self.rebuild
                 .remap_preserved_operation(self.source, operation, classical_remap)?;
-        Self::push_value_operation(target, operation);
+        target.push(operation);
         Ok(())
     }
 
@@ -956,27 +925,24 @@ impl<'a> RoundRewriter<'a> {
         qubits: SmallVec<[Qubit; 3]>,
         params: SmallVec<[ParameterValue; 1]>,
         label: Option<Box<str>>,
-        target: &mut SequenceTarget<'_>,
+        target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
-        Self::push_value_operation(
-            target,
-            ValueOperation {
-                instruction,
-                qubits,
-                params,
-                label,
-            },
-        );
+        target.push(ValueOperation {
+            instruction,
+            qubits,
+            params,
+            label,
+        });
         Ok(())
     }
 
     fn emit_replacement(
         &mut self,
         replacement: &ReplacementItem,
-        target: &mut SequenceTarget<'_>,
+        target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         if is_gphase_instruction(&replacement.instruction) {
-            Self::accumulate_phase(target, Self::replacement_gphase_param(replacement)?);
+            target.accumulate_phase(Self::replacement_gphase_param(replacement)?);
             return Ok(());
         }
 
@@ -1023,28 +989,7 @@ impl<'a> RoundRewriter<'a> {
                 "GPhase replacement must contain one parameter".to_string(),
             )
         })?;
-        Ok(match phase {
-            ParameterValue::Fixed(value) => Parameter::from(*value),
-            ParameterValue::Param(parameter) => parameter.clone(),
-        })
-    }
-
-    fn push_value_operation(target: &mut SequenceTarget<'_>, operation: ValueOperation) {
-        match target {
-            SequenceTarget::TopLevel { output, .. }
-            | SequenceTarget::ControlFlowBody { output, .. } => output.push(operation),
-        }
-    }
-
-    fn accumulate_phase(target: &mut SequenceTarget<'_>, phase: Parameter) {
-        match target {
-            SequenceTarget::TopLevel { phase_delta, .. } => {
-                **phase_delta = &**phase_delta + &phase;
-            }
-            SequenceTarget::ControlFlowBody { phase_delta, .. } => {
-                **phase_delta = &**phase_delta + &phase;
-            }
-        }
+        Ok(Parameter::from(phase))
     }
 }
 

@@ -237,7 +237,7 @@ impl PauliEvolution for Circuit {
 
             // Add to circuit's global phase
             let current_phase = self.global_phase();
-            let global_phase_param = parameter_value_to_parameter(global_phase_param)?;
+            let global_phase_param = Parameter::from(global_phase_param);
             let new_phase = current_phase + global_phase_param;
             self.set_global_phase(new_phase);
 
@@ -325,14 +325,6 @@ pub(crate) fn multiply_angle_by_factor(angle: ParameterValue, factor: f64) -> Pa
     match angle {
         ParameterValue::Fixed(val) => ParameterValue::Fixed(val * factor),
         ParameterValue::Param(param) => ParameterValue::Param(Parameter::from(factor) * param),
-    }
-}
-
-/// Helper function to convert ParameterValue to Parameter
-fn parameter_value_to_parameter(pv: ParameterValue) -> Result<Parameter, CircuitError> {
-    match pv {
-        ParameterValue::Fixed(val) => Ok(Parameter::from(val)),
-        ParameterValue::Param(param) => Ok(param),
     }
 }
 

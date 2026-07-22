@@ -28,6 +28,7 @@ use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::compile::knowledge::{
     KnowledgeInstructionKey, MatchedReplacement, RuleId, RuleKind, RuleLibrary,
 };
+use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
 use smallvec::{SmallVec, smallvec};
@@ -110,17 +111,6 @@ struct LowerableOperation {
     qubits: SmallVec<[Qubit; 3]>,
     params: SmallVec<[ParameterValue; 1]>,
     label: Option<Box<str>>,
-}
-
-enum LoweringTarget<'a> {
-    TopLevel {
-        output: &'a mut Vec<ValueOperation>,
-        phase_delta: &'a mut Parameter,
-    },
-    ControlFlowBody {
-        output: &'a mut Vec<ValueOperation>,
-        phase_delta: &'a mut Parameter,
-    },
 }
 
 struct CircuitLowerer<'a> {
@@ -397,10 +387,7 @@ impl<'a> CircuitLowerer<'a> {
         lowerer.lower_sequence(
             source.operations(),
             &root_classical,
-            LoweringTarget::TopLevel {
-                output: &mut operations,
-                phase_delta: &mut phase_delta,
-            },
+            LoweringTarget::top_level(&mut operations, &mut phase_delta),
         )?;
 
         let global_phase = &source.global_phase() + &phase_delta;
@@ -412,18 +399,6 @@ impl<'a> CircuitLowerer<'a> {
             circuit,
             changed: lowerer.changed,
         })
-    }
-
-    fn lower_sequence(
-        &mut self,
-        operations: &[Operation],
-        classical_remap: &ClassicalRemap,
-        mut target: LoweringTarget<'_>,
-    ) -> Result<(), CompilerError> {
-        for operation in operations {
-            self.lower_operation(operation, classical_remap, &mut target)?;
-        }
-        Ok(())
     }
 
     fn lower_operation(
@@ -447,15 +422,12 @@ impl<'a> CircuitLowerer<'a> {
             Instruction::ClassicalControl(control) => {
                 let instruction = self.lower_control_flow(control, classical_remap)?;
                 let qubits = instruction.used_qubits().into_iter().collect();
-                self.push_value_operation(
-                    ValueOperation {
-                        instruction: ValueInstruction::ClassicalControl(instruction),
-                        qubits,
-                        params: SmallVec::new(),
-                        label: operation.label.clone(),
-                    },
-                    target,
-                );
+                target.push(ValueOperation {
+                    instruction: ValueInstruction::ClassicalControl(instruction),
+                    qubits,
+                    params: SmallVec::new(),
+                    label: operation.label.clone(),
+                });
                 Ok(())
             }
             Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
@@ -470,7 +442,7 @@ impl<'a> CircuitLowerer<'a> {
                     operation,
                     classical_remap,
                 )?;
-                self.push_value_operation(operation, target);
+                target.push(operation);
                 Ok(())
             }
         }
@@ -490,7 +462,7 @@ impl<'a> CircuitLowerer<'a> {
             })?;
         if key.is_implicit() {
             self.changed = true;
-            self.accumulate_phase(gphase_param(&operation)?, target);
+            target.accumulate_phase(gphase_param(&operation)?);
             return Ok(());
         }
         if self.plans.is_physical(&key) {
@@ -539,15 +511,12 @@ impl<'a> CircuitLowerer<'a> {
         operation: LowerableOperation,
         target: &mut LoweringTarget<'_>,
     ) {
-        self.push_value_operation(
-            ValueOperation {
-                instruction: ValueInstruction::from_instruction(operation.instruction),
-                qubits: operation.qubits,
-                params: operation.params,
-                label: operation.label,
-            },
-            target,
-        );
+        target.push(ValueOperation {
+            instruction: ValueInstruction::from_instruction(operation.instruction),
+            qubits: operation.qubits,
+            params: operation.params,
+            label: operation.label,
+        });
     }
 
     fn lower_control_flow(
@@ -562,10 +531,7 @@ impl<'a> CircuitLowerer<'a> {
                 self.lower_sequence(
                     op.then_body().operations(),
                     classical_remap,
-                    LoweringTarget::ControlFlowBody {
-                        output: &mut then_body,
-                        phase_delta: &mut then_phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut then_body, &mut then_phase),
                 )?;
                 self.prepend_body_phase(&mut then_body, then_phase);
 
@@ -577,10 +543,7 @@ impl<'a> CircuitLowerer<'a> {
                         self.lower_sequence(
                             body.operations(),
                             classical_remap,
-                            LoweringTarget::ControlFlowBody {
-                                output: &mut lowered,
-                                phase_delta: &mut phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut lowered, &mut phase),
                         )?;
                         self.prepend_body_phase(&mut lowered, phase);
                         Ok::<_, CompilerError>(ValueControlBody::new(lowered))
@@ -599,10 +562,7 @@ impl<'a> CircuitLowerer<'a> {
                 self.lower_sequence(
                     op.body().operations(),
                     classical_remap,
-                    LoweringTarget::ControlFlowBody {
-                        output: &mut body,
-                        phase_delta: &mut phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut body, &mut phase),
                 )?;
                 self.prepend_body_phase(&mut body, phase);
                 ValueClassicalControlOp::While {
@@ -616,10 +576,7 @@ impl<'a> CircuitLowerer<'a> {
                 self.lower_sequence(
                     op.body().operations(),
                     classical_remap,
-                    LoweringTarget::ControlFlowBody {
-                        output: &mut body,
-                        phase_delta: &mut phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut body, &mut phase),
                 )?;
                 self.prepend_body_phase(&mut body, phase);
                 ValueClassicalControlOp::For {
@@ -640,10 +597,7 @@ impl<'a> CircuitLowerer<'a> {
                         self.lower_sequence(
                             case.body().operations(),
                             classical_remap,
-                            LoweringTarget::ControlFlowBody {
-                                output: &mut lowered,
-                                phase_delta: &mut phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut lowered, &mut phase),
                         )?;
                         self.prepend_body_phase(&mut lowered, phase);
                         Ok::<_, CompilerError>(ValueSwitchCase::new(
@@ -660,10 +614,7 @@ impl<'a> CircuitLowerer<'a> {
                         self.lower_sequence(
                             body.operations(),
                             classical_remap,
-                            LoweringTarget::ControlFlowBody {
-                                output: &mut lowered,
-                                phase_delta: &mut phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut lowered, &mut phase),
                         )?;
                         self.prepend_body_phase(&mut lowered, phase);
                         Ok::<_, CompilerError>(ValueControlBody::new(lowered))
@@ -697,21 +648,16 @@ impl<'a> CircuitLowerer<'a> {
             },
         );
     }
+}
 
-    fn push_value_operation(&mut self, operation: ValueOperation, target: &mut LoweringTarget<'_>) {
-        match target {
-            LoweringTarget::TopLevel { output, .. }
-            | LoweringTarget::ControlFlowBody { output, .. } => output.push(operation),
-        }
-    }
-
-    fn accumulate_phase(&mut self, phase: Parameter, target: &mut LoweringTarget<'_>) {
-        match target {
-            LoweringTarget::TopLevel { phase_delta, .. }
-            | LoweringTarget::ControlFlowBody { phase_delta, .. } => {
-                **phase_delta = &**phase_delta + &phase;
-            }
-        }
+impl OperationSequenceLowerer for CircuitLowerer<'_> {
+    fn lower_one_operation(
+        &mut self,
+        operation: &Operation,
+        classical_remap: &ClassicalRemap,
+        target: &mut LoweringTarget<'_>,
+    ) -> Result<(), CompilerError> {
+        self.lower_operation(operation, classical_remap, target)
     }
 }
 
@@ -805,7 +751,7 @@ fn instantiate_single_source_rule(
     for (pattern, actual) in source_params.iter().zip(&operation.params) {
         match pattern {
             ParameterValue::Fixed(expected) => {
-                let actual = parameter_value_to_parameter(actual);
+                let actual = Parameter::from(actual);
                 if !Parameter::from(*expected)
                     .provably_equal(&actual, crate::compile::PARAMETER_EQ_TOLERANCE)
                 {
@@ -822,7 +768,7 @@ fn instantiate_single_source_rule(
                         rule.name
                     )));
                 };
-                let actual = parameter_value_to_parameter(actual);
+                let actual = Parameter::from(actual);
                 if let Some(bound) = parameter_bindings.get(&symbol) {
                     if !bound.provably_equal(&actual, crate::compile::PARAMETER_EQ_TOLERANCE) {
                         return Err(CompilerError::InvariantViolation(format!(
@@ -898,21 +844,11 @@ fn instantiate_rule_param(
     Ok(ParameterValue::from(parameter))
 }
 
-fn parameter_value_to_parameter(param: &ParameterValue) -> Parameter {
-    match param {
-        ParameterValue::Fixed(value) => Parameter::from(*value),
-        ParameterValue::Param(parameter) => parameter.clone(),
-    }
-}
-
 fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerError> {
     let phase = operation.params.first().ok_or_else(|| {
         CompilerError::InvariantViolation("GPhase operation must contain one parameter".to_string())
     })?;
-    Ok(match phase {
-        ParameterValue::Fixed(value) => Parameter::from(*value),
-        ParameterValue::Param(parameter) => parameter.clone(),
-    })
+    Ok(Parameter::from(phase))
 }
 
 fn key_rule_sort_value(key: &KnowledgeInstructionKey) -> usize {

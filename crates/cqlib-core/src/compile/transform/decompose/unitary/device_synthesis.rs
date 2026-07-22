@@ -30,7 +30,7 @@ use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction
 use crate::compile::CompilerError;
 use crate::compile::device_planning::{
     CalibrationEstimator, DeviceGateState, NativePlanAvailability, NativePlanCatalog,
-    NativePlanSummary,
+    NativePlanCost, NativePlanLeaf, NativePlanSummary,
 };
 use crate::compile::error::DeviceLoweringFailure;
 use crate::device::{Device, PhysicalQubit};
@@ -283,37 +283,34 @@ impl DeviceTwoQubitSynthesisContext {
             return Err(DeviceContextCostFailure::WrongPlacement);
         }
 
-        let mut leaves = Vec::new();
-        let mut aggregate = self.data.estimator.identity_cost();
+        let mut accumulator = self.exact_sequence_cost_accumulator()?;
         for operation in operations {
             let ValueInstruction::Instruction(instruction) = &operation.instruction else {
                 return Err(DeviceContextCostFailure::InvalidOperation(
                     "device sequence cost requires gate-like instructions".to_string(),
                 ));
             };
-            if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
-                continue;
-            }
-            let ordered_qargs = operation
-                .qubits
-                .iter()
-                .copied()
-                .map(PhysicalQubit::from_qubit)
-                .collect();
-            let state =
-                DeviceGateState::from_instruction(instruction, ordered_qargs).ok_or_else(|| {
-                    DeviceContextCostFailure::InvalidOperation(format!(
-                        "missing device-planning key for {instruction}"
-                    ))
-                })?;
-            let summary = self.catalog_summary(&state)?;
-            aggregate = aggregate.combine(self.data.estimator.cost(summary));
-            leaves.extend(summary.leaves.iter().cloned());
+            accumulator.add_gate(instruction, &operation.qubits)?;
         }
-        Ok(self
-            .data
-            .estimator
-            .schedule_physical_cost(&leaves, aggregate))
+        Ok(accumulator.finish())
+    }
+
+    /// Starts a streaming exact-physical sequence cost accumulation.
+    ///
+    /// Gates are fed one at a time, avoiding the intermediate operation vector
+    /// that [`Self::exact_sequence_cost_diagnostic`] requires. The accumulation
+    /// order and the resulting cost are identical.
+    pub(crate) fn exact_sequence_cost_accumulator(
+        &self,
+    ) -> Result<ExactSequenceCostAccumulator<'_>, DeviceContextCostFailure> {
+        if self.data.placement != DeviceSynthesisPlacement::ExactPhysical {
+            return Err(DeviceContextCostFailure::WrongPlacement);
+        }
+        Ok(ExactSequenceCostAccumulator {
+            context: self,
+            leaves: Vec::new(),
+            aggregate: self.data.estimator.identity_cost(),
+        })
     }
 
     fn coverage_key(&self, domain: &OrderedPairDomain) -> DeviceCoverageKey {
@@ -406,6 +403,53 @@ impl DeviceTwoQubitSynthesisContext {
             }
             None => Err(DeviceContextCostFailure::Unprepared(state.clone())),
         }
+    }
+}
+
+/// Streaming accumulator for exact-physical sequence cost.
+///
+/// See [`DeviceTwoQubitSynthesisContext::exact_sequence_cost_accumulator`].
+pub(crate) struct ExactSequenceCostAccumulator<'a> {
+    context: &'a DeviceTwoQubitSynthesisContext,
+    leaves: Vec<NativePlanLeaf>,
+    aggregate: NativePlanCost,
+}
+
+impl ExactSequenceCostAccumulator<'_> {
+    /// Adds one gate-like operation to the accumulated sequence.
+    pub(crate) fn add_gate(
+        &mut self,
+        instruction: &Instruction,
+        qubits: &[Qubit],
+    ) -> Result<(), DeviceContextCostFailure> {
+        if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
+            return Ok(());
+        }
+        let ordered_qargs = qubits
+            .iter()
+            .copied()
+            .map(PhysicalQubit::from_qubit)
+            .collect();
+        let state =
+            DeviceGateState::from_instruction(instruction, ordered_qargs).ok_or_else(|| {
+                DeviceContextCostFailure::InvalidOperation(format!(
+                    "missing device-planning key for {instruction}"
+                ))
+            })?;
+        let summary = self.context.catalog_summary(&state)?;
+        self.aggregate = self
+            .aggregate
+            .combine(self.context.data.estimator.cost(summary));
+        self.leaves.extend(summary.leaves.iter().cloned());
+        Ok(())
+    }
+
+    /// Completes the accumulation and returns the scheduled physical cost.
+    pub(crate) fn finish(self) -> DevicePhysicalCost {
+        self.context
+            .data
+            .estimator
+            .schedule_physical_cost(&self.leaves, self.aggregate)
     }
 }
 

@@ -227,6 +227,22 @@ impl<'a> DevicePlanner<'a> {
         self.nodes.get(plan.0).map(|node| node.choice)
     }
 
+    /// Returns the exact physical cost the estimator assigned to one plan.
+    pub(crate) fn cost_for_plan(&self, plan: PlanId) -> Option<DevicePhysicalCost> {
+        self.nodes.get(plan.0).map(|node| node.physical_cost)
+    }
+
+    /// Returns the number of exact native leaves emitted by one plan without
+    /// cloning the plan summary.
+    pub(crate) fn leaf_count_for_plan(&self, plan: PlanId) -> Option<usize> {
+        self.nodes.get(plan.0).map(|node| node.leaves.len())
+    }
+
+    /// Costs one exact native leaf sequence with this planner's estimator.
+    pub(crate) fn leaves_physical_cost(&self, leaves: &[NativePlanLeaf]) -> DevicePhysicalCost {
+        self.estimator.physical_cost(leaves)
+    }
+
     pub(crate) fn children_for_plan(&self, plan: PlanId) -> Option<&[PlanId]> {
         self.nodes.get(plan.0).map(|node| node.children.as_slice())
     }
