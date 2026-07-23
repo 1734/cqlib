@@ -14,6 +14,7 @@
 
 mod analysis;
 mod canonicalize;
+mod commutative_cancellation;
 pub mod decompose;
 mod device_lowering;
 pub mod layout;
@@ -33,7 +34,7 @@ use canonicalize::{
 };
 use device_lowering::register_device_lowering_module;
 use one_qubit_optimization::register_one_qubit_optimization_module;
-pub(crate) use result::PyTransformResult;
+use result::PyTransformResult;
 use resynthesis::register_resynthesis_module;
 use rewrite::{
     PyKnowledgeRewriteResult, PyKnowledgeRewriteStats, PyKnowledgeRewriter, PyRewriteConfig,
@@ -62,6 +63,7 @@ pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResul
 
     decompose::register_decompose_module(&m)?;
     register_analysis_module(&m)?;
+    commutative_cancellation::register_commutative_cancellation_module(&m)?;
     register_device_lowering_module(&m)?;
     register_one_qubit_optimization_module(&m)?;
     layout::register_layout_module(&m)?;

@@ -13,6 +13,7 @@
 """Reusable compiler transforms."""
 
 from . import analysis as analysis
+from . import commutative_cancellation as commutative_cancellation
 from . import decompose as decompose
 from . import device_lowering as device_lowering
 from . import layout as layout
@@ -25,6 +26,9 @@ from .canonicalize import CanonicalizeConfig as CanonicalizeConfig
 from .canonicalize import CanonicalizeResult as CanonicalizeResult
 from .canonicalize import Canonicalizer as Canonicalizer
 from .canonicalize import canonicalize_circuit as canonicalize_circuit
+from .commutative_cancellation import (
+    CommutativeCancellation as CommutativeCancellation,
+)
 from .device_lowering import DeviceLowerer as DeviceLowerer
 from .layout import LayoutDiagnostics as LayoutDiagnostics
 from .layout import CircuitLayoutAnalysis as CircuitLayoutAnalysis

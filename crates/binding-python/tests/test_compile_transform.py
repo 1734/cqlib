@@ -25,6 +25,7 @@ from cqlib.compile.transform import (
     CanonicalizeConfig,
     CanonicalizeResult,
     Canonicalizer,
+    CommutativeCancellation,
     KnowledgeRewriteResult,
     KnowledgeRewriteStats,
     KnowledgeRewriter,
@@ -56,6 +57,10 @@ def test_transform_module_and_public_types_are_registered() -> None:
     assert CanonicalizeConfig.__module__ == "cqlib.compile.transform"
     assert Canonicalizer.__module__ == "cqlib.compile.transform"
     assert CanonicalizeResult.__module__ == "cqlib.compile.transform"
+    assert (
+        CommutativeCancellation.__module__
+        == "cqlib.compile.transform.commutative_cancellation"
+    )
     assert RewriteMode.__module__ == "cqlib.compile.transform"
     assert RewriteConfig.__module__ == "cqlib.compile.transform"
     assert KnowledgeRewriter.__module__ == "cqlib.compile.transform"
@@ -287,6 +292,36 @@ def test_rewrite_rejects_invalid_configuration_and_unsatisfied_basis() -> None:
     )
     with pytest.raises(CompilerConfigError, match="lowering incomplete"):
         rewrite_circuit(circuit, config)
+
+
+def test_commutative_cancellation_cancels_distant_self_inverse_pairs() -> None:
+    circuit = Circuit(3)
+    circuit.h(0)
+    circuit.cz(1, 2)
+    circuit.cz(1, 2)
+    circuit.h(0)
+    cancellation = CommutativeCancellation()
+
+    result = cancellation.run(circuit)
+
+    assert repr(cancellation) == "CommutativeCancellation()"
+    assert result.changed is True
+    assert len(result.circuit.operations) == 0
+    assert len(circuit.operations) == 4
+    assert copy.copy(cancellation).__class__ is CommutativeCancellation
+    assert copy.deepcopy(cancellation).__class__ is CommutativeCancellation
+
+
+def test_commutative_cancellation_respects_non_commuting_barriers() -> None:
+    circuit = Circuit(1)
+    circuit.h(0)
+    circuit.x(0)
+    circuit.h(0)
+
+    result = CommutativeCancellation().run(circuit)
+
+    assert result.changed is False
+    assert len(result.circuit.operations) == 3
 
 
 def test_lower_to_routing_basis_lowers_toffoli_to_two_qubit_ops() -> None:
