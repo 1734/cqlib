@@ -38,6 +38,8 @@
 //!
 //! - [`canonicalize`] validates and normalizes the compiler IR without doing
 //!   semantic optimization or hardware lowering.
+//! - [`commutative_cancellation`] cancels self-inverse gate pairs through a
+//!   global, unbounded commutation-set analysis.
 //! - [`decompose`] expands circuit-backed definitions, synthesizes
 //!   matrix-backed unitaries, and lowers multi-controlled gates.
 //! - [`device_lowering`] maps routed physical gates to exact ordered device
@@ -56,6 +58,7 @@
 
 pub mod analysis;
 pub mod canonicalize;
+pub mod commutative_cancellation;
 pub mod decompose;
 pub mod device_lowering;
 pub mod layout;
@@ -74,6 +77,7 @@ pub use analysis::CircuitAnalysis;
 pub use canonicalize::{
     CanonicalizeConfig, CanonicalizeResult, Canonicalizer, canonicalize_circuit,
 };
+pub use commutative_cancellation::CommutativeCancellation;
 pub use device_lowering::DeviceLowerer;
 pub use layout::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, LayoutDiagnostics, LayoutObjective,

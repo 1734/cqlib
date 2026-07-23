@@ -26,6 +26,7 @@
 //!   -> canonicalized logical IR
 //!   -> expanded circuit-backed definitions
 //!   -> decomposed unitary and multi-controlled gates
+//!   -> global commutation-set cancellation
 //!   -> knowledge-rule optimization
 //!   -> optional physical layout and SABRE routing
 //!   -> optional target-basis translation

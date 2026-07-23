@@ -163,9 +163,11 @@ fn normal_workflow_reports_staged_order() {
             "decompose.unitary",
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
+            "optimize.commutative_cancellation",
             "resynthesize.two_qubit_blocks",
             "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
+            "optimize.commutative_cancellation.after_rewrite",
             "optimize.one_qubit.after_rewrite",
             "optimize.one_qubit_fixed_point",
             "decompose.routing_basis",
@@ -263,9 +265,11 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "decompose.unitary",
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
+            "optimize.commutative_cancellation",
             "resynthesize.two_qubit_blocks",
             "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
+            "optimize.commutative_cancellation.after_rewrite",
             "optimize.one_qubit.after_rewrite",
             "optimize.one_qubit_fixed_point",
             "decompose.routing_basis",
@@ -1820,4 +1824,70 @@ fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
             Instruction::Standard(StandardGate::CZ)
         ]
     ));
+}
+
+#[test]
+fn normal_workflow_fixpoint_closes_nested_cancellation_pairs() {
+    // End-to-end pipeline check: three nesting levels on wire q1 (an outer
+    // CZ pair blocked by a CX pair, itself blocked by an inner H pair),
+    // every pair shielded from the windowed knowledge rewriter (>16 ops)
+    // and one-qubit fusion (single gates on distinct wires) by commuting
+    // gates on other wires. Global cancellation plus the fixpoint loop must
+    // clear all three pairs; note that bounded two-qubit resynthesis also
+    // rewrites nearby pair fragments into unitary gates in this pipeline.
+    let (q0, q1) = (Qubit::new(0), Qubit::new(1));
+    let mut circuit = Circuit::new(70);
+    circuit.cz(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.h(q1).unwrap();
+    for index in 0..34u32 {
+        circuit
+            .rx(Qubit::new(2 + index), 0.01 * f64::from(index + 1))
+            .unwrap();
+    }
+    circuit.h(q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    for index in 0..34u32 {
+        circuit
+            .ry(Qubit::new(36 + index), 0.02 * f64::from(index + 1))
+            .unwrap();
+    }
+    circuit.cz(q0, q1).unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+
+    assert!(result.changed);
+    let gates = standard_ops(&result.circuit);
+    assert!(!gates.contains(&StandardGate::CZ), "gates: {gates:?}");
+    assert!(!gates.contains(&StandardGate::CX), "gates: {gates:?}");
+    assert!(!gates.contains(&StandardGate::H), "gates: {gates:?}");
+}
+
+#[test]
+fn fixpoint_loop_reruns_cancellation_after_stable_resynthesis() {
+    // Drives close_one_qubit_resynthesis directly with a one-qubit-only
+    // synthesis basis, so two-qubit resynthesis can never change the
+    // circuit. Round 1 removes the H pair and exposes the CX pair; only a
+    // second cancellation run removes it. A loop that exits whenever
+    // resynthesis is stable would strand the CX pair.
+    let (q0, q1) = (Qubit::new(0), Qubit::new(1));
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let target_basis = vec![
+        Instruction::Standard(StandardGate::RZ),
+        Instruction::Standard(StandardGate::X2P),
+    ];
+    let mut state = workflow_state_with_target_basis(target_basis);
+    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.current = circuit;
+
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    workflow.close_one_qubit_resynthesis(&mut state).unwrap();
+
+    let gates = standard_ops(&state.current);
+    assert!(gates.is_empty(), "gates: {gates:?}");
 }

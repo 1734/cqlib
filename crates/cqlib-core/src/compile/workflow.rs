@@ -57,10 +57,10 @@ use crate::compile::transform::decompose::{
 };
 use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, DeviceLowerer, KnowledgeRewriter, LayoutObjective,
-    LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig,
-    TargetBasisLowerer, TransformResult, Transformer, TwoQubitBlockResynthesisConfig, route_sabre,
-    route_with_layout,
+    Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer, KnowledgeRewriter,
+    LayoutObjective, LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
+    RewriteConfig, TargetBasisLowerer, TransformResult, Transformer,
+    TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
 };
 use crate::device::{Device, Topology};
 
@@ -240,6 +240,11 @@ impl CompilerWorkflow {
             "optimization",
             "canonicalize.after_decomposition",
             |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
+        )?;
+        state.apply_transform(
+            "optimization",
+            "optimize.commutative_cancellation",
+            |circuit, analysis| CommutativeCancellation::new().transform(circuit, Some(analysis)),
         )?;
         self.apply_two_qubit_resynthesis(
             state,
@@ -753,6 +758,17 @@ impl CompilerWorkflow {
         )
     }
 
+    fn apply_commutative_cancellation(
+        &self,
+        state: &mut WorkflowState,
+        name: &'static str,
+    ) -> Result<bool, CompilerError> {
+        state.apply_transform("optimization", name, |circuit, analysis| {
+            CommutativeCancellation::new().transform(circuit, Some(analysis))
+        })?;
+        Ok(state.steps.last().is_some_and(|step| step.changed))
+    }
+
     fn apply_one_qubit_optimization(
         &self,
         state: &mut WorkflowState,
@@ -791,13 +807,19 @@ impl CompilerWorkflow {
         };
         let before = state.current.clone();
         let mut rounds = 0u8;
-        let mut needs_resynthesis = state.pending_one_qubit_resynthesis;
+        let mut pending_resynthesis = state.pending_one_qubit_resynthesis;
         while rounds < max_rounds {
             rounds += 1;
-            let local_changed =
+            let changed_cc = self.apply_commutative_cancellation(
+                state,
+                "optimize.commutative_cancellation.after_rewrite",
+            )?;
+            let changed_1q =
                 self.apply_one_qubit_optimization(state, "optimize.one_qubit.after_rewrite")?;
-            needs_resynthesis |= local_changed;
-            if !needs_resynthesis {
+            // The pre-loop pending flag is consumed exactly once: after this
+            // point the flag is only ever reassigned from `cleanup_changed`.
+            let should_resynthesize = pending_resynthesis || changed_cc || changed_1q;
+            if !should_resynthesize {
                 break;
             }
 
@@ -819,8 +841,9 @@ impl CompilerWorkflow {
                 );
                 false
             };
-            needs_resynthesis = cleanup_changed;
-            if !resynthesis_changed && !cleanup_changed {
+            let round_changed = changed_cc || changed_1q || resynthesis_changed || cleanup_changed;
+            pending_resynthesis = cleanup_changed;
+            if !round_changed {
                 break;
             }
         }

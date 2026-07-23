@@ -1773,3 +1773,60 @@ measure q[1] -> c[1];
     );
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::RY));
 }
+
+fn trivial_bvlike_circuit(num_qubits: u32) -> Circuit {
+    // benchpress trivial_bvlike motif: an up ladder of CXs into the target,
+    // X(target), Z(last control), then the mirrored down ladder. Everything
+    // commutes out except the X and Z.
+    let target = Qubit::new(num_qubits - 1);
+    let last_control = Qubit::new(num_qubits - 2);
+    let mut circuit = Circuit::new(num_qubits as usize);
+    for control in 0..num_qubits - 1 {
+        circuit.cx(Qubit::new(control), target).unwrap();
+    }
+    circuit.x(target).unwrap();
+    circuit.z(last_control).unwrap();
+    for control in (0..num_qubits - 1).rev() {
+        circuit.cx(Qubit::new(control), target).unwrap();
+    }
+    circuit
+}
+
+#[test]
+fn compile_normal_cancels_trivial_bvlike_motif_small() {
+    let circuit = trivial_bvlike_circuit(4);
+
+    let result = compile_normal(&circuit);
+
+    assert!(result.changed);
+    assert_eq!(result.circuit.operations().len(), 2);
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn compile_normal_cancels_trivial_bvlike_motif_at_scale() {
+    let num_qubits = 20u32;
+    let circuit = trivial_bvlike_circuit(num_qubits);
+
+    let result = compile_normal(&circuit);
+
+    assert!(result.changed);
+    let operations = result.circuit.operations();
+    assert_eq!(operations.len(), 2);
+    assert!(matches!(
+        operations[0].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    assert_eq!(
+        operations[0].qubits.as_slice(),
+        &[Qubit::new(num_qubits - 1)]
+    );
+    assert!(matches!(
+        operations[1].instruction,
+        Instruction::Standard(StandardGate::Z)
+    ));
+    assert_eq!(
+        operations[1].qubits.as_slice(),
+        &[Qubit::new(num_qubits - 2)]
+    );
+}
