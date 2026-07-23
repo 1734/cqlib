@@ -17,6 +17,12 @@
 //! basis. It uses single-operation decomposition rules as a planning graph and
 //! then lowers each gate-like operation linearly. Optimizing rewrites such as
 //! cancellation, merge, and commutation remain in the knowledge rewriter.
+//!
+//! One parameter-aware specialization sits on top of the static rule graph:
+//! fixed-parameter `U` gates are re-synthesized numerically by the `euler_1q`
+//! module so degenerate angles collapse to the shortest half-rotation
+//! sequence. The dynamic candidate is used only when its physical output cost
+//! is strictly below the static plan's; ties keep the static path.
 
 use crate::circuit::{
     Circuit, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue, Qubit,
@@ -28,6 +34,10 @@ use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::compile::knowledge::{
     KnowledgeInstructionKey, MatchedReplacement, RuleId, RuleKind, RuleLibrary,
 };
+use crate::compile::transform::decompose::unitary::euler_1q::{
+    Euler1qCandidate, synthesize_euler_1q_candidates,
+};
+use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
 use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
@@ -94,6 +104,7 @@ struct LoweringPlans {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GatePlan {
     rule_id: RuleId,
+    cost: PlanCost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -327,7 +338,13 @@ impl LoweringPlans {
                 let current = cost_by_key.get(&source_key).copied();
                 if current.is_none_or(|current| candidate_cost < current) {
                     cost_by_key.insert(source_key.clone(), candidate_cost);
-                    plan_by_key.insert(source_key, GatePlan { rule_id });
+                    plan_by_key.insert(
+                        source_key,
+                        GatePlan {
+                            rule_id,
+                            cost: candidate_cost,
+                        },
+                    );
                     changed = true;
                 }
             }
@@ -365,6 +382,38 @@ impl PlanCost {
             rule_id,
         }
     }
+}
+
+/// Orders dynamic Euler candidates by physical output cost, with the family
+/// declaration order as the final deterministic tie-break.
+fn compare_dynamic_candidates(
+    left: &Euler1qCandidate,
+    right: &Euler1qCandidate,
+) -> std::cmp::Ordering {
+    let (left_total, left_parameterized) = left.physical_cost();
+    let (right_total, right_parameterized) = right.physical_cost();
+    (left_total, left_parameterized, left.family).cmp(&(
+        right_total,
+        right_parameterized,
+        right.family,
+    ))
+}
+
+/// Returns true only when the dynamic candidate's physical output is strictly
+/// cheaper than the static plan's. Family order never participates here, so a
+/// tie keeps the static path. `PlanCost.rank` is a planning-internal metric
+/// and is ignored.
+fn dynamic_strictly_beats_static(candidate: &Euler1qCandidate, static_cost: &PlanCost) -> bool {
+    let (total_ops, parameterized_ops) = candidate.physical_cost();
+    (
+        0usize, // dynamic single-qubit synthesis never emits two-qubit gates
+        total_ops,
+        parameterized_ops,
+    ) < (
+        static_cost.two_qubit_ops,
+        static_cost.total_ops,
+        static_cost.parameterized_ops,
+    )
 }
 
 impl<'a> CircuitLowerer<'a> {
@@ -469,6 +518,13 @@ impl<'a> CircuitLowerer<'a> {
             self.emit_physical_gate(operation, target);
             return Ok(());
         }
+        if matches!(
+            operation.instruction,
+            Instruction::Standard(StandardGate::U)
+        ) && self.try_lower_fixed_u(&operation, &key, target)?
+        {
+            return Ok(());
+        }
 
         let Some(plan) = self.plans.plan_for(&key) else {
             return Err(CompilerError::InvalidInput(format!(
@@ -517,6 +573,78 @@ impl<'a> CircuitLowerer<'a> {
             params: operation.params,
             label: operation.label,
         });
+    }
+
+    /// Lowers a fixed-parameter `U` through parameter-aware Euler synthesis
+    /// when the result strictly beats the static rule plan. Returns `Ok(false)`
+    /// for symbolic parameters, missing families, or when the static plan is
+    /// at least as good, leaving the operation on the static path.
+    fn try_lower_fixed_u(
+        &mut self,
+        operation: &LowerableOperation,
+        key: &KnowledgeInstructionKey,
+        target: &mut LoweringTarget<'_>,
+    ) -> Result<bool, CompilerError> {
+        let mut angles = [0.0; 3];
+        if operation.params.len() != 3 {
+            return Ok(false);
+        }
+        for (slot, param) in angles.iter_mut().zip(&operation.params) {
+            let ParameterValue::Fixed(value) = param else {
+                return Ok(false);
+            };
+            if !value.is_finite() {
+                return Ok(false);
+            }
+            *slot = *value;
+        }
+        let matrix = StandardGate::U
+            .matrix(&angles)
+            .map_err(CompilerError::Circuit)?;
+        let decomposition = synthesize_numeric_1q_unitary(&matrix)?;
+        let is_available = |gate: StandardGate| {
+            self.plans
+                .physical_keys
+                .contains(&KnowledgeInstructionKey::Standard(gate))
+        };
+        let best = synthesize_euler_1q_candidates(decomposition, &is_available)?
+            .into_iter()
+            .min_by(compare_dynamic_candidates);
+        let Some(best) = best else {
+            return Ok(false);
+        };
+        if let Some(plan) = self.plans.plan_for(key) {
+            debug_assert_eq!(
+                plan.cost.two_qubit_ops, 0,
+                "single-qubit U lowering plan must not contain two-qubit gates"
+            );
+            if !dynamic_strictly_beats_static(&best, &plan.cost) {
+                return Ok(false);
+            }
+        }
+
+        self.changed = true;
+        for gate in &best.gates {
+            debug_assert!(
+                is_available(gate.gate),
+                "euler synthesis emitted {} outside the target basis",
+                gate.gate
+            );
+            let params = match gate.param {
+                Some(value) => smallvec![ParameterValue::Fixed(value)],
+                None => SmallVec::new(),
+            };
+            target.push(ValueOperation {
+                instruction: ValueInstruction::from_instruction(Instruction::Standard(gate.gate)),
+                qubits: operation.qubits.clone(),
+                params,
+                // Decomposed gates never inherit the source label, matching the
+                // static rule path: labels act as optimization boundaries.
+                label: None,
+            });
+        }
+        target.accumulate_phase(Parameter::from(best.global_phase));
+        Ok(true)
     }
 
     fn lower_control_flow(

@@ -24,9 +24,11 @@
 //! the call site resolves to a finite numeric value. Three-qubit and larger
 //! matrices are rejected explicitly.
 //!
-//! This module does not expand circuit-backed definitions, lower ordinary
-//! standard gates to a target basis, adapt gates to hardware topology, or
-//! allocate ancillas. Run
+//! This module does not expand circuit-backed definitions or adapt gates to
+//! hardware topology. It also does not perform target-basis lowering itself;
+//! the crate-internal `euler_1q` module only provides the pure numeric
+//! synthesis candidates that the target-basis lowerer consumes for
+//! fixed-parameter `U` gates. Run
 //! [`expand_definitions`](super::definition::expand_definitions) before matrix
 //! synthesis when a circuit may contain unitary gates backed by subcircuits.
 //!
@@ -36,6 +38,10 @@
 //!   rebuilding, control-flow handling, and global-phase propagation.
 //! - [`unitary_1q`] decomposes a concrete 2x2 matrix into a local `U` gate and a
 //!   scalar global phase.
+//! - `euler_1q` re-synthesizes one numeric `U` decomposition into
+//!   parameter-aware half-rotation candidate sequences (RZ/X2P/X2M/X
+//!   families), including degenerate-angle short forms and exact global-phase
+//!   bookkeeping.
 //! - [`unitary_2q`] converts a concrete 4x4 matrix into local `U` gates plus a
 //!   selectable two-qubit interaction basis.
 //! - [`two_qubit_kak`] owns the circuit-agnostic KAK / Weyl numerical
@@ -43,6 +49,7 @@
 
 pub mod decompose;
 pub(crate) mod device_synthesis;
+pub(crate) mod euler_1q;
 mod matrix;
 pub mod two_qubit_kak;
 pub mod unitary_1q;

@@ -448,6 +448,95 @@ fn compile_result_exposes_step_queries() {
 }
 
 #[test]
+fn compile_pipeline_collapses_degenerate_u_to_single_rz() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::U),
+            vec![q0],
+            vec![
+                ParameterValue::Fixed(0.0),
+                ParameterValue::Fixed(0.3),
+                ParameterValue::Fixed(0.7),
+            ],
+            None,
+        )
+        .unwrap();
+    let basis = vec![
+        StandardGate::RZ,
+        StandardGate::X2P,
+        StandardGate::X,
+        StandardGate::CZ,
+    ];
+
+    let result = compile_to_basis(&circuit, basis.clone());
+
+    assert_only_standard_gates(&result.circuit, &basis);
+    let physical_ops = result
+        .circuit
+        .operations()
+        .iter()
+        .filter(|operation| {
+            !matches!(
+                operation.instruction,
+                Instruction::Standard(StandardGate::GPhase)
+            )
+        })
+        .count();
+    assert_eq!(
+        physical_ops,
+        1,
+        "theta=0 U should compile to a single RZ through the full pipeline: {:?}",
+        result.circuit.operations()
+    );
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn compile_pipeline_preserves_entangling_circuit_with_degenerate_u() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cz(q0, q1).unwrap();
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::U),
+            vec![q0],
+            vec![
+                ParameterValue::Fixed(0.0),
+                ParameterValue::Fixed(0.3),
+                ParameterValue::Fixed(0.7),
+            ],
+            None,
+        )
+        .unwrap();
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::U),
+            vec![q1],
+            vec![
+                ParameterValue::Fixed(std::f64::consts::FRAC_PI_2),
+                ParameterValue::Fixed(-0.2),
+                ParameterValue::Fixed(0.9),
+            ],
+            None,
+        )
+        .unwrap();
+    let basis = vec![
+        StandardGate::RZ,
+        StandardGate::X2P,
+        StandardGate::X,
+        StandardGate::CZ,
+    ];
+
+    let result = compile_to_basis(&circuit, basis.clone());
+
+    assert_only_standard_gates(&result.circuit, &basis);
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
 fn compile_bell_to_h_cz_basis() {
     let circuit = bell_circuit();
     let result = compile(
