@@ -74,6 +74,11 @@ print("variance:", result.variance)
 所有缓解方法都依赖同一个 **Estimator** 签名：
 
 ```python
+from collections.abc import Callable
+
+from cqlib.circuit import Circuit
+from cqlib.qis import Hamiltonian
+
 Estimator = Callable[
     [Circuit, Hamiltonian | None, int | None],
     tuple[float, float],

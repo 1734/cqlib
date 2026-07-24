@@ -139,8 +139,8 @@ def estimator(run_circuit, observable, shots):
 
 | 场景 | 异常 |
 |------|------|
-| `fold_levels` 含负数 | `ErrorMitigationError` |
-| `copies < 2` | `ErrorMitigationError` |
+| `fold_levels` 含负数 | 构造 `ErrorMitigation` 时抛出 `ErrorMitigationError`（`ZneConfig([-1])` 本身不会报错） |
+| `copies < 2` | 构造 `VirtualDistillation` 或 `ErrorMitigation` 时抛出 `ErrorMitigationError` |
 | 未 `run()` 就 `get_mitigated()` | `ErrorMitigationError` |
 | `estimator` 不可调用 | `TypeError` |
 | estimator 返回值格式错误 | `TypeError` / `ValueError` |
