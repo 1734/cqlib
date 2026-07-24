@@ -62,7 +62,7 @@ noise_factor = 2 * fold_level + 1
 | `1` | `3` | 一次 `U(U†U)` 折叠 |
 | `2` | `5` | 两次折叠 |
 
-`fold_levels` 必须为非负整数；至少两个点才能做外推。
+`fold_levels` 必须为非负整数；至少两个点才能做外推。`ZneConfig` 与 `ZNEMitigation` 构造时不会校验负数；负值会在构造 `ErrorMitigation` 时抛出 `ErrorMitigationError`。
 
 ---
 
@@ -88,7 +88,19 @@ folded = zne.fold_circuits(gate_set)
 | `run_em_sequence(gate_set, hamiltonian, estimator)` | 逐条执行折叠线路，返回期望值列表 |
 | `run_em_sequence_with_shots(gate_set, hamiltonian, shots, estimator)` | 同上，并将 `shots` 传给 estimator |
 
-`estimator` 必须可调用，且返回 `(float, float)` 二元组。
+`estimator` 必须可调用，且返回 `(float, float)` 二元组。类型签名如下：
+
+```python
+from collections.abc import Callable
+
+from cqlib.circuit import Circuit
+from cqlib.qis import Hamiltonian
+
+Estimator = Callable[
+    [Circuit, Hamiltonian | None, int | None],
+    tuple[float, float],
+]
+```
 
 ---
 
@@ -114,6 +126,9 @@ em.ExtrapolateMethod.exponential()
 ## 与统一流水线集成
 
 ```python
+def estimator(folded_circuit, observable, shots):
+    return (0.5 * len(folded_circuit.operations), 0.0)
+
 mitigation = em.ErrorMitigation(
     circuit,
     em.MitigationMethod.zne(em.ZneConfig([0, 1, 2])),
