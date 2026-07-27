@@ -63,6 +63,7 @@ use crate::compile::transform::{
     TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
 };
 use crate::device::{Device, Topology};
+use std::borrow::Cow;
 
 use super::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
@@ -677,7 +678,7 @@ impl CompilerWorkflow {
         };
 
         let routing_device = self.routing_device(target)?;
-        let device = &routing_device;
+        let device = routing_device.as_ref();
         let config = sabre_config_for_mode(self.config.mode, target.seed);
         let (route_changed, swap_count, trials_evaluated, supplied_layout) =
             if let Some(initial_layout) = target.initial_layout.as_ref() {
@@ -965,9 +966,12 @@ impl CompilerWorkflow {
         }
     }
 
-    fn routing_device(&self, target: &DeviceCompileTarget) -> Result<Device, CompilerError> {
+    fn routing_device<'target>(
+        &self,
+        target: &'target DeviceCompileTarget,
+    ) -> Result<Cow<'target, Device>, CompilerError> {
         if matches!(self.config.target, CompileTarget::Device(_)) {
-            return Ok(target.device.clone());
+            return Ok(Cow::Borrowed(&target.device));
         }
 
         let qubits = target.device.qubits().collect::<Vec<_>>();
@@ -1015,7 +1019,7 @@ impl CompilerWorkflow {
                 "failed to configure loose routing instructions: {error}"
             ))
         })?;
-        Ok(device)
+        Ok(Cow::Owned(device))
     }
 }
 

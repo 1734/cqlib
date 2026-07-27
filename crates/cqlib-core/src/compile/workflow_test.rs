@@ -30,7 +30,7 @@ use crate::compile::{
 use crate::device::{Device, EdgeProp, InstructionProp, Layout, PhysicalQubit};
 use ndarray::array;
 use num_complex::Complex64;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 fn compile_config(mode: CompileMode) -> CompileConfig {
@@ -470,6 +470,67 @@ fn workflow_uses_three_native_cx_for_device_targeted_swap_unitary() {
     );
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
     device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn routing_device_borrows_strict_device_in_normal_and_enhanced_modes() {
+    for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+        let workflow = CompilerWorkflow::new(CompileConfig {
+            mode,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device: Device::line("borrowed-routing-device", 2).unwrap(),
+                initial_layout: None,
+                seed: Some(46),
+            }),
+            resource_policy: ResourcePolicy::default(),
+        });
+        let target = workflow.routing_device_target().unwrap();
+        let routing_device = workflow.routing_device(target).unwrap();
+
+        assert!(matches!(&routing_device, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(routing_device.as_ref(), &target.device));
+    }
+}
+
+#[test]
+fn routing_device_owns_loose_topology_basis_device() {
+    let offline = PhysicalQubit::new(1);
+    let device = Device::line("owned-routing-device", 2)
+        .unwrap()
+        .with_invalid_qubits(HashSet::from([offline]))
+        .unwrap();
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(47),
+            },
+            basis: vec![
+                Instruction::Standard(StandardGate::H),
+                Instruction::Standard(StandardGate::CZ),
+            ],
+        },
+        resource_policy: ResourcePolicy::default(),
+    });
+    let target = workflow.routing_device_target().unwrap();
+    let routing_device = workflow.routing_device(target).unwrap();
+
+    assert!(matches!(&routing_device, std::borrow::Cow::Owned(_)));
+    assert_eq!(routing_device.qubits().count(), 2);
+    assert_eq!(
+        routing_device.invalid_qubits().collect::<Vec<_>>(),
+        vec![offline]
+    );
+    assert_eq!(routing_device.topology().undirected_edges().count(), 1);
+    assert!(matches!(
+        routing_device.native_gates(),
+        [
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CZ)
+        ]
+    ));
 }
 
 #[test]
