@@ -11,33 +11,37 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{CompilerWorkflow, RewritePhase, WorkflowState};
+use super::{
+    CompilerWorkflow, DeviceSynthesisPlacement, PreparedTargetBasis, RewritePhase, WorkflowState,
+    sabre_config_for_mode,
+};
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
     Circuit, CircuitGate, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit,
     StandardGate, UnitaryGate,
 };
 use crate::compile::resource::ResourcePolicy;
-use crate::compile::transform::CircuitAnalysis;
-use crate::compile::{CompileConfig, CompileMode, CompilerError, compile};
-use crate::device::{Device, Layout};
-use crate::util::test_utils::{
-    assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, step_changed,
-    two_qubit_device,
+use crate::compile::test_utils::{
+    assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
 };
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::{CircuitAnalysis, OptimizeOneQubitRuns, TransformOutcome};
+use crate::compile::{
+    CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
+    SabreRoutingFailure, compile,
+};
+use crate::device::{Device, EdgeProp, InstructionProp, Layout, PhysicalQubit};
 use ndarray::array;
 use num_complex::Complex64;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 fn compile_config(mode: CompileMode) -> CompileConfig {
     CompileConfig {
         mode,
-        target_basis: None,
-        device: None,
-        initial_layout: None,
+        target: CompileTarget::Logical,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     }
 }
 
@@ -49,13 +53,231 @@ fn run_workflow(circuit: &Circuit, mode: CompileMode) -> super::CompileResult {
 
 fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowState {
     let current = Circuit::new(1);
+    let prepared_target_basis = PreparedTargetBasis::new(target_basis).unwrap();
+    let two_qubit_target =
+        TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared_target_basis.cost_model));
+    let one_qubit_optimizer = Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
+        &prepared_target_basis.cost_model,
+    )));
     WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
         changed: false,
         steps: Vec::new(),
-        target_basis: Some(target_basis),
+        prepared_target_basis: Some(prepared_target_basis),
+        two_qubit_target,
+        device_metadata: None,
+        one_qubit_optimizer,
+        pending_one_qubit_resynthesis: false,
     }
+}
+
+fn workflow_state_without_target_basis() -> WorkflowState {
+    let current = Circuit::new(1);
+    WorkflowState {
+        analysis: CircuitAnalysis::analyze(&current),
+        current,
+        changed: false,
+        steps: Vec::new(),
+        prepared_target_basis: None,
+        two_qubit_target: TwoQubitSynthesisTarget::unconstrained(),
+        device_metadata: None,
+        one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
+        pending_one_qubit_resynthesis: false,
+    }
+}
+
+#[test]
+fn apply_transform_preserves_current_storage_on_unchanged() {
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(Qubit::new(0)).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    let operation_ptr = state.current.operations().as_ptr();
+    let analysis = state.analysis.clone();
+
+    let changed = state
+        .apply_transform("test", "unchanged", |_circuit, _analysis| {
+            Ok(TransformOutcome::Unchanged)
+        })
+        .unwrap();
+
+    assert!(!changed);
+    assert_eq!(state.current.operations().as_ptr(), operation_ptr);
+    assert_eq!(state.analysis, analysis);
+    assert!(!state.changed);
+    assert_eq!(state.steps.len(), 1);
+    assert!(!state.steps[0].changed);
+}
+
+#[test]
+fn apply_transform_adopts_changed_circuit_and_refreshes_analysis() {
+    let mut state = workflow_state_without_target_basis();
+    let mut replacement = Circuit::new(1);
+    replacement.measure_bits([Qubit::new(0)]).unwrap();
+
+    let changed = state
+        .apply_transform("test", "changed", |_circuit, _analysis| {
+            Ok(TransformOutcome::Changed(replacement))
+        })
+        .unwrap();
+
+    assert!(changed);
+    assert!(state.changed);
+    assert!(state.analysis.has_measurement);
+    assert!(state.steps[0].changed);
+}
+
+#[test]
+fn apply_transform_error_leaves_workflow_state_untouched() {
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(Qubit::new(0)).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    let operation_ptr = state.current.operations().as_ptr();
+    let analysis = state.analysis.clone();
+
+    let error = state
+        .apply_transform("test", "error", |_circuit, _analysis| {
+            Err(CompilerError::InvariantViolation(
+                "expected failure".to_string(),
+            ))
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, CompilerError::InvariantViolation(_)));
+    assert_eq!(state.current.operations().as_ptr(), operation_ptr);
+    assert_eq!(state.analysis, analysis);
+    assert!(!state.changed);
+    assert!(state.steps.is_empty());
+}
+
+#[test]
+fn target_translation_skips_circuit_already_in_explicit_basis() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let q0 = Qubit::new(0);
+
+    for name in [
+        "translate.target_basis",
+        "translate.target_basis.after_one_qubit",
+    ] {
+        let mut state =
+            workflow_state_with_target_basis(vec![Instruction::Standard(StandardGate::X)]);
+        state.current.x(q0).unwrap();
+        state.analysis = CircuitAnalysis::analyze(&state.current);
+        let operations = state.current.operations().as_ptr();
+
+        workflow
+            .apply_target_translation_named(&mut state, name)
+            .unwrap();
+
+        assert_eq!(state.current.operations().as_ptr(), operations);
+        assert!(!state.changed);
+        let report = state.steps.last().unwrap();
+        assert_eq!(report.name, name);
+        assert!(report.skipped);
+        assert!(!report.changed);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("circuit already satisfies the explicit target basis")
+        );
+    }
+}
+
+#[test]
+fn target_translation_still_runs_for_gate_outside_explicit_basis() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut state = workflow_state_with_target_basis(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CZ),
+    ]);
+    state.current = Circuit::new(2);
+    state.current.cx(q0, q1).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    workflow.apply_target_translation(&mut state).unwrap();
+
+    let report = state.steps.last().unwrap();
+    assert_eq!(report.name, "translate.target_basis");
+    assert!(!report.skipped);
+    assert!(report.changed);
+    assert_eq!(
+        standard_ops(&state.current),
+        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
+    );
+}
+
+#[test]
+fn target_translation_does_not_skip_explicit_gphase() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let mut state = workflow_state_with_target_basis(vec![
+        Instruction::Standard(StandardGate::X),
+        Instruction::Standard(StandardGate::GPhase),
+    ]);
+    state
+        .current
+        .append(
+            Instruction::Standard(StandardGate::GPhase),
+            Vec::<Qubit>::new(),
+            [ParameterValue::Fixed(0.25)],
+            None,
+        )
+        .unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    workflow.apply_target_translation(&mut state).unwrap();
+
+    let report = state.steps.last().unwrap();
+    assert!(!report.skipped);
+    assert!(report.changed);
+    assert!(state.current.operations().is_empty());
+    assert_eq!(state.current.global_phase(), Parameter::from(0.25));
+}
+
+#[test]
+fn two_qubit_resynthesis_returns_the_recorded_changed_status() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+
+    let mut stable_state = workflow_state_without_target_basis();
+    stable_state.current = Circuit::new(2);
+    stable_state.current.h(q0).unwrap();
+    stable_state.analysis = CircuitAnalysis::analyze(&stable_state.current);
+
+    let stable_changed = workflow
+        .apply_two_qubit_resynthesis(
+            &mut stable_state,
+            "test",
+            "resynthesis.stable",
+            DeviceSynthesisPlacement::PreLayoutEnvelope,
+        )
+        .unwrap();
+
+    assert!(!stable_changed);
+    assert!(!stable_state.steps.last().unwrap().changed);
+
+    let mut changed_state = workflow_state_with_target_basis(vec![
+        Instruction::Standard(StandardGate::U),
+        Instruction::Standard(StandardGate::CX),
+    ]);
+    changed_state.current = Circuit::new(2);
+    changed_state.current.cx(q0, q1).unwrap();
+    changed_state.current.cx(q0, q1).unwrap();
+    changed_state.analysis = CircuitAnalysis::analyze(&changed_state.current);
+
+    let resynthesis_changed = workflow
+        .apply_two_qubit_resynthesis(
+            &mut changed_state,
+            "test",
+            "resynthesis.changed",
+            DeviceSynthesisPlacement::PreLayoutEnvelope,
+        )
+        .unwrap();
+
+    assert!(resynthesis_changed);
+    assert!(changed_state.steps.last().unwrap().changed);
+    assert!(changed_state.current.operations().is_empty());
 }
 
 fn binding_case(bindings: &[(&'static str, f64)]) -> Option<HashMap<&'static str, f64>> {
@@ -83,19 +305,6 @@ fn operation_parameter(circuit: &Circuit, param: &CircuitParam) -> Parameter {
             .cloned()
             .expect("parameter index should exist in rebuilt workflow circuit"),
     }
-}
-
-fn circuit_contains_symbol(circuit: &Circuit, symbol: &str) -> bool {
-    if circuit.global_phase().get_symbols().contains(symbol) {
-        return true;
-    }
-
-    circuit
-        .operations()
-        .iter()
-        .flat_map(|operation| operation.params.iter())
-        .map(|param| operation_parameter(circuit, param))
-        .any(|parameter| parameter.get_symbols().contains(symbol))
 }
 
 #[test]
@@ -170,16 +379,79 @@ fn normal_workflow_reports_staged_order() {
             "decompose.unitary",
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
+            "optimize.commutative_cancellation",
+            "resynthesize.two_qubit_blocks",
+            "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
+            "optimize.commutative_cancellation.after_rewrite",
+            "optimize.one_qubit.after_rewrite",
+            "optimize.one_qubit_fixed_point",
             "decompose.routing_basis",
             "route.sabre",
             "translate.target_basis",
+            "optimize.one_qubit.post_translation",
+            "translate.target_basis.after_one_qubit",
             "canonicalize.output",
+            "lower.device_instructions",
+            "canonicalize.native_input",
+            "optimize.native_fixed_point",
+            "validate.device",
         ]
     );
-    assert!(result.steps[9].skipped);
-    assert!(result.steps[10].skipped);
-    assert!(result.steps[11].skipped);
+    for name in [
+        "decompose.routing_basis",
+        "route.sabre",
+        "translate.target_basis",
+        "optimize.one_qubit.post_translation",
+        "translate.target_basis.after_one_qubit",
+        "lower.device_instructions",
+        "canonicalize.native_input",
+        "optimize.native_fixed_point",
+        "validate.device",
+    ] {
+        assert!(result.step(name).unwrap().skipped, "{name}");
+    }
+    assert!(
+        result
+            .step("optimize.one_qubit_fixed_point")
+            .unwrap()
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("max_rounds=2")
+    );
+}
+
+#[test]
+fn enhanced_sabre_uses_the_same_objective_with_larger_search_budgets() {
+    let normal = sabre_config_for_mode(CompileMode::Normal, Some(7));
+    let enhanced = sabre_config_for_mode(CompileMode::Enhanced, Some(7));
+
+    assert_eq!(enhanced.trial_objective, normal.trial_objective);
+    assert_eq!(enhanced.swap_regret_ratio, normal.swap_regret_ratio);
+    assert_eq!(
+        enhanced.heuristic.basic_weight,
+        normal.heuristic.basic_weight
+    );
+    assert_eq!(
+        enhanced.heuristic.decay_increment,
+        normal.heuristic.decay_increment
+    );
+    assert_eq!(enhanced.heuristic.decay_reset, normal.heuristic.decay_reset);
+    assert_eq!(
+        enhanced.heuristic.attempt_limit,
+        normal.heuristic.attempt_limit
+    );
+    assert_eq!(
+        enhanced.heuristic.best_epsilon,
+        normal.heuristic.best_epsilon
+    );
+    assert!(enhanced.layout_trials > normal.layout_trials);
+    assert!(enhanced.layout_assignment_budget > normal.layout_assignment_budget);
+    assert!(enhanced.refinement_iterations > normal.refinement_iterations);
+    assert!(enhanced.layout_scoring_trials > normal.layout_scoring_trials);
+    assert!(enhanced.routing_trials > normal.routing_trials);
+    assert!(enhanced.heuristic.lookahead_weights.len() > normal.heuristic.lookahead_weights.len());
 }
 
 #[test]
@@ -209,20 +481,83 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "decompose.unitary",
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
+            "optimize.commutative_cancellation",
+            "resynthesize.two_qubit_blocks",
+            "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
+            "optimize.commutative_cancellation.after_rewrite",
+            "optimize.one_qubit.after_rewrite",
+            "optimize.one_qubit_fixed_point",
             "decompose.routing_basis",
             "route.sabre",
+            "resynthesize.two_qubit_blocks.post_routing",
             "optimize.post_routing",
             "translate.target_basis",
             "optimize.target_cleanup",
+            "optimize.one_qubit.post_translation",
+            "translate.target_basis.after_one_qubit",
             "canonicalize.output",
+            "lower.device_instructions",
+            "canonicalize.native_input",
+            "optimize.native_fixed_point",
+            "validate.device",
         ]
     );
-    assert!(enhanced.steps[9].skipped);
-    assert!(enhanced.steps[10].skipped);
-    assert!(enhanced.steps[11].skipped);
-    assert!(enhanced.steps[12].skipped);
+    for name in [
+        "decompose.routing_basis",
+        "route.sabre",
+        "resynthesize.two_qubit_blocks.post_routing",
+        "optimize.post_routing",
+        "translate.target_basis",
+        "optimize.target_cleanup",
+    ] {
+        assert!(enhanced.step(name).unwrap().skipped, "{name}");
+    }
+    assert_eq!(
+        enhanced
+            .step("optimize.target_cleanup")
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("no explicit target basis configured")
+    );
+    assert!(
+        enhanced
+            .step("optimize.one_qubit_fixed_point")
+            .unwrap()
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("max_rounds=4")
+    );
     assert!(enhanced.circuit.operations().is_empty());
+}
+
+#[test]
+fn enhanced_explicit_basis_runs_target_cleanup() {
+    let mut circuit = Circuit::new(1);
+    circuit.rz(Qubit::new(0), 0.25).unwrap();
+    let target_gates = [StandardGate::RZ, StandardGate::X2P, StandardGate::CZ];
+    let target_basis = target_gates
+        .iter()
+        .copied()
+        .map(Instruction::Standard)
+        .collect::<Vec<_>>();
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Basis(target_basis.clone()),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    let cleanup = result.step("optimize.target_cleanup").unwrap();
+    assert!(!cleanup.skipped);
+    assert!(
+        standard_ops(&result.circuit)
+            .iter()
+            .all(|gate| target_gates.contains(gate))
+    );
 }
 
 #[test]
@@ -239,7 +574,7 @@ fn workflow_expands_circuit_gate_definitions_before_optimization() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.definitions"));
+    assert!(result.step_changed("decompose.definitions"));
     assert_eq!(standard_ops(&result.circuit), vec![StandardGate::H]);
     assert!(!contains_high_level_gate(&result.circuit));
 }
@@ -259,9 +594,550 @@ fn workflow_synthesizes_matrix_backed_unitary_gates() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.unitary"));
+    assert!(result.step_changed("decompose.unitary"));
     assert!(!contains_high_level_gate(&result.circuit));
     assert!(!result.circuit.operations().is_empty());
+}
+
+#[test]
+fn workflow_uses_cx_kak_for_cx_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CX).count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_three_native_cx_for_device_targeted_swap_unitary() {
+    let gate = UnitaryGate::new("DEVICE_CX_SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let device = Device::bidirectional_line("device-cx-kak", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(41),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CX).count(),
+        3
+    );
+    assert!(
+        ops.iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CX))
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn routing_device_borrows_strict_device_in_normal_and_enhanced_modes() {
+    for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+        let workflow = CompilerWorkflow::new(CompileConfig {
+            mode,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device: Device::line("borrowed-routing-device", 2).unwrap(),
+                initial_layout: None,
+                seed: Some(46),
+            }),
+            resource_policy: ResourcePolicy::default(),
+        });
+        let target = workflow.routing_device_target().unwrap();
+        let routing_device = workflow.routing_device(target).unwrap();
+
+        assert!(matches!(&routing_device, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(routing_device.as_ref(), &target.device));
+    }
+}
+
+#[test]
+fn routing_device_owns_loose_topology_basis_device() {
+    let offline = PhysicalQubit::new(1);
+    let device = Device::line("owned-routing-device", 2)
+        .unwrap()
+        .with_invalid_qubits(HashSet::from([offline]))
+        .unwrap();
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(47),
+            },
+            basis: vec![
+                Instruction::Standard(StandardGate::H),
+                Instruction::Standard(StandardGate::CZ),
+            ],
+        },
+        resource_policy: ResourcePolicy::default(),
+    });
+    let target = workflow.routing_device_target().unwrap();
+    let routing_device = workflow.routing_device(target).unwrap();
+
+    assert!(matches!(&routing_device, std::borrow::Cow::Owned(_)));
+    assert_eq!(routing_device.qubits().count(), 2);
+    assert_eq!(
+        routing_device.invalid_qubits().collect::<Vec<_>>(),
+        vec![offline]
+    );
+    assert_eq!(routing_device.topology().undirected_edges().count(), 1);
+    assert!(matches!(
+        routing_device.native_gates(),
+        [
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CZ)
+        ]
+    ));
+}
+
+#[test]
+fn topology_basis_routes_on_device_but_uses_explicit_output_basis() {
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let device = Device::bidirectional_line("topology-basis", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let basis = vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CZ),
+    ];
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device: device.clone(),
+                initial_layout: None,
+                seed: Some(47),
+            },
+            basis,
+        },
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
+    );
+    assert!(result.device_metadata.is_some());
+    assert!(result.step("lower.device_instructions").unwrap().skipped);
+    assert!(result.step("canonicalize.native_input").unwrap().skipped);
+    assert!(result.step("optimize.native_fixed_point").unwrap().skipped);
+    assert!(result.step("validate.device").unwrap().skipped);
+    assert!(device.validate_circuit(&result.circuit).is_err());
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_three_native_cz_for_device_targeted_swap_unitary() {
+    let gate = UnitaryGate::new("DEVICE_CZ_SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let device = Device::bidirectional_line("device-cz-kak", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CZ),
+        ])
+        .unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(43),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CZ).count(),
+        3
+    );
+    assert!(
+        ops.iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn native_fixed_point_recovers_exact_pair_lowering_in_both_modes() {
+    // Pre-layout prefers the broad CX family when CZ is only native on one edge
+    // (see device_synthesis pre_layout coverage test). Force the routed pair onto
+    // that CZ-only edge. Enhanced can recover the exact-pair implementation in
+    // its post-routing step, while Normal recovers it in the shared native
+    // fixed-point closure.
+    let p1 = PhysicalQubit::new(1);
+    let p2 = PhysicalQubit::new(2);
+    let mut device = Device::bidirectional_line("heterogeneous-exact-pair", 4)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    for (control, target) in [(p1, p2), (p2, p1)] {
+        device
+            .add_edge_properties(
+                control,
+                target,
+                EdgeProp::new()
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::CZ),
+                        0.005,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let gate = UnitaryGate::new("LOCAL_CZ_SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    // The four-qubit device gives CX wider physical-pair coverage than the
+    // single CZ-only edge; logical qubit indices do not affect that envelope.
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let initial_layout = Layout::from_pairs(&[(0, 1), (1, 2)], 4).unwrap();
+    let compile_for_mode = |mode| {
+        CompilerWorkflow::new(CompileConfig {
+            mode,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device: device.clone(),
+                initial_layout: Some(initial_layout.clone()),
+                seed: Some(47),
+            }),
+            resource_policy: ResourcePolicy::default(),
+        })
+        .run(&circuit)
+        .unwrap()
+    };
+
+    let normal = compile_for_mode(CompileMode::Normal);
+    let enhanced = compile_for_mode(CompileMode::Enhanced);
+    let enhanced_ops = standard_ops(&enhanced.circuit);
+    let normal_ops = standard_ops(&normal.circuit);
+
+    assert_eq!(
+        enhanced_ops
+            .iter()
+            .filter(|gate| **gate == StandardGate::CZ)
+            .count(),
+        3
+    );
+    assert!(
+        enhanced_ops
+            .iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
+    );
+    assert_eq!(
+        normal_ops
+            .iter()
+            .filter(|gate| **gate == StandardGate::CZ)
+            .count(),
+        3
+    );
+    assert!(
+        normal_ops
+            .iter()
+            .all(|gate| matches!(gate, StandardGate::U | StandardGate::CZ))
+    );
+    assert!(!normal.step_changed("resynthesize.two_qubit_blocks.post_routing"));
+    assert!(enhanced.step_changed("resynthesize.two_qubit_blocks.post_routing"));
+    assert!(normal.step_changed("optimize.native_fixed_point"));
+    let mut physical_expected = Circuit::new(4);
+    physical_expected
+        .swap(Qubit::new(1), Qubit::new(2))
+        .unwrap();
+    assert_compiled_circuit_equivalent(&enhanced.circuit, &physical_expected);
+    assert_compiled_circuit_equivalent(&normal.circuit, &physical_expected);
+    device.validate_circuit(&enhanced.circuit).unwrap();
+    device.validate_circuit(&normal.circuit).unwrap();
+}
+
+#[test]
+fn workflow_runs_two_qubit_resynthesis_after_decomposition() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate.clone(), vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("resynthesize.two_qubit_blocks"));
+    assert!(
+        ops.iter().filter(|gate| **gate == StandardGate::CX).count() < 6,
+        "resynthesis should reduce the six-CX decomposition of two SWAPs"
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_cz_kak_for_cz_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CZ).count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_cy_kak_for_cy_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CY),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert_eq!(
+        ops.iter().filter(|gate| **gate == StandardGate::CY).count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_uses_rzz_kak_for_rzz_only_entangler_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::RX),
+            Instruction::Standard(StandardGate::RZZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert_eq!(
+        ops.iter()
+            .filter(|gate| **gate == StandardGate::RZZ)
+            .count(),
+        3
+    );
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_keeps_pauli_kak_for_full_ising_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::RXX),
+            Instruction::Standard(StandardGate::RYY),
+            Instruction::Standard(StandardGate::RZZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(ops.contains(&StandardGate::RXX));
+    assert!(ops.contains(&StandardGate::RYY));
+    assert!(ops.contains(&StandardGate::RZZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_keeps_pauli_kak_for_partial_ising_target() {
+    let rxx = StandardGate::RXX.matrix(&[0.7]).unwrap().into_owned();
+    let ryy = StandardGate::RYY.matrix(&[-0.4]).unwrap().into_owned();
+    let matrix = rxx.dot(&ryy);
+    let gate = UnitaryGate::new("PARTIAL_ISING_MATRIX", 2, 0)
+        .with_matrix(matrix)
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let config = CompileConfig {
+        target: CompileTarget::Basis(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::RX),
+            Instruction::Standard(StandardGate::RXX),
+            Instruction::Standard(StandardGate::RZZ),
+        ]),
+        ..compile_config(CompileMode::Normal)
+    };
+
+    let result = CompilerWorkflow::new(config).run(&circuit).unwrap();
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert!(ops.contains(&StandardGate::RZZ));
+    assert!(!ops.contains(&StandardGate::RXX));
+    assert!(!ops.contains(&StandardGate::RYY));
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn workflow_keeps_pauli_kak_without_target() {
+    let gate = UnitaryGate::new("SWAP_MATRIX", 2, 0)
+        .with_matrix(StandardGate::SWAP.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+    let ops = standard_ops(&result.circuit);
+
+    assert!(result.step_changed("decompose.unitary"));
+    assert!(!ops.contains(&StandardGate::CX));
+    assert!(!ops.contains(&StandardGate::CY));
+    assert!(!ops.contains(&StandardGate::CZ));
+    assert!(
+        ops.contains(&StandardGate::RXX)
+            || ops.contains(&StandardGate::RYY)
+            || ops.contains(&StandardGate::RZZ)
+    );
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
 }
 
 #[test]
@@ -279,7 +1155,7 @@ fn workflow_decomposes_multi_controlled_gates() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
 }
 
@@ -294,8 +1170,8 @@ fn workflow_reports_rewrite_change_for_symbolic_merge() {
     let result = run_workflow(&circuit, CompileMode::Normal);
 
     assert!(
-        step_changed(&result, "optimize.pre_decomposition")
-            || step_changed(&result, "optimize.post_decomposition")
+        result.step_changed("optimize.pre_decomposition")
+            || result.step_changed("optimize.post_decomposition")
     );
     assert_eq!(result.circuit.operations().len(), 1);
     let merged = operation_parameter(&result.circuit, &result.circuit.operations()[0].params[0]);
@@ -327,9 +1203,9 @@ fn workflow_decomposes_parameterized_mc_gate() {
 
     let result = run_workflow(&circuit, CompileMode::Normal);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
+    assert!(result.circuit.uses_symbol("theta"));
     assert_bindings_preserve_semantics(
         &circuit,
         &result.circuit,
@@ -354,18 +1230,27 @@ fn workflow_routes_parameterized_circuit_when_device_present() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(Device::line("workflow-param-line", 3).unwrap()),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("workflow-param-line", 3)
+                .unwrap()
+                .with_native_gates(vec![
+                    Instruction::Standard(StandardGate::H),
+                    Instruction::Standard(StandardGate::RX),
+                    Instruction::Standard(StandardGate::RZ),
+                    Instruction::Standard(StandardGate::CX),
+                ])
+                .unwrap(),
+            initial_layout: None,
+            seed: Some(11),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(11),
     })
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
-    assert!(circuit_contains_symbol(&result.circuit, "phi"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.circuit.uses_symbol("theta"));
+    assert!(result.circuit.uses_symbol("phi"));
     assert!(result.circuit.operations().iter().any(|operation| {
         matches!(
             operation.instruction,
@@ -388,11 +1273,15 @@ fn workflow_routes_from_supplied_initial_layout() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(Device::line("layout-line", 3).unwrap()),
-        initial_layout: Some(layout),
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("layout-line", 3)
+                .unwrap()
+                .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+                .unwrap(),
+            initial_layout: Some(layout),
+            seed: Some(17),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(17),
     })
     .run(&circuit)
     .unwrap();
@@ -417,26 +1306,325 @@ fn workflow_routes_from_supplied_initial_layout() {
 }
 
 #[test]
-fn workflow_rejects_initial_layout_without_device() {
-    let mut circuit = Circuit::new(1);
+fn device_workflow_legalizes_reverse_cx_to_directed_native_gates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-cx",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(7),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn device_workflow_legalizes_swap_through_reverse_cx_templates() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.swap(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-swap",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(11),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn device_workflow_selects_lowest_cost_native_swap_realization() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.swap(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-swap-cz",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+        Instruction::Standard(StandardGate::CZ),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(13),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    let gates = standard_ops(&result.circuit);
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| matches!(gate, StandardGate::CX | StandardGate::CZ))
+            .count(),
+        3
+    );
+    assert_eq!(gates.len(), 5);
+}
+
+#[test]
+fn device_workflow_reports_reversed_native_gate_as_changed() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cz(q0, q1).unwrap();
+
+    let device = Device::line_from_qubits(
+        "reverse-cz",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CZ)])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(17),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    assert!(result.step_changed("lower.device_instructions"));
+    assert_eq!(result.circuit.operations()[0].qubits.as_slice(), &[q1, q0]);
+}
+
+#[test]
+fn device_workflow_legalizes_global_cx_against_local_cz_override() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::line("local-cz", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CZ),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(19),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    assert_eq!(
+        standard_ops(&result.circuit),
+        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
+    );
+}
+
+#[test]
+fn device_workflow_uses_local_native_capabilities_without_global_defaults() {
+    let p0 = PhysicalQubit::new(0);
+    let p1 = PhysicalQubit::new(1);
+    let mut device = Device::line("local-only", 2).unwrap();
+    for qubit in [p0, p1] {
+        device
+            .add_qubit_properties(
+                qubit,
+                crate::device::QubitProp::new(0.01)
+                    .with_native_instruction(InstructionProp::new(
+                        Instruction::Standard(StandardGate::H),
+                        0.01,
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    device
+        .add_edge_properties(
+            p0,
+            p1,
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let mut circuit = Circuit::new(2);
     circuit.h(Qubit::new(0)).unwrap();
-    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout),
+            seed: Some(23),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    assert!(!result.step_changed("lower.device_instructions"));
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
+fn device_workflow_rejects_unroutable_native_interaction_during_sabre_preflight() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    let device = Device::line_from_qubits(
+        "no-reverse-cx-plan",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: None,
-        initial_layout: Some(layout),
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: Some(layout),
+            seed: Some(29),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
 
     assert!(matches!(
         err,
-        CompilerError::InvalidInput(reason) if reason.contains("initial layout requires a target device")
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::UnreachablePairPlacement {
+            logical,
+            physical,
+        }) if logical == [Qubit::new(0).into(), Qubit::new(1).into()]
+            && physical == [PhysicalQubit::new(0), PhysicalQubit::new(1)]
     ));
+}
+
+#[test]
+fn device_workflow_legalizes_control_flow_bodies_and_returns_layout_metadata() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    let measured = circuit.measure(q0).unwrap();
+    circuit
+        .if_(measured.expr().to_bool().unwrap(), |body| {
+            body.cx(q0, q1)?;
+            Ok(())
+        })
+        .unwrap();
+    let device = Device::line_from_qubits(
+        "controlled-reverse-cx",
+        vec![PhysicalQubit::new(1), PhysicalQubit::new(0)],
+    )
+    .unwrap()
+    .with_native_gates(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CX),
+    ])
+    .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(layout.clone()),
+            seed: Some(31),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    device.validate_circuit(&result.circuit).unwrap();
+    assert!(result.step_changed("lower.device_instructions"));
+    let metadata = result.device_metadata.expect("device compilation metadata");
+    assert_eq!(metadata.initial_layout, layout);
+    assert_eq!(metadata.final_layout, layout);
 }
 
 #[test]
@@ -450,7 +1638,7 @@ fn workflow_target_translation_keeps_parameterized_semantics() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::RZ),
             Instruction::Standard(StandardGate::X2P),
             Instruction::Standard(StandardGate::X2M),
@@ -459,16 +1647,13 @@ fn workflow_target_translation_keeps_parameterized_semantics() {
             Instruction::Standard(StandardGate::CZ),
             Instruction::Standard(StandardGate::GPhase),
         ]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "translate.target_basis"));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
+    assert!(result.step_changed("translate.target_basis"));
+    assert!(result.circuit.uses_symbol("theta"));
     assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
         gate,
         StandardGate::RZ
@@ -504,20 +1689,17 @@ fn target_basis_translation_runs_after_definition_decomposition() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
         ]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "decompose.definitions"));
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("decompose.definitions"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_eq!(
         standard_ops(&result.circuit),
         vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
@@ -533,14 +1715,11 @@ fn explicit_target_basis_runs_lowering() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![
+        target: CompileTarget::Basis(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
         ]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
@@ -553,6 +1732,18 @@ fn explicit_target_basis_runs_lowering() {
     assert_eq!(result.circuit.operations()[0].qubits.as_slice(), &[q1]);
     assert_eq!(result.circuit.operations()[1].qubits.as_slice(), &[q0, q1]);
     assert_eq!(result.circuit.operations()[2].qubits.as_slice(), &[q1]);
+    assert!(
+        result
+            .steps
+            .iter()
+            .any(|step| step.name == "lower.device_instructions" && step.skipped)
+    );
+    assert!(
+        result
+            .steps
+            .iter()
+            .any(|step| step.name == "validate.device" && step.skipped)
+    );
 }
 
 #[test]
@@ -563,11 +1754,8 @@ fn target_basis_failure_is_reported() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![Instruction::Standard(StandardGate::CZ)]),
-        device: None,
-        initial_layout: None,
+        target: CompileTarget::Basis(vec![Instruction::Standard(StandardGate::CZ)]),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -582,14 +1770,11 @@ fn mc_gate_target_basis_is_rejected_by_workflow_contract() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: Some(vec![Instruction::McGate(Box::new(MCGate::new(
+        target: CompileTarget::Basis(vec![Instruction::McGate(Box::new(MCGate::new(
             1,
             StandardGate::X,
         )))]),
-        device: None,
-        initial_layout: None,
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -598,7 +1783,7 @@ fn mc_gate_target_basis_is_rejected_by_workflow_contract() {
 }
 
 #[test]
-fn device_native_gates_are_used_as_target_basis() {
+fn device_native_gates_are_legalized_against_ordered_capabilities() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
@@ -610,23 +1795,24 @@ fn device_native_gates_are_used_as_target_basis() {
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
 
-    assert_eq!(
-        standard_ops(&result.circuit),
-        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
-    );
+    assert!(result.step_changed("lower.device_instructions"));
+    device.validate_circuit(&result.circuit).unwrap();
+    assert!(standard_ops(&result.circuit).contains(&StandardGate::CZ));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::CX));
 }
 
 #[test]
-fn device_workflow_routes_circuit_before_target_translation() {
+fn device_workflow_routes_circuit_before_native_legalization() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let q2 = Qubit::new(2);
@@ -634,21 +1820,30 @@ fn device_workflow_routes_circuit_before_target_translation() {
     circuit.cx(q0, q1).unwrap();
     circuit.cx(q1, q2).unwrap();
     circuit.cx(q0, q2).unwrap();
-    let device = Device::line("test-device", 3).unwrap();
+    let device = Device::line("test-device", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.step_changed("lower.device_instructions"));
+    assert!(!standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+    device.validate_circuit(&result.circuit).unwrap();
     assert!(
         result
             .steps
@@ -672,21 +1867,23 @@ fn routed_swaps_are_lowered_to_device_native_basis() {
         .with_native_gates(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert!(
         standard_ops(&result.circuit)
             .iter()
@@ -709,15 +1906,17 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
             Instruction::Standard(StandardGate::RZ),
             Instruction::Standard(StandardGate::X2P),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
@@ -729,8 +1928,8 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
         .expect("workflow should report routing-basis decomposition");
     assert!(!routing_basis_step.skipped);
     assert!(!routing_basis_step.changed);
-    assert!(step_changed(&result, "route.sabre"));
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("route.sabre"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
         gate,
         StandardGate::RZ | StandardGate::X2P | StandardGate::CZ
@@ -747,15 +1946,22 @@ fn enhanced_device_workflow_runs_post_routing_cleanup() {
     circuit.cx(q0, q1).unwrap();
     circuit.cx(q1, q2).unwrap();
     circuit.cx(q0, q2).unwrap();
-    let device = Device::line("test-device", 3).unwrap();
+    let device = Device::line("test-device", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(7),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(7),
     })
     .run(&circuit)
     .unwrap();
@@ -780,23 +1986,39 @@ fn device_capacity_blocks_clean_ancilla_allocation_but_allows_no_aux_fallback() 
             None,
         )
         .unwrap();
-    let device = Device::line("test-device", 4).unwrap();
+    let device = Device::line("test-device", 4)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::S),
+            Instruction::Standard(StandardGate::SDG),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+            Instruction::Standard(StandardGate::X),
+            Instruction::Standard(StandardGate::Z),
+            Instruction::Standard(StandardGate::RX),
+            Instruction::Standard(StandardGate::RY),
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
 
     let result = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy {
             max_pre_layout_clean_ancillas: 2,
             allow_dirty_borrowing: false,
         },
-        seed: None,
     })
     .run(&circuit)
     .unwrap();
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert_eq!(result.circuit.qubits().len(), 4);
     assert!(!contains_high_level_gate(&result.circuit));
 }
@@ -809,11 +2031,12 @@ fn device_capacity_rejects_source_circuit_that_is_too_wide() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -840,11 +2063,12 @@ fn device_capacity_rejects_too_wide_source_before_mc_decomposition() {
 
     let err = CompilerWorkflow::new(CompileConfig {
         mode: CompileMode::Normal,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: None,
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: None,
     })
     .run(&circuit)
     .unwrap_err();
@@ -882,7 +2106,7 @@ fn workflow_config_can_build_enhanced_workflow() {
 }
 
 #[test]
-fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
+fn target_cleanup_config_only_available_for_explicit_basis() {
     let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
     let target_basis = vec![
         Instruction::Standard(StandardGate::RZ),
@@ -896,13 +2120,12 @@ fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
         RewritePhase::PostDecomposition,
         RewritePhase::PostRouting,
     ] {
-        let config = workflow.rewrite_config_for_state(phase, &state).unwrap();
+        let config = workflow.rewrite_config(phase).unwrap();
         assert!(config.target_instruction_basis().is_none());
     }
 
-    let cleanup_config = workflow
-        .rewrite_config_for_state(RewritePhase::TargetCleanup, &state)
-        .unwrap();
+    let cleanup_config = workflow.target_cleanup_config(&state).unwrap();
+    let cleanup_config = cleanup_config.unwrap();
     let cleanup_basis = cleanup_config.target_instruction_basis().unwrap();
     assert_eq!(cleanup_basis.len(), target_basis.len());
     assert!(matches!(
@@ -913,4 +2136,77 @@ fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
             Instruction::Standard(StandardGate::CZ)
         ]
     ));
+
+    assert!(
+        workflow
+            .target_cleanup_config(&workflow_state_without_target_basis())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn normal_workflow_fixpoint_closes_nested_cancellation_pairs() {
+    // End-to-end pipeline check: three nesting levels on wire q1 (an outer
+    // CZ pair blocked by a CX pair, itself blocked by an inner H pair),
+    // every pair shielded from the windowed knowledge rewriter (>16 ops)
+    // and one-qubit fusion (single gates on distinct wires) by commuting
+    // gates on other wires. Global cancellation plus the fixpoint loop must
+    // clear all three pairs; note that bounded two-qubit resynthesis also
+    // rewrites nearby pair fragments into unitary gates in this pipeline.
+    let (q0, q1) = (Qubit::new(0), Qubit::new(1));
+    let mut circuit = Circuit::new(70);
+    circuit.cz(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.h(q1).unwrap();
+    for index in 0..34u32 {
+        circuit
+            .rx(Qubit::new(2 + index), 0.01 * f64::from(index + 1))
+            .unwrap();
+    }
+    circuit.h(q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    for index in 0..34u32 {
+        circuit
+            .ry(Qubit::new(36 + index), 0.02 * f64::from(index + 1))
+            .unwrap();
+    }
+    circuit.cz(q0, q1).unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+
+    assert!(result.changed);
+    let gates = standard_ops(&result.circuit);
+    assert!(!gates.contains(&StandardGate::CZ), "gates: {gates:?}");
+    assert!(!gates.contains(&StandardGate::CX), "gates: {gates:?}");
+    assert!(!gates.contains(&StandardGate::H), "gates: {gates:?}");
+}
+
+#[test]
+fn fixpoint_loop_reruns_cancellation_after_stable_resynthesis() {
+    // Drives close_one_qubit_resynthesis directly with a one-qubit-only
+    // synthesis basis, so two-qubit resynthesis can never change the
+    // circuit. Round 1 removes the H pair and exposes the CX pair; only a
+    // second cancellation run removes it. A loop that exits whenever
+    // resynthesis is stable would strand the CX pair.
+    let (q0, q1) = (Qubit::new(0), Qubit::new(1));
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let target_basis = vec![
+        Instruction::Standard(StandardGate::RZ),
+        Instruction::Standard(StandardGate::X2P),
+    ];
+    let mut state = workflow_state_with_target_basis(target_basis);
+    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.current = circuit;
+
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    workflow.close_one_qubit_resynthesis(&mut state).unwrap();
+
+    let gates = standard_ops(&state.current);
+    assert!(gates.is_empty(), "gates: {gates:?}");
 }

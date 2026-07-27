@@ -15,12 +15,12 @@
 //! Covers parse/validate health, layered [`Rule::verify`], and gate-formula
 //! equivalence for selected decompositions. Does not exercise `transform` passes.
 
+use crate::circuit::test_utils::assert_circuits_equivalent_up_to_global_phase;
 use crate::circuit::{Circuit, Qubit};
 use crate::compile::knowledge::rule::Rule;
 use crate::compile::knowledge::rule_dsl::load::load_rules_from_str;
 use crate::compile::knowledge::rule_equivalence::VerifyResult;
 use crate::compile::knowledge::{RuleKind, RuleLibrary};
-use crate::util::test_utils::assert_circuits_equivalent_up_to_global_phase;
 use std::f64::consts::PI;
 
 const RULE_FILES: &[(&str, &str, RuleKind)] = &[
@@ -354,8 +354,75 @@ fn ion_trap_direct_ising_rules_pass_layered_verify() {
 #[test]
 fn ion_trap_direct_ccx_rules_pass_layered_verify() {
     let library = RuleLibrary::builtin_rules().unwrap();
-    {
-        let name = "decompose_ccx_to_rx_ry_rzz";
+    for name in [
+        "decompose_ccx_to_u_cx",
+        "decompose_ccx_to_u_cz",
+        "decompose_ccx_to_rz_x2p_cx",
+        "decompose_ccx_to_rz_x2p_x_cz",
+        "decompose_ccx_to_rx_ry_cx",
+        "decompose_ccx_to_rx_ry_cz",
+        "decompose_ccx_to_rx_ry_rxx",
+        "decompose_ccx_to_rz_x2p_x_rzz",
+        "decompose_h_ccx_h_to_rz_x2p_cz",
+        "decompose_h_ccx_h_to_rz_cx",
+        "decompose_h_ccx_h_to_rx_ry_rzz",
+        "decompose_ccx_to_rx_ry_rzz",
+    ] {
+        let rule = library.get_by_name(name).expect(name);
+        assert_rule_verification_passes(rule);
+    }
+}
+
+#[test]
+fn benchpress_frequent_direct_rules_pass_layered_verify() {
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for name in [
+        "compose_cx_rz_cx_to_rzz",
+        "compose_cx_phase_cx_to_rzz",
+        "decompose_mcphase1_to_rz_cx",
+        "decompose_mcphase1_to_rz_x2p_cz",
+        "decompose_mcphase1_to_rx_ry_rzz",
+        "decompose_mcswap1_to_rz_x2p_cz",
+        "decompose_mcswap1_to_rz_x2p_cx",
+        "decompose_mcswap1_to_rx_ry_rzz",
+    ] {
+        let rule = library.get_by_name(name).expect(name);
+        assert_rule_verification_passes(rule);
+    }
+}
+
+#[test]
+fn coverage_gap_rules_pass_layered_verify() {
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for name in [
+        "compose_cz_rx_cz_to_rzx",
+        "compose_cz_rx_cz_to_rzx_swapped",
+        "compose_cx_cz_to_cy",
+        "compose_cx_cz_to_cy_cz_swapped",
+        "compose_cz_cx_to_cy",
+        "compose_cz_cx_to_cy_cz_swapped",
+        "normalize_crx_zero",
+        "normalize_cry_zero",
+        "normalize_crz_zero",
+        "normalize_mcphase1_zero",
+        "normalize_mcphase2_zero",
+        "specialize_fsim_zero_theta",
+        "specialize_u_zero_theta",
+        "cancel_mcx1",
+        "cancel_mcx2",
+        "cancel_mcx2_controls_swapped",
+        "cancel_mcx3",
+        "cancel_mcy1",
+        "cancel_mcy2",
+        "cancel_mcy2_controls_swapped",
+        "cancel_mcz1",
+        "cancel_mcz1_swapped",
+        "cancel_mcz2",
+        "cancel_mcz2_controls_swapped",
+        "cancel_mch1",
+        "cancel_mcswap1",
+        "cancel_mcswap1_targets_swapped",
+    ] {
         let rule = library.get_by_name(name).expect(name);
         assert_rule_verification_passes(rule);
     }

@@ -17,7 +17,14 @@ import pytest
 
 from cqlib.circuit import Circuit
 from cqlib.compile import CompilerConfigError, transform
-from cqlib.compile.sabre import SabreConfig, SabreRoutingDiagnostics
+from cqlib.compile.sabre import (
+    SabreConfig,
+    SabreRoutingDiagnostics,
+    SabreTrialObjective,
+    SabreVf2PrepassConfig,
+    normalize_initial_layout,
+    validate_reachable_interactions,
+)
 from cqlib.compile.transform import (
     LayoutObjective,
     RoutedCircuit,
@@ -63,6 +70,7 @@ def test_route_sabre_selects_layout_and_routes_without_mutating_input() -> None:
     assert isinstance(result.routed, RoutedCircuit)
     assert isinstance(result.diagnostics, SabreRoutingDiagnostics)
     assert result.layout_score is not None
+    assert result.layout_diagnostics.candidates_evaluated >= 1
     assert result.swap_count > 0
     assert result.changed(circuit) is True
     assert len(circuit.operations) == operation_count
@@ -107,11 +115,35 @@ def test_route_sabre_is_reproducible_for_same_seed() -> None:
     assert first.routed == second.routed
     assert first.__eq__(object()) is NotImplemented
     assert first.diagnostics.operation_count == second.diagnostics.operation_count
+    assert first.diagnostics.native_operation_count >= 0
+    assert first.diagnostics.requirement_signature_count >= 0
+
+
+def test_sabre_new_configuration_and_layout_helpers_are_public() -> None:
+    prepass = SabreVf2PrepassConfig(candidate_limit=3, call_limit=20)
+    config = SabreConfig(vf2_prepass=prepass)
+    circuit = Circuit(2)
+    circuit.cx(0, 1)
+    device = Device.line("line-3", 3)
+    layout = Layout.from_pairs([(0, 2), (1, 0)], physical_count=3)
+
+    normalized = normalize_initial_layout([0, 1], device, layout)
+    validate_reachable_interactions(circuit, device, normalized)
+
+    assert config.vf2_prepass == prepass
+    assert config.layout_assignment_budget == 1_000_000
+    assert config.trial_objective == (
+        SabreTrialObjective.native_quality_within_swap_budget()
+    )
+    assert normalized.num_vacant_physical == 1
 
 
 def test_route_sabre_rejects_invalid_configuration() -> None:
     circuit = Circuit(2)
     circuit.cx(0, 1)
+
+    with pytest.raises(CompilerConfigError, match="routing_trials"):
+        SabreConfig(routing_trials=0).validate()
 
     with pytest.raises(CompilerConfigError, match="routing_trials"):
         route_sabre(
@@ -125,7 +157,9 @@ def test_route_sabre_rejects_insufficient_device_capacity() -> None:
     circuit = Circuit(2)
     circuit.cx(0, 1)
 
-    with pytest.raises(CompilerConfigError, match="2 logical qubits.*1 usable physical qubits"):
+    with pytest.raises(
+        CompilerConfigError, match="2 logical qubits.*1 usable physical qubits"
+    ):
         route_sabre(circuit, Device.line("line-1", 1))
 
 

@@ -16,7 +16,7 @@
 //! rasterized `.png` output files.
 
 use super::data::PreparedResultPlot;
-use super::options::{DEFAULT_COLORS, ResultPlotKind, ResultPlotOptions};
+use super::options::{ResultPlotKind, ResultPlotOptions};
 use crate::visualization::VisualizationError;
 use crate::visualization::svg::{escape_attr, escape_text, render_svg_to_file};
 
@@ -69,6 +69,118 @@ struct BarChartLayout {
 }
 
 impl BarChartLayout {
+    /// Compute chart geometry from data range and user figure options.
+    ///
+    /// Histograms anchor the y-axis at zero. Distribution plots keep a small negative range
+    /// only when negative values are present in the generic numeric input.
+    fn new(plot: &PreparedResultPlot, options: &ResultPlotOptions) -> Self {
+        let (width, height) = options
+            .figsize
+            .map(|(w, h)| (w.max(2.0) * 100.0, h.max(2.0) * 100.0))
+            .unwrap_or((760.0, 480.0));
+        let zeroish = plot
+            .values
+            .iter()
+            .flat_map(|values| values.iter())
+            .all(|value| value.abs() < 1e-12);
+        let raw_min = plot
+            .values
+            .iter()
+            .flat_map(|values| values.iter().copied())
+            .fold(0.0_f64, f64::min);
+        let raw_max = plot
+            .values
+            .iter()
+            .flat_map(|values| values.iter().copied())
+            .fold(0.0_f64, f64::max);
+
+        let min_y = if plot.kind == ResultPlotKind::Distribution {
+            (raw_min * 1.12).min(0.0)
+        } else {
+            0.0
+        };
+        let max_y = if zeroish {
+            1.0
+        } else {
+            (raw_max * 1.12).max(1e-3)
+        };
+        let max_tick_w = (0..=5)
+            .map(|tick| {
+                let t = tick as f64 / 5.0;
+                let value = min_y + (max_y - min_y).max(1e-9) * t;
+                estimate_text_width(&format_tick(value, plot.kind), 11.0)
+            })
+            .fold(0.0_f64, f64::max);
+        // The left gutter must hold, from the y-axis outward: the tick gap, the tick
+        // labels, a title pad, the rotated y-axis title's width, and a left edge pad.
+        // This mirrors how matplotlib's `tight_layout` reserves room for the title.
+        let margin_left =
+            (TICK_GAP + max_tick_w + TITLE_PAD + 2.0 * TITLE_HALF + LEFT_PAD).clamp(48.0, 110.0);
+
+        let right_legend_margin = options.legend.as_ref().map_or(0.0, |legend| {
+            legend
+                .iter()
+                .map(|item| legend_item_width(item, 12))
+                .fold(0.0_f64, f64::max)
+                + 28.0
+        });
+        let right_plot_w = width - margin_left - right_legend_margin.max(28.0);
+        let legend_placement = if options.legend.is_some() {
+            if width <= 420.0 || right_plot_w < width * 0.45 {
+                LegendPlacement::Top
+            } else {
+                LegendPlacement::Right
+            }
+        } else {
+            LegendPlacement::None
+        };
+        let margin_right = match legend_placement {
+            LegendPlacement::Right => right_legend_margin.max(72.0),
+            LegendPlacement::Top | LegendPlacement::None => 28.0,
+        };
+        let margin_top = match (options.title.is_some(), legend_placement) {
+            (true, LegendPlacement::Top) => 80.0,
+            (false, LegendPlacement::Top) => 50.0,
+            (true, _) => 58.0,
+            (false, _) => 32.0,
+        };
+        let max_label_w = plot
+            .labels
+            .iter()
+            .map(|label| estimate_text_width(label, 11.0))
+            .fold(0.0_f64, f64::max);
+        let n_labels = plot.labels.len().max(1);
+        let preliminary_plot_w = (width - margin_left - margin_right).max(40.0);
+        let preliminary_group_w = preliminary_plot_w / n_labels as f64;
+        let x_labels_rotated = max_label_w > preliminary_group_w * 0.75 && max_label_w > 16.0;
+        let margin_bottom = if x_labels_rotated { 82.0 } else { 44.0 };
+        let plot_w = preliminary_plot_w;
+        let plot_h = (height - margin_top - margin_bottom).max(40.0);
+
+        let span = (max_y - min_y).max(1e-9);
+        let zero_y = margin_top + plot_h - ((0.0 - min_y) / span) * plot_h;
+        let n_sets = plot.values.len().max(1);
+        let group_w = plot_w / n_labels as f64;
+        let bar_w = (group_w / (n_sets as f64 + 1.0)).clamp(2.0, 44.0);
+
+        Self {
+            width,
+            height,
+            margin_left,
+            margin_top,
+            plot_w,
+            plot_h,
+            min_y,
+            max_y,
+            zero_y,
+            max_tick_w,
+            group_w,
+            bar_w,
+            legend_placement,
+            x_labels_rotated,
+        }
+    }
+
     /// Map a data value into SVG y-coordinate space.
     fn y_for_value(&self, value: f64) -> f64 {
         self.margin_top + self.plot_h - ((value - self.min_y) / self.span()) * self.plot_h
@@ -114,8 +226,8 @@ pub fn render_result_plot_to_file(svg: &str, output_path: &str) -> Result<(), Vi
 /// This function assumes labels and per-dataset values are already aligned by
 /// [`crate::visualization::result::data::prepare_result_plot`].
 pub(crate) fn render_bar_svg(plot: &PreparedResultPlot, options: &ResultPlotOptions) -> String {
-    let layout = bar_chart_layout(plot, options);
-    let colors = resolved_colors(options);
+    let layout = BarChartLayout::new(plot, options);
+    let colors = options.resolved_colors();
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -261,130 +373,6 @@ pub(crate) fn render_bar_svg(plot: &PreparedResultPlot, options: &ResultPlotOpti
     }
     out.push_str("</svg>");
     out
-}
-
-/// Compute chart geometry from data range and user figure options.
-///
-/// Histograms anchor the y-axis at zero. Distribution plots keep a small negative range
-/// only when negative values are present in the generic numeric input.
-fn bar_chart_layout(plot: &PreparedResultPlot, options: &ResultPlotOptions) -> BarChartLayout {
-    let (width, height) = options
-        .figsize
-        .map(|(w, h)| (w.max(2.0) * 100.0, h.max(2.0) * 100.0))
-        .unwrap_or((760.0, 480.0));
-    let zeroish = plot
-        .values
-        .iter()
-        .flat_map(|values| values.iter())
-        .all(|value| value.abs() < 1e-12);
-    let raw_min = plot
-        .values
-        .iter()
-        .flat_map(|values| values.iter().copied())
-        .fold(0.0_f64, f64::min);
-    let raw_max = plot
-        .values
-        .iter()
-        .flat_map(|values| values.iter().copied())
-        .fold(0.0_f64, f64::max);
-
-    let min_y = if plot.kind == ResultPlotKind::Distribution {
-        (raw_min * 1.12).min(0.0)
-    } else {
-        0.0
-    };
-    let max_y = if zeroish {
-        1.0
-    } else {
-        (raw_max * 1.12).max(1e-3)
-    };
-    let max_tick_w = (0..=5)
-        .map(|tick| {
-            let t = tick as f64 / 5.0;
-            let value = min_y + (max_y - min_y).max(1e-9) * t;
-            estimate_text_width(&format_tick(value, plot.kind), 11.0)
-        })
-        .fold(0.0_f64, f64::max);
-    // The left gutter must hold, from the y-axis outward: the tick gap, the tick
-    // labels, a title pad, the rotated y-axis title's width, and a left edge pad.
-    // This mirrors how matplotlib's `tight_layout` reserves room for the title.
-    let margin_left =
-        (TICK_GAP + max_tick_w + TITLE_PAD + 2.0 * TITLE_HALF + LEFT_PAD).clamp(48.0, 110.0);
-
-    let right_legend_margin = options.legend.as_ref().map_or(0.0, |legend| {
-        legend
-            .iter()
-            .map(|item| legend_item_width(item, 12))
-            .fold(0.0_f64, f64::max)
-            + 28.0
-    });
-    let right_plot_w = width - margin_left - right_legend_margin.max(28.0);
-    let legend_placement = if options.legend.is_some() {
-        if width <= 420.0 || right_plot_w < width * 0.45 {
-            LegendPlacement::Top
-        } else {
-            LegendPlacement::Right
-        }
-    } else {
-        LegendPlacement::None
-    };
-    let margin_right = match legend_placement {
-        LegendPlacement::Right => right_legend_margin.max(72.0),
-        LegendPlacement::Top | LegendPlacement::None => 28.0,
-    };
-    let margin_top = match (options.title.is_some(), legend_placement) {
-        (true, LegendPlacement::Top) => 80.0,
-        (false, LegendPlacement::Top) => 50.0,
-        (true, _) => 58.0,
-        (false, _) => 32.0,
-    };
-    let max_label_w = plot
-        .labels
-        .iter()
-        .map(|label| estimate_text_width(label, 11.0))
-        .fold(0.0_f64, f64::max);
-    let n_labels = plot.labels.len().max(1);
-    let preliminary_plot_w = (width - margin_left - margin_right).max(40.0);
-    let preliminary_group_w = preliminary_plot_w / n_labels as f64;
-    let x_labels_rotated = max_label_w > preliminary_group_w * 0.75 && max_label_w > 16.0;
-    let margin_bottom = if x_labels_rotated { 82.0 } else { 44.0 };
-    let plot_w = preliminary_plot_w;
-    let plot_h = (height - margin_top - margin_bottom).max(40.0);
-
-    let span = (max_y - min_y).max(1e-9);
-    let zero_y = margin_top + plot_h - ((0.0 - min_y) / span) * plot_h;
-    let n_sets = plot.values.len().max(1);
-    let group_w = plot_w / n_labels as f64;
-    let bar_w = (group_w / (n_sets as f64 + 1.0)).clamp(2.0, 44.0);
-
-    BarChartLayout {
-        width,
-        height,
-        margin_left,
-        margin_top,
-        plot_w,
-        plot_h,
-        min_y,
-        max_y,
-        zero_y,
-        max_tick_w,
-        group_w,
-        bar_w,
-        legend_placement,
-        x_labels_rotated,
-    }
-}
-
-/// Resolve user colors or fall back to Cqlib's built-in qualitative palette.
-fn resolved_colors(options: &ResultPlotOptions) -> Vec<String> {
-    if options.color.is_empty() {
-        DEFAULT_COLORS
-            .iter()
-            .map(|color| color.to_string())
-            .collect()
-    } else {
-        options.color.clone()
-    }
 }
 
 /// Format y-axis tick values for the selected plot family.

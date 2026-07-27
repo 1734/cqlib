@@ -21,32 +21,39 @@
 //! must be adjacent before it can be emitted. Dependencies are derived from a
 //! per-wire frontier: each new operation depends on the latest node touching
 //! any of its logical qubits, and then becomes the frontier for those qubits.
-//! This is enough for SABRE because layout routing only reasons about
-//! two-qubit interaction readiness.
+//! This lets SABRE reason about both interaction readiness and device-local
+//! unary capabilities without crossing explicit dependency boundaries.
 //!
-//! [`SabreNodeKind::Synchronize`] is used for zero- and one-qubit operations,
-//! delays, and directives. These operations do not create a routed two-qubit
-//! interaction, but they still preserve sequencing at the current dependency
-//! boundary. Initial synchronize operations that touch no mapped frontier stay
-//! in [`SabreDag::initial`].
+//! [`SabreNodeKind::Unary`] represents a one-logical-qubit requirement. It is a
+//! first-class routable node because device-local one-qubit capabilities may
+//! require moving the logical token before the operation can be lowered.
+//!
+//! [`SabreNodeKind::Synchronize`] is used for zero-qubit operations, delays,
+//! and directives. These operations preserve sequencing without adding a
+//! device-placement requirement. An empty-qubit barrier is a global synchronization boundary: it
+//! waits for every active wire and becomes a dependency of every subsequent
+//! operation. Other initial synchronize operations that touch no mapped
+//! frontier stay in [`SabreDag::initial`].
 //!
 //! Control-flow operations become recursive DAG nodes. The outer node preserves
 //! the control-flow operation as a scheduling boundary, while each body is
 //! decomposed into its own [`SabreDag`] so routing can restore layouts at block
 //! boundaries.
 
-use crate::circuit::{ClassicalControlOp, ClassicalExpr, ClassicalVar, Instruction, Operation};
+use crate::circuit::{
+    ClassicalControlOp, ClassicalExpr, ClassicalVar, Directive, Instruction, Operation,
+};
 use crate::compile::CompilerError;
 use crate::device::LogicalQubit;
 use rustworkx_core::petgraph::Direction;
 use rustworkx_core::petgraph::graph::DiGraph;
 use rustworkx_core::petgraph::prelude::NodeIndex;
-use rustworkx_core::petgraph::visit::EdgeRef;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub(crate) enum SabreNodeKind {
     Synchronize,
+    Unary(LogicalQubit),
     TwoQ([LogicalQubit; 2]),
     ControlFlow(SabreControlFlow),
 }
@@ -105,10 +112,14 @@ impl SabreDag {
 
         for operation in operations {
             let kind = kind_from_operation(operation)?;
+            let is_global_barrier = matches!(
+                operation.instruction,
+                Instruction::Directive(Directive::Barrier)
+            ) && operation.qubits.is_empty();
             let ordering_barrier = matches!(
                 operation.instruction,
                 Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
-            );
+            ) || is_global_barrier;
             let qubits = operation
                 .qubits
                 .iter()
@@ -156,14 +167,16 @@ impl SabreDag {
                     }
                 },
                 Predecessors::Single(previous) => {
-                    // Synchronize operations share the same dependency boundary,
-                    // and consecutive two-qubit operations on the same active
-                    // wires remain routable once the first one is routed.
+                    // Only requirements with the same ordered logical operands
+                    // share one routable node. Synchronization boundaries and
+                    // unary/pair transitions remain explicit DAG nodes.
                     let fold_into_previous = !ordering_barrier
                         && match (&graph[previous].kind, &kind) {
-                            (_, SabreNodeKind::Synchronize) => true,
+                            (SabreNodeKind::Unary(previous), SabreNodeKind::Unary(current)) => {
+                                previous == current
+                            }
                             (SabreNodeKind::TwoQ(previous), SabreNodeKind::TwoQ(current)) => {
-                                previous == current || *previous == [current[1], current[0]]
+                                previous == current
                             }
                             _ => false,
                         };
@@ -212,28 +225,24 @@ impl SabreDag {
         })
     }
 
-    pub(crate) fn only_interactions(&self) -> Self {
-        let mut graph = DiGraph::with_capacity(self.graph.node_count(), self.graph.edge_count());
-        for node in self.graph.node_weights() {
-            let kind = match &node.kind {
-                SabreNodeKind::TwoQ(pair) => SabreNodeKind::TwoQ(*pair),
-                SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => {
-                    SabreNodeKind::Synchronize
-                }
-            };
-            graph.add_node(SabreNode {
-                operations: Vec::new(),
-                kind,
-            });
-        }
-        for edge in self.graph.edge_references() {
-            graph.add_edge(edge.source(), edge.target(), ());
-        }
-        Self {
+    /// Builds the static interaction workload used by bidirectional layout
+    /// refinement.
+    ///
+    /// Control-flow bodies are included once. Alternative branches remain
+    /// parallel when they touch disjoint logical wires, while a stable branch
+    /// order adds per-wire dependencies between branches that share a wire.
+    /// This preserves the front-layer invariant that two ready interactions
+    /// cannot occupy the same logical qubit.
+    pub(crate) fn refinement_workload(operations: &[Operation]) -> Result<Self, CompilerError> {
+        let mut builder = WorkloadBuilder::default();
+        let mut state = WorkloadState::default();
+        builder.add_operations(operations, &mut state)?;
+        let first_layer = builder.graph.externals(Direction::Incoming).collect();
+        Ok(Self {
             initial: Vec::new(),
-            graph,
-            first_layer: self.first_layer.clone(),
-        }
+            graph: builder.graph,
+            first_layer,
+        })
     }
 
     pub(crate) fn reverse_interactions(&self) -> Self {
@@ -245,6 +254,201 @@ impl SabreDag {
             graph,
             first_layer,
         }
+    }
+}
+
+#[derive(Default)]
+struct WorkloadState {
+    wire_frontier: BTreeMap<LogicalQubit, NodeIndex>,
+    global_barrier: Option<NodeIndex>,
+}
+
+#[derive(Default)]
+struct WorkloadBuilder {
+    graph: DiGraph<SabreNode, ()>,
+}
+
+impl WorkloadBuilder {
+    fn add_operations(
+        &mut self,
+        operations: &[Operation],
+        state: &mut WorkloadState,
+    ) -> Result<BTreeSet<LogicalQubit>, CompilerError> {
+        let mut touched = BTreeSet::new();
+        for operation in operations {
+            match &operation.instruction {
+                Instruction::ClassicalControl(flow) => {
+                    touched.extend(self.add_control_flow(flow, state)?);
+                }
+                Instruction::ClassicalData(_) => {
+                    self.add_global_synchronize(state);
+                }
+                Instruction::Directive(Directive::Barrier) => {
+                    if operation.qubits.is_empty() {
+                        self.add_global_synchronize(state);
+                    } else {
+                        let qubits = operation
+                            .qubits
+                            .iter()
+                            .copied()
+                            .map(LogicalQubit::from_qubit)
+                            .collect::<Vec<_>>();
+                        self.add_wire_synchronize(&qubits, state);
+                    }
+                }
+                Instruction::Directive(_) | Instruction::Delay => {}
+                _ => match operation.qubits.len() {
+                    0 | 1 => {}
+                    2 => {
+                        let pair = [
+                            LogicalQubit::from_qubit(operation.qubits[0]),
+                            LogicalQubit::from_qubit(operation.qubits[1]),
+                        ];
+                        self.add_two_qubit(pair, state);
+                        touched.extend(pair);
+                    }
+                    arity => {
+                        return Err(CompilerError::InvalidInput(format!(
+                            "sabre requires operations with more than two qubits to be decomposed before routing; found {arity}-qubit operation {}",
+                            operation.instruction
+                        )));
+                    }
+                },
+            }
+        }
+        Ok(touched)
+    }
+
+    fn add_two_qubit(&mut self, pair: [LogicalQubit; 2], state: &mut WorkloadState) {
+        let mut parents = BTreeSet::new();
+        parents.extend(state.global_barrier);
+        parents.extend(
+            pair.iter()
+                .filter_map(|logical| state.wire_frontier.get(logical).copied()),
+        );
+        let node = self.graph.add_node(SabreNode {
+            operations: Vec::new(),
+            kind: SabreNodeKind::TwoQ(pair),
+        });
+        for parent in parents {
+            if parent != node && self.graph.find_edge(parent, node).is_none() {
+                self.graph.add_edge(parent, node, ());
+            }
+        }
+        state.wire_frontier.insert(pair[0], node);
+        state.wire_frontier.insert(pair[1], node);
+    }
+
+    fn add_global_synchronize(&mut self, state: &mut WorkloadState) -> NodeIndex {
+        let mut parents = state
+            .wire_frontier
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        parents.extend(state.global_barrier);
+        let node = self.add_node(SabreNodeKind::Synchronize, parents);
+        for frontier in state.wire_frontier.values_mut() {
+            *frontier = node;
+        }
+        state.global_barrier = Some(node);
+        node
+    }
+
+    fn add_wire_synchronize(
+        &mut self,
+        qubits: &[LogicalQubit],
+        state: &mut WorkloadState,
+    ) -> NodeIndex {
+        let mut parents = BTreeSet::new();
+        parents.extend(state.global_barrier);
+        parents.extend(
+            qubits
+                .iter()
+                .filter_map(|logical| state.wire_frontier.get(logical).copied()),
+        );
+        let node = self.add_node(SabreNodeKind::Synchronize, parents);
+        for &logical in qubits {
+            state.wire_frontier.insert(logical, node);
+        }
+        node
+    }
+
+    fn add_control_flow(
+        &mut self,
+        flow: &ClassicalControlOp,
+        state: &mut WorkloadState,
+    ) -> Result<BTreeSet<LogicalQubit>, CompilerError> {
+        let fork = self.add_global_synchronize(state);
+        let branches = match flow {
+            ClassicalControlOp::If(op) => {
+                let mut branches = vec![op.then_body().operations()];
+                if let Some(else_body) = op.else_body() {
+                    branches.push(else_body.operations());
+                }
+                branches
+            }
+            ClassicalControlOp::While(op) => vec![op.body().operations()],
+            ClassicalControlOp::For(op) => vec![op.body().operations()],
+            ClassicalControlOp::Switch(op) => {
+                let mut branches = op
+                    .cases()
+                    .iter()
+                    .map(|case| case.body().operations())
+                    .collect::<Vec<_>>();
+                if let Some(default) = op.default() {
+                    branches.push(default.operations());
+                }
+                branches
+            }
+            ClassicalControlOp::Break | ClassicalControlOp::Continue => Vec::new(),
+        };
+
+        let base_frontier = state.wire_frontier.clone();
+        let mut cross_branch_frontier = base_frontier.clone();
+        let mut all_touched = BTreeSet::new();
+        let mut join_parents = BTreeSet::from([fork]);
+        for branch in branches {
+            let mut branch_state = WorkloadState {
+                wire_frontier: cross_branch_frontier.clone(),
+                global_barrier: Some(fork),
+            };
+            let branch_touched = self.add_operations(branch, &mut branch_state)?;
+            for &logical in &branch_touched {
+                if let Some(frontier) = branch_state.wire_frontier.get(&logical).copied() {
+                    cross_branch_frontier.insert(logical, frontier);
+                    join_parents.insert(frontier);
+                }
+            }
+            if let Some(barrier) = branch_state.global_barrier
+                && barrier != fork
+            {
+                join_parents.insert(barrier);
+            }
+            all_touched.extend(branch_touched);
+        }
+
+        let join = self.add_node(SabreNodeKind::Synchronize, join_parents);
+        for frontier in state.wire_frontier.values_mut() {
+            *frontier = join;
+        }
+        for &logical in &all_touched {
+            state.wire_frontier.insert(logical, join);
+        }
+        state.global_barrier = Some(join);
+        Ok(all_touched)
+    }
+
+    fn add_node(&mut self, kind: SabreNodeKind, parents: BTreeSet<NodeIndex>) -> NodeIndex {
+        let node = self.graph.add_node(SabreNode {
+            operations: Vec::new(),
+            kind,
+        });
+        for parent in parents {
+            if parent != node && self.graph.find_edge(parent, node).is_none() {
+                self.graph.add_edge(parent, node, ());
+            }
+        }
+        node
     }
 }
 
@@ -303,9 +507,14 @@ fn kind_from_operation(operation: &Operation) -> Result<SabreNodeKind, CompilerE
                 Ok(SabreNodeKind::Synchronize)
             }
         },
-        Instruction::Directive(_) | Instruction::Delay => Ok(SabreNodeKind::Synchronize),
+        Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => {
+            Ok(SabreNodeKind::Synchronize)
+        }
         _ => match operation.qubits.len() {
-            0 | 1 => Ok(SabreNodeKind::Synchronize),
+            0 => Ok(SabreNodeKind::Synchronize),
+            1 => Ok(SabreNodeKind::Unary(LogicalQubit::from_qubit(
+                operation.qubits[0],
+            ))),
             2 => Ok(SabreNodeKind::TwoQ([
                 LogicalQubit::from_qubit(operation.qubits[0]),
                 LogicalQubit::from_qubit(operation.qubits[1]),
@@ -317,3 +526,7 @@ fn kind_from_operation(operation: &Operation) -> Result<SabreNodeKind, CompilerE
         },
     }
 }
+
+#[cfg(test)]
+#[path = "dag_test.rs"]
+mod dag_test;

@@ -167,7 +167,25 @@ class Circuit:
         ...
     @property
     def symbols(self) -> list[str]:
-        """Names of all free symbolic parameters in the circuit."""
+        """Interned symbol names in stable insertion order.
+
+        This registry may retain a symbol after all executable references to
+        it have been removed. Use :attr:`used_symbols` for live dependencies.
+        """
+        ...
+    @property
+    def used_symbols(self) -> list[str]:
+        """Symbol names actually referenced by executable circuit IR.
+
+        Global phase, top-level operations, and nested control-flow bodies are
+        included. Ordering follows the stable interned registry order.
+        """
+        ...
+    def uses_symbol(self, symbol: str) -> bool:
+        """Whether executable circuit IR currently references ``symbol``.
+
+        An interned symbol that is no longer referenced returns ``False``.
+        """
         ...
     @property
     def global_phase(self) -> Parameter:

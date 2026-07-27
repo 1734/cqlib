@@ -44,6 +44,7 @@ use std::sync::{Arc, OnceLock};
 #[derive(Debug, Clone)]
 pub struct FrozenCircuit {
     pub(crate) circuit: Circuit,
+    used_symbols: Arc<IndexSet<String>>,
     symbolic_matrix_cache: Arc<OnceLock<Arc<SymbolicMatrix>>>,
 }
 
@@ -61,8 +62,10 @@ impl FrozenCircuit {
     ///
     /// A new `FrozenCircuit` wrapping the provided circuit.
     pub fn new(circuit: Circuit) -> Self {
+        let used_symbols = Arc::new(circuit.used_symbols());
         Self {
             circuit,
+            used_symbols,
             symbolic_matrix_cache: Arc::new(OnceLock::new()),
         }
     }
@@ -82,6 +85,14 @@ impl FrozenCircuit {
     /// ```
     pub fn circuit(&self) -> &Circuit {
         &self.circuit
+    }
+
+    /// Returns symbols referenced by the frozen circuit's executable IR.
+    ///
+    /// The set is computed when the circuit is frozen and preserves the inner
+    /// circuit's stable symbol-registry order.
+    pub fn used_symbols(&self) -> &IndexSet<String> {
+        &self.used_symbols
     }
 
     /// Returns the cached symbolic matrix for this frozen circuit.
@@ -173,7 +184,7 @@ impl CircuitGate {
     /// ```
     pub fn new(name: impl Into<String>, circuit: FrozenCircuit) -> Result<Self, CircuitError> {
         let num_qubits = circuit.circuit.qubits().len();
-        let signature_params = circuit.circuit.symbols().clone();
+        let signature_params = circuit.used_symbols().clone();
         let num_params = signature_params.len();
 
         Ok(Self {
@@ -204,7 +215,7 @@ impl CircuitGate {
             }
         }
 
-        for symbol in circuit.circuit.symbols() {
+        for symbol in circuit.used_symbols() {
             if !signature_params.contains(symbol) {
                 return Err(CircuitError::InvalidOperation(format!(
                     "circuit gate implementation references undeclared parameter '{symbol}'"
@@ -231,7 +242,7 @@ impl CircuitGate {
 
     /// Returns the symbols actually referenced by this gate's backing circuit.
     pub fn used_symbols(&self) -> &IndexSet<String> {
-        self.circuit.circuit.symbols()
+        self.circuit.used_symbols()
     }
 
     /// Returns the set of symbolic parameter names used in the circuit.
@@ -391,5 +402,75 @@ mod tests {
         assert!(gate.symbols().contains("used"));
         assert!(!gate.symbols().contains("unused"));
         assert_eq!(gate.used_symbols(), &gate.symbols());
+    }
+
+    #[test]
+    fn explicit_signature_ignores_interned_but_unreferenced_symbols() {
+        let mut circuit = Circuit::new(1);
+        circuit.add_parameter(Parameter::symbol("stale"));
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+
+        let gate = CircuitGate::with_signature(
+            "declared",
+            FrozenCircuit::new(circuit),
+            ["declared_unused".to_string(), "used".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            gate.signature_params()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["declared_unused", "used"]
+        );
+        assert_eq!(
+            gate.used_symbols()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["used"]
+        );
+    }
+
+    #[test]
+    fn explicit_signature_still_rejects_actually_used_undeclared_symbols() {
+        let mut circuit = Circuit::new(1);
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+
+        let error = CircuitGate::with_signature(
+            "missing",
+            FrozenCircuit::new(circuit),
+            ["different".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CircuitError::InvalidOperation(message) if message.contains("used"))
+        );
+    }
+
+    #[test]
+    fn inverse_preserves_explicit_signature_and_live_dependencies() {
+        let mut circuit = Circuit::new(1);
+        circuit.add_parameter(Parameter::symbol("stale"));
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+        let gate = CircuitGate::with_signature(
+            "forward",
+            FrozenCircuit::new(circuit),
+            ["declared_unused".to_string(), "used".to_string()],
+        )
+        .unwrap();
+
+        let inverse = gate.inverse().unwrap();
+
+        assert_eq!(inverse.signature_params(), gate.signature_params());
+        assert_eq!(inverse.used_symbols(), gate.used_symbols());
     }
 }

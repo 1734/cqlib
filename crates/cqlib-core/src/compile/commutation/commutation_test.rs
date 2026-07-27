@@ -16,6 +16,47 @@ use ndarray::Array2;
 use num_complex::Complex64;
 use std::f64::consts::{FRAC_PI_2, PI};
 
+fn numeric_params(gate: StandardGate) -> Vec<Parameter> {
+    match gate.num_params() {
+        0 => vec![],
+        1 => vec![Parameter::from(0.731)],
+        2 => vec![Parameter::from(0.731), Parameter::from(-1.127)],
+        3 => vec![
+            Parameter::from(0.731),
+            Parameter::from(-1.127),
+            Parameter::from(0.419),
+        ],
+        count => panic!("unexpected standard-gate parameter count {count}"),
+    }
+}
+
+fn ordered_qargs(width: usize) -> Vec<Vec<Qubit>> {
+    let qubits = [Qubit::new(0), Qubit::new(1), Qubit::new(2)];
+    match width {
+        0 => vec![vec![]],
+        1 => qubits.iter().map(|&qubit| vec![qubit]).collect(),
+        2 => qubits
+            .iter()
+            .flat_map(|&first| {
+                qubits
+                    .iter()
+                    .copied()
+                    .filter(move |&second| second != first)
+                    .map(move |second| vec![first, second])
+            })
+            .collect(),
+        3 => vec![
+            vec![qubits[0], qubits[1], qubits[2]],
+            vec![qubits[0], qubits[2], qubits[1]],
+            vec![qubits[1], qubits[0], qubits[2]],
+            vec![qubits[1], qubits[2], qubits[0]],
+            vec![qubits[2], qubits[0], qubits[1]],
+            vec![qubits[2], qubits[1], qubits[0]],
+        ],
+        _ => vec![],
+    }
+}
+
 fn algebra_only_checker() -> CommutationChecker {
     CommutationChecker::with_config(CommutationConfig {
         enable_rule_oracle: false,
@@ -414,4 +455,57 @@ fn matrix_fallback_respects_max_qubits() {
     );
 
     assert!(result.is_none());
+}
+
+#[test]
+fn every_numeric_standard_gate_commutation_claim_matches_direct_matrix_check() {
+    use super::matrix::matrix_commutation;
+
+    let checker = algebra_only_checker();
+    for &lhs_gate in StandardGate::all() {
+        let lhs_inst = Instruction::Standard(lhs_gate);
+        let lhs_params = numeric_params(lhs_gate);
+        for lhs_qargs in ordered_qargs(lhs_gate.num_qubits()) {
+            for &rhs_gate in StandardGate::all() {
+                // The direct matrix fallback intentionally does not represent
+                // zero-qubit GPhase operations; their scalar commutation is
+                // covered separately by the cheap checker path.
+                if lhs_gate == StandardGate::GPhase || rhs_gate == StandardGate::GPhase {
+                    continue;
+                }
+                let rhs_inst = Instruction::Standard(rhs_gate);
+                let rhs_params = numeric_params(rhs_gate);
+                for rhs_qargs in ordered_qargs(rhs_gate.num_qubits()) {
+                    let Some(claim) = checker.check(
+                        &lhs_inst,
+                        &lhs_qargs,
+                        &lhs_params,
+                        &rhs_inst,
+                        &rhs_qargs,
+                        &rhs_params,
+                    ) else {
+                        continue;
+                    };
+                    let matrix = matrix_commutation(
+                        &lhs_inst,
+                        &lhs_qargs,
+                        &lhs_params,
+                        &rhs_inst,
+                        &rhs_qargs,
+                        &rhs_params,
+                        3,
+                    );
+                    assert!(
+                        matrix.is_some(),
+                        "false commutation claim {claim:?}: {lhs_gate:?}{lhs_qargs:?} vs {rhs_gate:?}{rhs_qargs:?}"
+                    );
+                    assert_eq!(
+                        claim.is_exact(),
+                        matrix.as_ref().is_some_and(Commutation::is_exact),
+                        "wrong commutation phase class: {lhs_gate:?}{lhs_qargs:?} vs {rhs_gate:?}{rhs_qargs:?}"
+                    );
+                }
+            }
+        }
+    }
 }

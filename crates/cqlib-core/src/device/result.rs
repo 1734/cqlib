@@ -113,6 +113,19 @@ impl Outcome {
         Self(chunks)
     }
 
+    /// Creates an outcome from bits in little-endian order.
+    ///
+    /// `bits[0]` becomes bit index 0, the least-significant bit.
+    pub(crate) fn from_lsb_bits(bits: &[bool]) -> Self {
+        let mut chunks = SmallVec::from_elem(0u64, bits.len().div_ceil(BITS_PER_CHUNK));
+        for (index, value) in bits.iter().copied().enumerate() {
+            if value {
+                chunks[index / BITS_PER_CHUNK] |= 1u64 << (index % BITS_PER_CHUNK);
+            }
+        }
+        Self(chunks)
+    }
+
     /// Create an Outcome from a binary string (e.g., "101").
     ///
     /// # Convention
@@ -360,6 +373,7 @@ impl ExecutionResult {
         t: Option<OffsetDateTime>,
     ) -> &mut Self {
         self.counts = counts;
+        self.probabilities = None;
         self.status = Status::Completed;
         self.finished_at = t.or(Some(OffsetDateTime::now_utc()));
         self

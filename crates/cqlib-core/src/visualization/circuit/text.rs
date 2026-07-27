@@ -65,6 +65,19 @@ pub struct TextDrawerOptions {
     pub reverse_bits: bool,
 }
 
+impl TextDrawerOptions {
+    fn effective_line_width(&self) -> usize {
+        let width = self.line_width;
+        if width > MIN_LINE_WIDTH {
+            return width as usize;
+        }
+        if width < 0 {
+            return usize::MAX;
+        }
+        DEFAULT_LINE_WIDTH as usize
+    }
+}
+
 impl Default for TextDrawerOptions {
     fn default() -> Self {
         Self {
@@ -191,7 +204,7 @@ pub fn draw_text_from_visual(
     }
     let lines = make_lines(&flattened, options.show_params, options.initial_state);
     let lines_count = total_rows(flattened.num_qubits());
-    let max_line_width = effective_line_width(options);
+    let max_line_width = options.effective_line_width();
 
     let start_qubits = lines[0].clone();
     let mut current_data = start_qubits.clone();
@@ -244,17 +257,6 @@ fn y_wire(lane: usize) -> usize {
 
 fn total_rows(num_qubits: usize) -> usize {
     num_qubits * 2 + 1
-}
-
-fn effective_line_width(options: &TextDrawerOptions) -> usize {
-    let w = options.line_width;
-    if w > MIN_LINE_WIDTH {
-        return w as usize;
-    }
-    if w < 0 {
-        return usize::MAX;
-    }
-    DEFAULT_LINE_WIDTH as usize
 }
 
 fn make_lines(

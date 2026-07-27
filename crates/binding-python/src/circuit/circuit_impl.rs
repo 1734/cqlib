@@ -134,9 +134,24 @@ impl PyCircuit {
             .collect()
     }
 
+    /// Returns interned symbol names in insertion order.
+    ///
+    /// This registry is stable and may contain symbols no longer referenced by
+    /// executable IR. Use `used_symbols` or `uses_symbol` for live dependencies.
     #[getter]
     fn symbols(&self) -> Vec<String> {
         self.inner.symbols().iter().cloned().collect()
+    }
+
+    /// Returns symbol names actually referenced by executable IR.
+    #[getter]
+    fn used_symbols(&self) -> Vec<String> {
+        self.inner.used_symbols().into_iter().collect()
+    }
+
+    /// Returns whether executable IR currently references `symbol`.
+    fn uses_symbol(&self, symbol: &str) -> bool {
+        self.inner.uses_symbol(symbol)
     }
 
     #[getter]
@@ -867,6 +882,11 @@ impl PyCircuit {
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
+    /// Inserts a compiler barrier.
+    ///
+    /// A non-empty list constrains optimization and reordering on exactly those qubits. An empty
+    /// list creates a global barrier over every qubit in this circuit. Barriers have no physical
+    /// effect on the quantum state.
     fn barrier(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
         self.inner
             .barrier(qubits.into())

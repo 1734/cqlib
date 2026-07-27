@@ -57,7 +57,7 @@ class Instruction:
         ...
     @property
     def name(self) -> str:
-        """Human-readable name (e.g. ``"h"``, ``"cx"``, ``"measure"``)."""
+        """Human-readable name (e.g. ``"H"``, ``"CX"``, ``"Measure"``)."""
         ...
     @property
     def instruction_type(self) -> str:
@@ -112,7 +112,7 @@ class ValueInstruction:
     def is_instruction(self) -> bool: ...
     @property
     def name(self) -> str:
-        """Human-readable name (e.g. ``"h"``, ``"cx"``, ``"measure"``)."""
+        """Human-readable name (e.g. ``"H"``, ``"CX"``, ``"Measure"``)."""
         ...
     @property
     def instruction_type(self) -> str:

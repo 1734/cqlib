@@ -23,6 +23,7 @@ strip = true
 approx = { version = "0.5", features = ["num-complex"] }
 bitvec = "1.0.1"
 cbindgen = "0.29.2"
+criterion = "0.5"
 faer = "0.24"
 lalrpop = "0.22"
 lalrpop-util = "0.22"

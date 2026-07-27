@@ -19,11 +19,13 @@ import pytest
 
 from cqlib.circuit import Circuit, Instruction, StandardGate, UnitaryGate
 from cqlib.compile import CompilerConfigError
+from cqlib.compile.commutation import CommutationConfig
 from cqlib.compile.knowledge import RuleKind
 from cqlib.compile.transform import (
     CanonicalizeConfig,
     CanonicalizeResult,
     Canonicalizer,
+    CommutativeCancellation,
     KnowledgeRewriteResult,
     KnowledgeRewriteStats,
     KnowledgeRewriter,
@@ -35,9 +37,18 @@ from cqlib.compile.transform import (
     lower_to_routing_basis,
     rewrite_circuit,
 )
-from cqlib.compile.transform.decompose import expand_definitions
+from cqlib.compile.transform.decompose import (
+    TwoQubitUnitaryDecomposeBasis,
+    UnitaryDecomposeConfig,
+    expand_definitions,
+)
 from cqlib.compile.transform.result import (
     TransformResult as ResultModuleTransformResult,
+)
+from cqlib.compile.transform.resynthesis import (
+    ResynthesizeTwoQubitBlocks,
+    TwoQubitBlockResynthesisConfig,
+    resynthesize_two_qubit_blocks,
 )
 
 
@@ -46,6 +57,10 @@ def test_transform_module_and_public_types_are_registered() -> None:
     assert CanonicalizeConfig.__module__ == "cqlib.compile.transform"
     assert Canonicalizer.__module__ == "cqlib.compile.transform"
     assert CanonicalizeResult.__module__ == "cqlib.compile.transform"
+    assert (
+        CommutativeCancellation.__module__
+        == "cqlib.compile.transform.commutative_cancellation"
+    )
     assert RewriteMode.__module__ == "cqlib.compile.transform"
     assert RewriteConfig.__module__ == "cqlib.compile.transform"
     assert KnowledgeRewriter.__module__ == "cqlib.compile.transform"
@@ -275,10 +290,38 @@ def test_rewrite_rejects_invalid_configuration_and_unsatisfied_basis() -> None:
         mode=RewriteMode.lowering(),
         target_instructions=[Instruction.from_standard_gate(StandardGate.CZ)],
     )
-    with pytest.raises(
-        CompilerConfigError, match="target instruction basis not satisfied"
-    ):
+    with pytest.raises(CompilerConfigError, match="lowering incomplete"):
         rewrite_circuit(circuit, config)
+
+
+def test_commutative_cancellation_cancels_distant_self_inverse_pairs() -> None:
+    circuit = Circuit(3)
+    circuit.h(0)
+    circuit.cz(1, 2)
+    circuit.cz(1, 2)
+    circuit.h(0)
+    cancellation = CommutativeCancellation()
+
+    result = cancellation.run(circuit)
+
+    assert repr(cancellation) == "CommutativeCancellation()"
+    assert result.changed is True
+    assert len(result.circuit.operations) == 0
+    assert len(circuit.operations) == 4
+    assert copy.copy(cancellation).__class__ is CommutativeCancellation
+    assert copy.deepcopy(cancellation).__class__ is CommutativeCancellation
+
+
+def test_commutative_cancellation_respects_non_commuting_barriers() -> None:
+    circuit = Circuit(1)
+    circuit.h(0)
+    circuit.x(0)
+    circuit.h(0)
+
+    result = CommutativeCancellation().run(circuit)
+
+    assert result.changed is False
+    assert len(result.circuit.operations) == 3
 
 
 def test_lower_to_routing_basis_lowers_toffoli_to_two_qubit_ops() -> None:
@@ -315,7 +358,9 @@ def test_lower_to_routing_basis_prefers_cz_only_basis() -> None:
         for operation in result.circuit.operations
     ]
 
-    assert transform.preferred_basis == basis
+    assert [instruction.name for instruction in transform.preferred_basis] == [
+        instruction.name for instruction in basis
+    ]
     assert "CCX" not in names
     assert "CX" not in names
     assert "CZ" in names
@@ -323,10 +368,71 @@ def test_lower_to_routing_basis_prefers_cz_only_basis() -> None:
 
 def test_lower_to_routing_basis_reports_route_sabre_contract() -> None:
     circuit = Circuit(3)
-    circuit.unitary(UnitaryGate("three_q", 3), [0, 1, 2])
+    circuit.append_unitary_gate(UnitaryGate("three_q", 3), [0, 1, 2])
 
     with pytest.raises(
         CompilerConfigError,
         match="routing-basis lowering did not satisfy route.sabre input contract",
     ):
         lower_to_routing_basis(circuit)
+
+
+def test_two_qubit_block_resynthesis_config_exposes_all_options() -> None:
+    commutation = CommutationConfig(
+        enable_rule_oracle=False,
+        enable_matrix_fallback=True,
+        max_matrix_qubits=2,
+    )
+    config = TwoQubitBlockResynthesisConfig(
+        two_qubit_basis=TwoQubitUnitaryDecomposeBasis.cx(),
+        enhanced=True,
+        max_block_ops=20,
+        max_crossed_ops=5,
+        max_scan_span=40,
+        skip_labeled_ops=False,
+        recurse_control_flow=False,
+        commutation=commutation,
+    )
+
+    assert config.two_qubit_basis == TwoQubitUnitaryDecomposeBasis.cx()
+    assert config.max_block_ops == 20
+    assert config.max_crossed_ops == 5
+    assert config.max_scan_span == 40
+    assert config.skip_labeled_ops is False
+    assert config.recurse_control_flow is False
+    assert config.commutation == commutation
+    assert copy.copy(config) == config
+    assert copy.deepcopy(config) == config
+    assert repr(config).startswith("TwoQubitBlockResynthesisConfig(")
+
+
+def test_unitary_decompose_config_preserves_legacy_python_basis() -> None:
+    config = UnitaryDecomposeConfig(
+        two_qubit_basis=TwoQubitUnitaryDecomposeBasis.rzz(),
+        recurse_control_flow=False,
+    )
+
+    assert config.two_qubit_basis == TwoQubitUnitaryDecomposeBasis.rzz()
+    assert config.recurse_control_flow is False
+    assert copy.copy(config) == config
+    assert copy.deepcopy(config) == config
+    assert repr(config).startswith("UnitaryDecomposeConfig(")
+
+
+def test_two_qubit_block_resynthesis_python_api_preserves_input() -> None:
+    circuit = Circuit(2)
+    circuit.cx(0, 1)
+    circuit.cx(0, 1)
+    config = TwoQubitBlockResynthesisConfig(
+        two_qubit_basis=TwoQubitUnitaryDecomposeBasis.cx()
+    )
+
+    result = resynthesize_two_qubit_blocks(circuit, config)
+    transformer = ResynthesizeTwoQubitBlocks(config)
+    transformer_result = transformer.run(circuit)
+
+    assert len(circuit.operations) == 2
+    assert result.changed is True
+    assert len(result.circuit.operations) == 0
+    assert transformer.config == config
+    assert transformer_result == result

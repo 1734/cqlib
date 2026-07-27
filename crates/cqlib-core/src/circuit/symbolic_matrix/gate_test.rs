@@ -971,6 +971,42 @@ fn test_symbolic_parameterized_unitary_circuit_definition_preserves_symbol() {
 }
 
 #[test]
+fn test_symbolic_circuit_backed_unitary_ignores_unreferenced_interned_symbols() {
+    let mut inner = Circuit::new(1);
+    inner.add_parameter(Parameter::symbol("stale"));
+    inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let frozen = FrozenCircuit::new(inner);
+    assert_eq!(
+        frozen
+            .used_symbols()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["theta"]
+    );
+
+    let gate = UnitaryGate::new("InnerRX", 1, 1)
+        .with_circuit(Arc::new(frozen))
+        .unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit
+        .unitary_with_params(
+            gate,
+            vec![Qubit::new(0)],
+            vec![ParameterValue::from(Parameter::symbol("phi"))],
+        )
+        .unwrap();
+
+    let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+    let mut bindings = HashMap::new();
+    bindings.insert("phi", PI / 4.0);
+    let evaluated = evaluate_symbolic_matrix(&symbolic, &Some(bindings)).unwrap();
+    let expected = crate::circuit::gate::gate_matrix::rx_gate(PI / 4.0);
+
+    assert_matrix_approx_eq(&evaluated, &expected, 1e-12);
+}
+
+#[test]
 fn test_symbolic_unitary_explicit_symbolic_matrix_precedes_circuit() {
     let mut inner = Circuit::new(1);
     inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();

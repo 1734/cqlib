@@ -17,6 +17,12 @@
 //! basis. It uses single-operation decomposition rules as a planning graph and
 //! then lowers each gate-like operation linearly. Optimizing rewrites such as
 //! cancellation, merge, and commutation remain in the knowledge rewriter.
+//!
+//! One parameter-aware specialization sits on top of the static rule graph:
+//! fixed-parameter `U` gates are re-synthesized numerically by the `euler_1q`
+//! module so degenerate angles collapse to the shortest half-rotation
+//! sequence. The dynamic candidate is used only when its physical output cost
+//! is strictly below the static plan's; ties keep the static path.
 
 use crate::circuit::{
     Circuit, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue, Qubit,
@@ -28,19 +34,67 @@ use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::compile::knowledge::{
     KnowledgeInstructionKey, MatchedReplacement, RuleId, RuleKind, RuleLibrary,
 };
+use crate::compile::transform::decompose::unitary::euler_1q::{
+    Euler1qCandidate, synthesize_euler_1q_candidates,
+};
+use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
+use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const MAX_PLANNING_ROUNDS: usize = 128;
 
 /// Lowers a circuit to an explicit gate-like target instruction basis.
 #[derive(Debug, Clone)]
 pub struct TargetBasisLowerer {
-    target_basis: Vec<Instruction>,
-    plans: LoweringPlans,
+    target_basis: Arc<[Instruction]>,
+    plans: Arc<LoweringPlans>,
 }
+
+/// Canonical identity of a standard-gate target basis.
+///
+/// The signature is order- and duplicate-insensitive because target-basis
+/// lowering treats the configured instructions as a capability set. `GPhase`
+/// is omitted because it is implicit and has no effect on generated templates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetBasisSignature {
+    gates: Vec<u8>,
+}
+
+/// Cost of lowering a fixed standard-gate operation sequence to a target basis.
+///
+/// Global-phase operations are intentionally excluded: they have no physical
+/// gate cost and do not occupy a qubit wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetBasisCost {
+    pub two_qubit_ops: usize,
+    pub depth: usize,
+    pub total_ops: usize,
+    pub parameterized_ops: usize,
+}
+
+/// Reusable, exact target-basis cost evaluator.
+///
+/// The evaluator shares the same lowerer and plans used by
+/// [`TargetBasisLowerer`]. It therefore measures the concrete output of the
+/// active rule library rather than maintaining a separate heuristic
+/// approximation for synthesis choices.
+#[derive(Debug, Clone)]
+pub struct TargetBasisCostModel {
+    signature: TargetBasisSignature,
+    lowerer: Arc<TargetBasisLowerer>,
+}
+
+impl PartialEq for TargetBasisCostModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+    }
+}
+
+impl Eq for TargetBasisCostModel {}
 
 #[derive(Debug, Clone)]
 struct LoweringPlans {
@@ -52,6 +106,7 @@ struct LoweringPlans {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GatePlan {
     rule_id: RuleId,
+    cost: PlanCost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -71,17 +126,6 @@ struct LowerableOperation {
     label: Option<Box<str>>,
 }
 
-enum LoweringTarget<'a> {
-    TopLevel {
-        output: &'a mut Vec<ValueOperation>,
-        phase_delta: &'a mut Parameter,
-    },
-    ControlFlowBody {
-        output: &'a mut Vec<ValueOperation>,
-        phase_delta: &'a mut Parameter,
-    },
-}
-
 struct CircuitLowerer<'a> {
     source: &'a Circuit,
     plans: &'a LoweringPlans,
@@ -93,6 +137,13 @@ struct CircuitLowerer<'a> {
 impl TargetBasisLowerer {
     /// Creates a target-basis lowerer from a non-empty gate-like basis.
     pub fn new(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
+        Self::from_shared_basis(target_basis.into())
+    }
+
+    /// Creates a lowerer while retaining a shared target-basis allocation.
+    pub(crate) fn from_shared_basis(
+        target_basis: Arc<[Instruction]>,
+    ) -> Result<Self, CompilerError> {
         if target_basis.is_empty() {
             return Err(CompilerError::InvalidInput(
                 "target-basis lowering requires a non-empty target basis".to_string(),
@@ -105,13 +156,172 @@ impl TargetBasisLowerer {
 
         Ok(Self {
             target_basis,
-            plans,
+            plans: Arc::new(plans),
         })
     }
 
     /// Returns the configured target instruction basis in insertion order.
     pub fn target_basis(&self) -> &[Instruction] {
-        &self.target_basis
+        self.target_basis.as_ref()
+    }
+
+    /// Returns whether translating `circuit` can change or reject its
+    /// gate-like operations.
+    ///
+    /// This is a conservative scheduling check. It recursively inspects
+    /// structured control-flow bodies but does not replace terminal
+    /// target-basis validation. Explicit `GPhase` operations require
+    /// translation because lowering folds them into the enclosing phase.
+    pub fn requires_lowering(&self, circuit: &Circuit) -> bool {
+        operations_require_lowering(circuit.operations(), self.plans.as_ref())
+    }
+}
+
+fn operations_require_lowering(operations: &[Operation], plans: &LoweringPlans) -> bool {
+    operations
+        .iter()
+        .any(|operation| instruction_requires_lowering(&operation.instruction, plans))
+}
+
+fn instruction_requires_lowering(instruction: &Instruction, plans: &LoweringPlans) -> bool {
+    match instruction {
+        Instruction::Standard(StandardGate::GPhase) => true,
+        Instruction::Standard(gate) => {
+            !plans.is_physical(&KnowledgeInstructionKey::Standard(*gate))
+        }
+        // Keep the check conservative for standalone lowerers that may accept
+        // multi-controlled target instructions. The workflow decomposes these
+        // before translation, and running the lowerer preserves its error and
+        // normalization behavior for every extended gate-like instruction.
+        Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => true,
+        Instruction::ClassicalControl(control) => control_flow_requires_lowering(control, plans),
+        Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => false,
+    }
+}
+
+fn control_flow_requires_lowering(control: &ClassicalControlOp, plans: &LoweringPlans) -> bool {
+    match control {
+        ClassicalControlOp::If(op) => {
+            operations_require_lowering(op.then_body().operations(), plans)
+                || op
+                    .else_body()
+                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
+        }
+        ClassicalControlOp::While(op) => operations_require_lowering(op.body().operations(), plans),
+        ClassicalControlOp::For(op) => operations_require_lowering(op.body().operations(), plans),
+        ClassicalControlOp::Switch(op) => {
+            op.cases()
+                .iter()
+                .any(|case| operations_require_lowering(case.body().operations(), plans))
+                || op
+                    .default()
+                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
+        }
+        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
+    }
+}
+
+impl TargetBasisSignature {
+    /// Builds a canonical signature from standard target gates.
+    pub fn from_standard_gates(gates: &[StandardGate]) -> Self {
+        let mut gates = gates
+            .iter()
+            .filter(|gate| **gate != StandardGate::GPhase)
+            .map(|gate| *gate as u8)
+            .collect::<Vec<_>>();
+        gates.sort_unstable();
+        gates.dedup();
+        Self { gates }
+    }
+}
+
+impl TargetBasisCostModel {
+    /// Builds an exact cost model for a non-empty standard-gate target basis.
+    pub fn new(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
+        let lowerer = Arc::new(TargetBasisLowerer::new(target_basis)?);
+        Self::from_lowerer(lowerer)
+    }
+
+    /// Builds an exact cost model from an existing target-basis lowerer.
+    pub fn from_lowerer(lowerer: Arc<TargetBasisLowerer>) -> Result<Self, CompilerError> {
+        let gates = lowerer
+            .target_basis()
+            .iter()
+            .map(|instruction| match instruction {
+                Instruction::Standard(gate) => Ok(*gate),
+                _ => Err(CompilerError::InvalidInput(format!(
+                    "target-basis cost model requires standard instructions, got {instruction:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            signature: TargetBasisSignature::from_standard_gates(&gates),
+            lowerer,
+        })
+    }
+
+    /// Returns the canonical target identity used by synthesis caches.
+    pub const fn signature(&self) -> &TargetBasisSignature {
+        &self.signature
+    }
+
+    pub(crate) fn target_basis(&self) -> &[Instruction] {
+        self.lowerer.target_basis()
+    }
+
+    /// Lowers fixed standard-gate operations and returns the exact resulting
+    /// target-basis cost.
+    ///
+    /// The supplied operations must reference only `qubits`, carry fixed
+    /// finite parameters, and contain no classical control. These constraints
+    /// match the numeric two-qubit synthesis and resynthesis callers.
+    pub fn cost_of_fixed_operations(
+        &self,
+        qubits: Vec<Qubit>,
+        operations: Vec<ValueOperation>,
+    ) -> Result<TargetBasisCost, CompilerError> {
+        let source = Circuit::from_operations(qubits, operations, None, None)
+            .map_err(CompilerError::Circuit)?;
+        let lowered = match self.lowerer.transform(&source, None)? {
+            TransformOutcome::Unchanged => source,
+            TransformOutcome::Changed(lowered) => lowered,
+        };
+        let mut cost = TargetBasisCost::default();
+        let mut depths = HashMap::new();
+        for operation in lowered.operations() {
+            let Instruction::Standard(gate) = operation.instruction else {
+                return Err(CompilerError::InvariantViolation(
+                    "target-basis lowering emitted a non-standard operation while estimating cost"
+                        .to_string(),
+                ));
+            };
+            if gate == StandardGate::GPhase {
+                continue;
+            }
+            cost.total_ops += 1;
+            if !operation.params.is_empty() {
+                cost.parameterized_ops += 1;
+            }
+            if operation.qubits.len() == 2 {
+                cost.two_qubit_ops += 1;
+            }
+            if operation.qubits.is_empty() {
+                continue;
+            }
+            let next_depth = operation
+                .qubits
+                .iter()
+                .filter_map(|qubit| depths.get(qubit))
+                .max()
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            for qubit in &operation.qubits {
+                depths.insert(*qubit, next_depth);
+            }
+            cost.depth = cost.depth.max(next_depth);
+        }
+        Ok(cost)
     }
 }
 
@@ -124,10 +334,10 @@ impl Transformer for TargetBasisLowerer {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let library = RuleLibrary::builtin_rules()
             .map_err(|err| CompilerError::InvariantViolation(err.to_string()))?;
-        CircuitLowerer::run(circuit, &self.plans, library)
+        CircuitLowerer::run(circuit, self.plans.as_ref(), library)
     }
 }
 
@@ -152,15 +362,14 @@ impl LoweringPlans {
             .iter()
             .cloned()
             .map(|key| {
-                let cost = if is_implicit_key(&key) {
+                let cost = if key.is_implicit() {
                     PlanCost::zero(key_rule_sort_value(&key))
                 } else {
                     PlanCost {
                         rank: 0,
                         total_ops: 1,
-                        two_qubit_ops: key_num_qubits(&key).is_some_and(|num| num == 2) as usize,
-                        parameterized_ops: key_num_params(&key)
-                            .is_some_and(|num_params| num_params > 0)
+                        two_qubit_ops: key.num_qubits().is_some_and(|num| num == 2) as usize,
+                        parameterized_ops: key.num_params().is_some_and(|num_params| num_params > 0)
                             as usize,
                         rule_id: key_rule_sort_value(&key),
                     }
@@ -194,7 +403,7 @@ impl LoweringPlans {
                                 source_item.instruction
                             ))
                         })?;
-                if physical_keys.contains(&source_key) || is_implicit_key(&source_key) {
+                if physical_keys.contains(&source_key) || source_key.is_implicit() {
                     continue;
                 }
 
@@ -206,7 +415,13 @@ impl LoweringPlans {
                 let current = cost_by_key.get(&source_key).copied();
                 if current.is_none_or(|current| candidate_cost < current) {
                     cost_by_key.insert(source_key.clone(), candidate_cost);
-                    plan_by_key.insert(source_key, GatePlan { rule_id });
+                    plan_by_key.insert(
+                        source_key,
+                        GatePlan {
+                            rule_id,
+                            cost: candidate_cost,
+                        },
+                    );
                     changed = true;
                 }
             }
@@ -246,12 +461,44 @@ impl PlanCost {
     }
 }
 
+/// Orders dynamic Euler candidates by physical output cost, with the family
+/// declaration order as the final deterministic tie-break.
+fn compare_dynamic_candidates(
+    left: &Euler1qCandidate,
+    right: &Euler1qCandidate,
+) -> std::cmp::Ordering {
+    let (left_total, left_parameterized) = left.physical_cost();
+    let (right_total, right_parameterized) = right.physical_cost();
+    (left_total, left_parameterized, left.family).cmp(&(
+        right_total,
+        right_parameterized,
+        right.family,
+    ))
+}
+
+/// Returns true only when the dynamic candidate's physical output is strictly
+/// cheaper than the static plan's. Family order never participates here, so a
+/// tie keeps the static path. `PlanCost.rank` is a planning-internal metric
+/// and is ignored.
+fn dynamic_strictly_beats_static(candidate: &Euler1qCandidate, static_cost: &PlanCost) -> bool {
+    let (total_ops, parameterized_ops) = candidate.physical_cost();
+    (
+        0usize, // dynamic single-qubit synthesis never emits two-qubit gates
+        total_ops,
+        parameterized_ops,
+    ) < (
+        static_cost.two_qubit_ops,
+        static_cost.total_ops,
+        static_cost.parameterized_ops,
+    )
+}
+
 impl<'a> CircuitLowerer<'a> {
     fn run(
         source: &'a Circuit,
         plans: &'a LoweringPlans,
         library: &'a RuleLibrary,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut lowerer = Self {
@@ -266,10 +513,7 @@ impl<'a> CircuitLowerer<'a> {
         lowerer.lower_sequence(
             source.operations(),
             &root_classical,
-            LoweringTarget::TopLevel {
-                output: &mut operations,
-                phase_delta: &mut phase_delta,
-            },
+            LoweringTarget::top_level(&mut operations, &mut phase_delta),
         )?;
 
         let global_phase = &source.global_phase() + &phase_delta;
@@ -277,22 +521,11 @@ impl<'a> CircuitLowerer<'a> {
             .rebuild
             .finish(source.qubits(), operations, global_phase)?;
 
-        Ok(TransformResult {
-            circuit,
-            changed: lowerer.changed,
+        Ok(if lowerer.changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
         })
-    }
-
-    fn lower_sequence(
-        &mut self,
-        operations: &[Operation],
-        classical_remap: &ClassicalRemap,
-        mut target: LoweringTarget<'_>,
-    ) -> Result<(), CompilerError> {
-        for operation in operations {
-            self.lower_operation(operation, classical_remap, &mut target)?;
-        }
-        Ok(())
     }
 
     fn lower_operation(
@@ -316,15 +549,12 @@ impl<'a> CircuitLowerer<'a> {
             Instruction::ClassicalControl(control) => {
                 let instruction = self.lower_control_flow(control, classical_remap)?;
                 let qubits = instruction.used_qubits().into_iter().collect();
-                self.push_value_operation(
-                    ValueOperation {
-                        instruction: ValueInstruction::ClassicalControl(instruction),
-                        qubits,
-                        params: SmallVec::new(),
-                        label: operation.label.clone(),
-                    },
-                    target,
-                );
+                target.push(ValueOperation {
+                    instruction: ValueInstruction::ClassicalControl(instruction),
+                    qubits,
+                    params: SmallVec::new(),
+                    label: operation.label.clone(),
+                });
                 Ok(())
             }
             Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
@@ -339,7 +569,7 @@ impl<'a> CircuitLowerer<'a> {
                     operation,
                     classical_remap,
                 )?;
-                self.push_value_operation(operation, target);
+                target.push(operation);
                 Ok(())
             }
         }
@@ -357,13 +587,20 @@ impl<'a> CircuitLowerer<'a> {
                     operation.instruction
                 ))
             })?;
-        if is_implicit_key(&key) {
+        if key.is_implicit() {
             self.changed = true;
-            self.accumulate_phase(gphase_param(&operation)?, target);
+            target.accumulate_phase(gphase_param(&operation)?);
             return Ok(());
         }
         if self.plans.is_physical(&key) {
             self.emit_physical_gate(operation, target);
+            return Ok(());
+        }
+        if matches!(
+            operation.instruction,
+            Instruction::Standard(StandardGate::U)
+        ) && self.try_lower_fixed_u(&operation, &key, target)?
+        {
             return Ok(());
         }
 
@@ -408,15 +645,84 @@ impl<'a> CircuitLowerer<'a> {
         operation: LowerableOperation,
         target: &mut LoweringTarget<'_>,
     ) {
-        self.push_value_operation(
-            ValueOperation {
-                instruction: ValueInstruction::from_instruction(operation.instruction),
-                qubits: operation.qubits,
-                params: operation.params,
-                label: operation.label,
-            },
-            target,
-        );
+        target.push(ValueOperation {
+            instruction: ValueInstruction::from_instruction(operation.instruction),
+            qubits: operation.qubits,
+            params: operation.params,
+            label: operation.label,
+        });
+    }
+
+    /// Lowers a fixed-parameter `U` through parameter-aware Euler synthesis
+    /// when the result strictly beats the static rule plan. Returns `Ok(false)`
+    /// for symbolic parameters, missing families, or when the static plan is
+    /// at least as good, leaving the operation on the static path.
+    fn try_lower_fixed_u(
+        &mut self,
+        operation: &LowerableOperation,
+        key: &KnowledgeInstructionKey,
+        target: &mut LoweringTarget<'_>,
+    ) -> Result<bool, CompilerError> {
+        let mut angles = [0.0; 3];
+        if operation.params.len() != 3 {
+            return Ok(false);
+        }
+        for (slot, param) in angles.iter_mut().zip(&operation.params) {
+            let ParameterValue::Fixed(value) = param else {
+                return Ok(false);
+            };
+            if !value.is_finite() {
+                return Ok(false);
+            }
+            *slot = *value;
+        }
+        let matrix = StandardGate::U
+            .matrix(&angles)
+            .map_err(CompilerError::Circuit)?;
+        let decomposition = synthesize_numeric_1q_unitary(&matrix)?;
+        let is_available = |gate: StandardGate| {
+            self.plans
+                .physical_keys
+                .contains(&KnowledgeInstructionKey::Standard(gate))
+        };
+        let best = synthesize_euler_1q_candidates(decomposition, &is_available)?
+            .into_iter()
+            .min_by(compare_dynamic_candidates);
+        let Some(best) = best else {
+            return Ok(false);
+        };
+        if let Some(plan) = self.plans.plan_for(key) {
+            debug_assert_eq!(
+                plan.cost.two_qubit_ops, 0,
+                "single-qubit U lowering plan must not contain two-qubit gates"
+            );
+            if !dynamic_strictly_beats_static(&best, &plan.cost) {
+                return Ok(false);
+            }
+        }
+
+        self.changed = true;
+        for gate in &best.gates {
+            debug_assert!(
+                is_available(gate.gate),
+                "euler synthesis emitted {} outside the target basis",
+                gate.gate
+            );
+            let params = match gate.param {
+                Some(value) => smallvec![ParameterValue::Fixed(value)],
+                None => SmallVec::new(),
+            };
+            target.push(ValueOperation {
+                instruction: ValueInstruction::from_instruction(Instruction::Standard(gate.gate)),
+                qubits: operation.qubits.clone(),
+                params,
+                // Decomposed gates never inherit the source label, matching the
+                // static rule path: labels act as optimization boundaries.
+                label: None,
+            });
+        }
+        target.accumulate_phase(Parameter::from(best.global_phase));
+        Ok(true)
     }
 
     fn lower_control_flow(
@@ -431,10 +737,7 @@ impl<'a> CircuitLowerer<'a> {
                 self.lower_sequence(
                     op.then_body().operations(),
                     classical_remap,
-                    LoweringTarget::ControlFlowBody {
-                        output: &mut then_body,
-                        phase_delta: &mut then_phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut then_body, &mut then_phase),
                 )?;
                 self.prepend_body_phase(&mut then_body, then_phase);
 
@@ -446,10 +749,7 @@ impl<'a> CircuitLowerer<'a> {
                         self.lower_sequence(
                             body.operations(),
                             classical_remap,
-                            LoweringTarget::ControlFlowBody {
-                                output: &mut lowered,
-                                phase_delta: &mut phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut lowered, &mut phase),
                         )?;
                         self.prepend_body_phase(&mut lowered, phase);
                         Ok::<_, CompilerError>(ValueControlBody::new(lowered))
@@ -468,10 +768,7 @@ impl<'a> CircuitLowerer<'a> {
                 self.lower_sequence(
                     op.body().operations(),
                     classical_remap,
-                    LoweringTarget::ControlFlowBody {
-                        output: &mut body,
-                        phase_delta: &mut phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut body, &mut phase),
                 )?;
                 self.prepend_body_phase(&mut body, phase);
                 ValueClassicalControlOp::While {
@@ -485,10 +782,7 @@ impl<'a> CircuitLowerer<'a> {
                 self.lower_sequence(
                     op.body().operations(),
                     classical_remap,
-                    LoweringTarget::ControlFlowBody {
-                        output: &mut body,
-                        phase_delta: &mut phase,
-                    },
+                    LoweringTarget::control_flow_body(&mut body, &mut phase),
                 )?;
                 self.prepend_body_phase(&mut body, phase);
                 ValueClassicalControlOp::For {
@@ -509,10 +803,7 @@ impl<'a> CircuitLowerer<'a> {
                         self.lower_sequence(
                             case.body().operations(),
                             classical_remap,
-                            LoweringTarget::ControlFlowBody {
-                                output: &mut lowered,
-                                phase_delta: &mut phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut lowered, &mut phase),
                         )?;
                         self.prepend_body_phase(&mut lowered, phase);
                         Ok::<_, CompilerError>(ValueSwitchCase::new(
@@ -529,10 +820,7 @@ impl<'a> CircuitLowerer<'a> {
                         self.lower_sequence(
                             body.operations(),
                             classical_remap,
-                            LoweringTarget::ControlFlowBody {
-                                output: &mut lowered,
-                                phase_delta: &mut phase,
-                            },
+                            LoweringTarget::control_flow_body(&mut lowered, &mut phase),
                         )?;
                         self.prepend_body_phase(&mut lowered, phase);
                         Ok::<_, CompilerError>(ValueControlBody::new(lowered))
@@ -566,21 +854,16 @@ impl<'a> CircuitLowerer<'a> {
             },
         );
     }
+}
 
-    fn push_value_operation(&mut self, operation: ValueOperation, target: &mut LoweringTarget<'_>) {
-        match target {
-            LoweringTarget::TopLevel { output, .. }
-            | LoweringTarget::ControlFlowBody { output, .. } => output.push(operation),
-        }
-    }
-
-    fn accumulate_phase(&mut self, phase: Parameter, target: &mut LoweringTarget<'_>) {
-        match target {
-            LoweringTarget::TopLevel { phase_delta, .. }
-            | LoweringTarget::ControlFlowBody { phase_delta, .. } => {
-                **phase_delta = &**phase_delta + &phase;
-            }
-        }
+impl OperationSequenceLowerer for CircuitLowerer<'_> {
+    fn lower_one_operation(
+        &mut self,
+        operation: &Operation,
+        classical_remap: &ClassicalRemap,
+        target: &mut LoweringTarget<'_>,
+    ) -> Result<(), CompilerError> {
+        self.lower_operation(operation, classical_remap, target)
     }
 }
 
@@ -614,7 +897,7 @@ fn rewrite_cost(
 
     for item in target {
         let key = KnowledgeInstructionKey::from_instruction(&item.instruction)?;
-        if is_implicit_key(&key) {
+        if key.is_implicit() {
             continue;
         }
         let cost = cost_by_key.get(&key).copied()?;
@@ -674,7 +957,7 @@ fn instantiate_single_source_rule(
     for (pattern, actual) in source_params.iter().zip(&operation.params) {
         match pattern {
             ParameterValue::Fixed(expected) => {
-                let actual = parameter_value_to_parameter(actual);
+                let actual = Parameter::from(actual);
                 if !Parameter::from(*expected)
                     .provably_equal(&actual, crate::compile::PARAMETER_EQ_TOLERANCE)
                 {
@@ -691,7 +974,7 @@ fn instantiate_single_source_rule(
                         rule.name
                     )));
                 };
-                let actual = parameter_value_to_parameter(actual);
+                let actual = Parameter::from(actual);
                 if let Some(bound) = parameter_bindings.get(&symbol) {
                     if !bound.provably_equal(&actual, crate::compile::PARAMETER_EQ_TOLERANCE) {
                         return Err(CompilerError::InvariantViolation(format!(
@@ -767,39 +1050,11 @@ fn instantiate_rule_param(
     Ok(ParameterValue::from(parameter))
 }
 
-fn parameter_value_to_parameter(param: &ParameterValue) -> Parameter {
-    match param {
-        ParameterValue::Fixed(value) => Parameter::from(*value),
-        ParameterValue::Param(parameter) => parameter.clone(),
-    }
-}
-
 fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerError> {
     let phase = operation.params.first().ok_or_else(|| {
         CompilerError::InvariantViolation("GPhase operation must contain one parameter".to_string())
     })?;
-    Ok(match phase {
-        ParameterValue::Fixed(value) => Parameter::from(*value),
-        ParameterValue::Param(parameter) => parameter.clone(),
-    })
-}
-
-fn is_implicit_key(key: &KnowledgeInstructionKey) -> bool {
-    matches!(key, KnowledgeInstructionKey::Standard(StandardGate::GPhase))
-}
-
-fn key_num_qubits(key: &KnowledgeInstructionKey) -> Option<usize> {
-    Some(match key {
-        KnowledgeInstructionKey::Standard(gate) => gate.num_qubits(),
-        KnowledgeInstructionKey::McGate(gate) => gate.num_qubits(),
-    })
-}
-
-fn key_num_params(key: &KnowledgeInstructionKey) -> Option<usize> {
-    Some(match key {
-        KnowledgeInstructionKey::Standard(gate) => gate.num_params(),
-        KnowledgeInstructionKey::McGate(gate) => gate.num_params(),
-    })
+    Ok(Parameter::from(phase))
 }
 
 fn key_rule_sort_value(key: &KnowledgeInstructionKey) -> usize {

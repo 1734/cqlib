@@ -28,8 +28,22 @@ class TwoQubitUnitaryDecomposeBasis:
     def cx() -> TwoQubitUnitaryDecomposeBasis:
         """Emit local U gates plus optimized CX templates."""
         ...
+    @staticmethod
+    def cy() -> TwoQubitUnitaryDecomposeBasis:
+        """Emit local U gates plus optimized CY templates."""
+        ...
+    @staticmethod
+    def cz() -> TwoQubitUnitaryDecomposeBasis:
+        """Emit local U gates plus optimized CZ templates."""
+        ...
+    @staticmethod
+    def rzz() -> TwoQubitUnitaryDecomposeBasis:
+        """Emit local U gates plus RZZ interactions for the Cartan core."""
+        ...
     def __copy__(self) -> TwoQubitUnitaryDecomposeBasis: ...
-    def __deepcopy__(self, memo: dict[int, object]) -> TwoQubitUnitaryDecomposeBasis: ...
+    def __deepcopy__(
+        self, memo: dict[int, object]
+    ) -> TwoQubitUnitaryDecomposeBasis: ...
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
 
@@ -98,7 +112,9 @@ def expand_definitions(circuit: Circuit) -> TransformResult:
     """Expand circuit-backed definitions without modifying the input.
 
     Raises:
-        ValueError: If a definition is malformed or exceeds recursion limits.
+        CompilerConfigError: If a definition is malformed or exceeds recursion
+            limits.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
@@ -109,7 +125,9 @@ def decompose_unitaries(
     """Synthesize matrix-backed one- and two-qubit unitary gates.
 
     Raises:
-        ValueError: If a unitary is unresolved, invalid, or unsupported.
+        CompilerConfigError: If a unitary is unresolved, invalid, or
+            unsupported.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
@@ -117,7 +135,6 @@ def decompose_unitaries_with_rule_stats(
     circuit: Circuit,
     config: UnitaryDecomposeConfig | None = None,
 ) -> tuple[TransformResult, DecompositionRuleStats]: ...
-
 def decompose_mc_gates(
     circuit: Circuit,
     config: McGateDecomposeConfig | None = None,
@@ -128,7 +145,9 @@ def decompose_mc_gates(
     :func:`decompose_mc_gates_for_device` when decomposition must fit a device.
 
     Raises:
-        ValueError: If decomposition or ancillary-resource validation fails.
+        CompilerConfigError: If decomposition or ancillary-resource validation
+            fails.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
@@ -147,7 +166,9 @@ def decompose_mc_gates_for_device(
     """Decompose multi-controlled gates while enforcing usable device capacity.
 
     Raises:
-        ValueError: If the circuit exceeds device capacity or decomposition fails.
+        CompilerConfigError: If the circuit exceeds device capacity or
+            decomposition fails.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 

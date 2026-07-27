@@ -18,10 +18,13 @@
 //! on more than two qubits, while preserving existing 2-qubit standard gates
 //! that are already routable.
 
-use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
+use crate::circuit::{
+    Circuit, ClassicalControlOp, Instruction, Operation, StandardGate, ValueOperation,
+};
 use crate::compile::CompilerError;
+use crate::compile::transform::rebuild::CircuitRebuildContext;
 use crate::compile::transform::{
-    CircuitAnalysis, KnowledgeRewriter, RewriteConfig, TransformResult, Transformer,
+    CircuitAnalysis, KnowledgeRewriter, RewriteConfig, TransformOutcome, Transformer,
 };
 
 /// Lowers gate-like operations to SABRE's 0/1/2-qubit input contract.
@@ -94,12 +97,16 @@ impl Transformer for LowerToRoutingBasis {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         if !has_unroutable_gate_like_operation(circuit.operations()) {
-            return Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
+        }
+
+        if can_directly_lower_top_level_ccx(circuit.operations()) {
+            let circuit =
+                directly_lower_top_level_ccx(circuit, self.preferred_ccx_two_qubit_gate())?;
+            validate_routing_basis_contract(circuit.operations())?;
+            return Ok(TransformOutcome::Changed(circuit));
         }
 
         let config =
@@ -112,8 +119,159 @@ impl Transformer for LowerToRoutingBasis {
             }
         };
 
-        validate_routing_basis_contract(result.circuit.operations())?;
-        Ok(result)
+        match result {
+            TransformOutcome::Unchanged => {
+                validate_routing_basis_contract(circuit.operations())?;
+                Ok(TransformOutcome::Unchanged)
+            }
+            TransformOutcome::Changed(lowered) => {
+                validate_routing_basis_contract(lowered.operations())?;
+                Ok(TransformOutcome::Changed(lowered))
+            }
+        }
+    }
+}
+
+fn can_directly_lower_top_level_ccx(operations: &[Operation]) -> bool {
+    let mut found = false;
+    for operation in operations {
+        match &operation.instruction {
+            Instruction::Standard(StandardGate::CCX)
+                if operation.qubits.len() == 3
+                    && operation.params.is_empty()
+                    && operation.label.is_none() =>
+            {
+                found = true;
+            }
+            Instruction::Standard(_)
+            | Instruction::McGate(_)
+            | Instruction::UnitaryGate(_)
+            | Instruction::CircuitGate(_)
+                if operation.qubits.len() > 2 =>
+            {
+                return false;
+            }
+            Instruction::ClassicalControl(op) => {
+                let mut nested_unroutable = false;
+                for_each_control_body(op, |body| {
+                    nested_unroutable |= has_unroutable_gate_like_operation(body.operations());
+                });
+                if nested_unroutable {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn directly_lower_top_level_ccx(
+    source: &Circuit,
+    two_qubit_gate: StandardGate,
+) -> Result<Circuit, CompilerError> {
+    let rebuild = CircuitRebuildContext::new(source);
+    let mut operations = Vec::with_capacity(source.operations().len());
+
+    for operation in source.operations() {
+        if matches!(
+            operation.instruction,
+            Instruction::Standard(StandardGate::CCX)
+        ) {
+            let [control_0, control_1, target] = operation.qubits.as_slice() else {
+                return Err(CompilerError::InvariantViolation(
+                    "CCX operation must have exactly three qubits".to_string(),
+                ));
+            };
+            append_direct_ccx_template(
+                &mut operations,
+                *control_0,
+                *control_1,
+                *target,
+                two_qubit_gate,
+            );
+        } else {
+            operations.push(rebuild.remap_preserved_operation(
+                source,
+                operation,
+                rebuild.root_classical(),
+            )?);
+        }
+    }
+
+    rebuild.finish(source.qubits(), operations, source.global_phase())
+}
+
+fn append_direct_ccx_template(
+    operations: &mut Vec<ValueOperation>,
+    control_0: crate::circuit::Qubit,
+    control_1: crate::circuit::Qubit,
+    target: crate::circuit::Qubit,
+    two_qubit_gate: StandardGate,
+) {
+    if two_qubit_gate == StandardGate::CZ {
+        let gates = [
+            (StandardGate::CZ, control_1, Some(target)),
+            (StandardGate::H, target, None),
+            (StandardGate::TDG, target, None),
+            (StandardGate::H, target, None),
+            (StandardGate::CZ, control_0, Some(target)),
+            (StandardGate::H, target, None),
+            (StandardGate::T, target, None),
+            (StandardGate::H, target, None),
+            (StandardGate::CZ, control_1, Some(target)),
+            (StandardGate::H, target, None),
+            (StandardGate::TDG, target, None),
+            (StandardGate::H, target, None),
+            (StandardGate::CZ, control_0, Some(target)),
+            (StandardGate::H, target, None),
+            (StandardGate::T, control_1, None),
+            (StandardGate::T, target, None),
+            (StandardGate::H, target, None),
+            (StandardGate::H, control_1, None),
+            (StandardGate::CZ, control_0, Some(control_1)),
+            (StandardGate::H, control_1, None),
+            (StandardGate::T, control_0, None),
+            (StandardGate::TDG, control_1, None),
+            (StandardGate::H, control_1, None),
+            (StandardGate::CZ, control_0, Some(control_1)),
+            (StandardGate::H, control_1, None),
+        ];
+        append_fixed_gate_sequence(operations, gates);
+        return;
+    }
+
+    let gates = [
+        (StandardGate::H, target, None),
+        (StandardGate::CX, control_1, Some(target)),
+        (StandardGate::TDG, target, None),
+        (StandardGate::CX, control_0, Some(target)),
+        (StandardGate::T, target, None),
+        (StandardGate::CX, control_1, Some(target)),
+        (StandardGate::TDG, target, None),
+        (StandardGate::CX, control_0, Some(target)),
+        (StandardGate::T, control_1, None),
+        (StandardGate::T, target, None),
+        (StandardGate::H, target, None),
+        (StandardGate::CX, control_0, Some(control_1)),
+        (StandardGate::T, control_0, None),
+        (StandardGate::TDG, control_1, None),
+        (StandardGate::CX, control_0, Some(control_1)),
+    ];
+    append_fixed_gate_sequence(operations, gates);
+}
+
+fn append_fixed_gate_sequence<const N: usize>(
+    operations: &mut Vec<ValueOperation>,
+    gates: [(
+        StandardGate,
+        crate::circuit::Qubit,
+        Option<crate::circuit::Qubit>,
+    ); N],
+) {
+    for (gate, first, second) in gates {
+        let qubits = second.map_or_else(|| vec![first], |second| vec![first, second]);
+        operations.push(ValueOperation::from_standard(gate, qubits, []));
     }
 }
 

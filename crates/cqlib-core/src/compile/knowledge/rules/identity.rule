@@ -231,3 +231,43 @@ rule identity_y2p_x2m {
     match { Y2P 0, X2M 0 }
     rewrite { S 0, H 0, GPhase(π/4) }
 }
+
+rule compose_cx_rz_cx_to_rzz {
+    match { CX 0 1, RZ(theta) 1, CX 0 1 }
+    rewrite { RZZ(theta) 0 1 }
+}
+
+rule compose_cx_phase_cx_to_rzz {
+    match { CX 0 1, Phase(theta) 1, CX 0 1 }
+    rewrite { RZZ(theta) 0 1, GPhase(theta/2) }
+}
+
+rule compose_cz_rx_cz_to_rzx {
+    match { CZ 0 1, RX(theta) 1, CZ 0 1 }
+    rewrite { RZX(theta) 0 1 }
+}
+
+rule compose_cz_rx_cz_to_rzx_swapped {
+    match { CZ 0 1, RX(theta) 0, CZ 0 1 }
+    rewrite { RZX(theta) 1 0 }
+}
+
+rule compose_cx_cz_to_cy {
+    match { CX 0 1, CZ 0 1 }
+    rewrite { Phase(π/2) 0, CY 0 1 }
+}
+
+rule compose_cx_cz_to_cy_cz_swapped {
+    match { CX 0 1, CZ 1 0 }
+    rewrite { Phase(π/2) 0, CY 0 1 }
+}
+
+rule compose_cz_cx_to_cy {
+    match { CZ 0 1, CX 0 1 }
+    rewrite { Phase(-π/2) 0, CY 0 1 }
+}
+
+rule compose_cz_cx_to_cy_cz_swapped {
+    match { CZ 1 0, CX 0 1 }
+    rewrite { Phase(-π/2) 0, CY 0 1 }
+}

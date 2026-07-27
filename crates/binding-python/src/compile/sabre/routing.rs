@@ -14,9 +14,11 @@ use crate::circuit::PyCircuit;
 use crate::compile::error::compiler_error_to_py_err;
 use crate::device::device_impl::PyDevice;
 use crate::device::layout::PyLayout;
+use crate::device::qubit::PyLogicalQubitList;
 use cqlib_core::compile::sabre::{
     SabreConfig, SabreHeuristicConfig, SabreRoutingDiagnostics, SabreRoutingResult,
-    SabreTrialObjective, sabre_route,
+    SabreTrialObjective, SabreVf2PrepassConfig, normalize_initial_layout, sabre_route,
+    validate_reachable_interactions,
 };
 use pyo3::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -53,10 +55,10 @@ impl PySabreTrialObjective {
         SabreTrialObjective::Depth.into()
     }
 
-    /// Minimizes SWAP count first and two-qubit depth second.
+    /// Selects native quality within the configured abstract-SWAP regret budget.
     #[staticmethod]
-    fn swap_then_depth() -> Self {
-        SabreTrialObjective::SwapThenDepth.into()
+    fn native_quality_within_swap_budget() -> Self {
+        SabreTrialObjective::NativeQualityWithinSwapBudget.into()
     }
 
     /// Minimizes two-qubit depth first and SWAP count second.
@@ -69,7 +71,9 @@ impl PySabreTrialObjective {
         match self.inner {
             SabreTrialObjective::SwapCount => "SabreTrialObjective.swap_count()",
             SabreTrialObjective::Depth => "SabreTrialObjective.depth()",
-            SabreTrialObjective::SwapThenDepth => "SabreTrialObjective.swap_then_depth()",
+            SabreTrialObjective::NativeQualityWithinSwapBudget => {
+                "SabreTrialObjective.native_quality_within_swap_budget()"
+            }
             SabreTrialObjective::DepthThenSwap => "SabreTrialObjective.depth_then_swap()",
         }
     }
@@ -78,7 +82,9 @@ impl PySabreTrialObjective {
         match self.inner {
             SabreTrialObjective::SwapCount => "swap_count",
             SabreTrialObjective::Depth => "depth",
-            SabreTrialObjective::SwapThenDepth => "swap_then_depth",
+            SabreTrialObjective::NativeQualityWithinSwapBudget => {
+                "native_quality_within_swap_budget"
+            }
             SabreTrialObjective::DepthThenSwap => "depth_then_swap",
         }
     }
@@ -91,12 +97,72 @@ impl PySabreTrialObjective {
         let discriminant = match self.inner {
             SabreTrialObjective::SwapCount => 0_u8,
             SabreTrialObjective::Depth => 1,
-            SabreTrialObjective::SwapThenDepth => 2,
+            SabreTrialObjective::NativeQualityWithinSwapBudget => 2,
             SabreTrialObjective::DepthThenSwap => 3,
         };
         let mut hasher = DefaultHasher::new();
         discriminant.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn __copy__(&self) -> Self {
+        *self
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        *self
+    }
+}
+
+/// Bounded VF2 prepass used to seed SABRE layout candidates.
+#[pyclass(
+    name = "SabreVf2PrepassConfig",
+    module = "cqlib.compile.sabre",
+    from_py_object
+)]
+#[derive(Clone, Copy, Debug)]
+pub struct PySabreVf2PrepassConfig {
+    inner: SabreVf2PrepassConfig,
+}
+
+impl From<SabreVf2PrepassConfig> for PySabreVf2PrepassConfig {
+    fn from(inner: SabreVf2PrepassConfig) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PySabreVf2PrepassConfig {
+    #[new]
+    #[pyo3(signature = (*, candidate_limit=10, call_limit=1_000_000))]
+    fn new(candidate_limit: usize, call_limit: usize) -> Self {
+        Self {
+            inner: SabreVf2PrepassConfig {
+                candidate_limit,
+                call_limit,
+            },
+        }
+    }
+
+    #[getter]
+    fn candidate_limit(&self) -> usize {
+        self.inner.candidate_limit
+    }
+
+    #[getter]
+    fn call_limit(&self) -> usize {
+        self.inner.call_limit
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SabreVf2PrepassConfig(candidate_limit={}, call_limit={})",
+            self.inner.candidate_limit, self.inner.call_limit
+        )
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
     }
 
     fn __copy__(&self) -> Self {
@@ -222,26 +288,33 @@ impl From<SabreConfig> for PySabreConfig {
 impl PySabreConfig {
     /// Creates a SABRE configuration using core defaults for omitted objects.
     #[new]
-    #[pyo3(signature = (*, layout_trials=10, refinement_iterations=1, layout_scoring_trials=1, routing_trials=5, trial_objective=None, seed=None, heuristic=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, layout_trials=10, layout_assignment_budget=1_000_000, vf2_prepass=Some(PySabreVf2PrepassConfig::from(SabreVf2PrepassConfig { candidate_limit: 10, call_limit: 1_000_000 })), refinement_iterations=1, layout_scoring_trials=1, routing_trials=5, trial_objective=None, swap_regret_ratio=0.05, seed=None, heuristic=None))]
     fn new(
         layout_trials: usize,
+        layout_assignment_budget: usize,
+        vf2_prepass: Option<PySabreVf2PrepassConfig>,
         refinement_iterations: usize,
         layout_scoring_trials: usize,
         routing_trials: usize,
         trial_objective: Option<PySabreTrialObjective>,
+        swap_regret_ratio: f64,
         seed: Option<u64>,
         heuristic: Option<PySabreHeuristicConfig>,
     ) -> Self {
         Self {
             inner: SabreConfig {
                 layout_trials,
+                layout_assignment_budget,
+                vf2_prepass: vf2_prepass.map(|value| value.inner),
                 refinement_iterations,
                 layout_scoring_trials,
                 routing_trials,
-                trial_objective: trial_objective
-                    .map_or(SabreTrialObjective::SwapThenDepth, |objective| {
-                        objective.inner
-                    }),
+                trial_objective: trial_objective.map_or(
+                    SabreTrialObjective::NativeQualityWithinSwapBudget,
+                    |objective| objective.inner,
+                ),
+                swap_regret_ratio,
                 seed,
                 heuristic: heuristic
                     .map_or_else(SabreHeuristicConfig::default, |value| value.inner),
@@ -258,6 +331,16 @@ impl PySabreConfig {
     #[getter]
     fn layout_trials(&self) -> usize {
         self.inner.layout_trials
+    }
+
+    #[getter]
+    fn layout_assignment_budget(&self) -> usize {
+        self.inner.layout_assignment_budget
+    }
+
+    #[getter]
+    fn vf2_prepass(&self) -> Option<PySabreVf2PrepassConfig> {
+        self.inner.vf2_prepass.map(Into::into)
     }
 
     #[getter]
@@ -281,6 +364,11 @@ impl PySabreConfig {
     }
 
     #[getter]
+    fn swap_regret_ratio(&self) -> f64 {
+        self.inner.swap_regret_ratio
+    }
+
+    #[getter]
     fn seed(&self) -> Option<u64> {
         self.inner.seed
     }
@@ -290,14 +378,22 @@ impl PySabreConfig {
         self.inner.heuristic.clone().into()
     }
 
+    /// Validates routing-specific configuration fields.
+    fn validate(&self) -> PyResult<()> {
+        self.inner.validate().map_err(compiler_error_to_py_err)
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "SabreConfig(layout_trials={}, refinement_iterations={}, layout_scoring_trials={}, routing_trials={}, trial_objective={}, seed={:?}, heuristic={:?})",
+            "SabreConfig(layout_trials={}, layout_assignment_budget={}, vf2_prepass={:?}, refinement_iterations={}, layout_scoring_trials={}, routing_trials={}, trial_objective={}, swap_regret_ratio={}, seed={:?}, heuristic={:?})",
             self.inner.layout_trials,
+            self.inner.layout_assignment_budget,
+            self.inner.vf2_prepass,
             self.inner.refinement_iterations,
             self.inner.layout_scoring_trials,
             self.inner.routing_trials,
             PySabreTrialObjective::from(self.inner.trial_objective).__repr__(),
+            self.inner.swap_regret_ratio,
             self.inner.seed,
             self.inner.heuristic,
         )
@@ -365,6 +461,76 @@ impl PySabreRoutingDiagnostics {
         self.inner.operation_count
     }
 
+    #[getter]
+    fn native_two_qubit_count(&self) -> usize {
+        self.inner.native_two_qubit_count
+    }
+
+    #[getter]
+    fn native_two_qubit_depth(&self) -> usize {
+        self.inner.native_two_qubit_depth
+    }
+
+    #[getter]
+    fn native_operation_count(&self) -> usize {
+        self.inner.native_operation_count
+    }
+
+    #[getter]
+    fn predicted_log_error(&self) -> Option<f64> {
+        self.inner.predicted_log_error
+    }
+
+    #[getter]
+    fn unavailable_error_count(&self) -> u32 {
+        self.inner.unavailable_error_count
+    }
+
+    #[getter]
+    fn imputed_error_count(&self) -> u32 {
+        self.inner.imputed_error_count
+    }
+
+    #[getter]
+    fn duration_work(&self) -> Option<f64> {
+        self.inner.duration_work
+    }
+
+    #[getter]
+    fn predicted_makespan(&self) -> Option<f64> {
+        self.inner.predicted_makespan
+    }
+
+    #[getter]
+    fn unknown_loop_count(&self) -> usize {
+        self.inner.unknown_loop_count
+    }
+
+    #[getter]
+    fn requirement_signature_count(&self) -> usize {
+        self.inner.requirement_signature_count
+    }
+
+    #[getter]
+    fn eager_pair_state_count(&self) -> usize {
+        self.inner.eager_pair_state_count
+    }
+
+    #[getter]
+    fn lazy_pair_l1_lookup_count(&self) -> usize {
+        self.inner.lazy_pair_l1_lookup_count
+    }
+
+    #[getter]
+    fn lazy_pair_l1_hit_count(&self) -> usize {
+        self.inner.lazy_pair_l1_hit_count
+    }
+
+    #[getter]
+    fn lazy_pair_l1_cached_count(&self) -> usize {
+        self.inner.lazy_pair_l1_cached_count
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SabreRoutingDiagnostics(trials_evaluated={}, selected_trial_index={}, fallback_count={}, control_flow_blocks_routed={}, two_qubit_depth={}, operation_count={})",
@@ -388,6 +554,37 @@ impl PySabreRoutingDiagnostics {
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
         self.clone()
     }
+}
+
+/// Normalizes a complete logical-to-physical layout against usable device qubits.
+#[pyfunction(name = "normalize_initial_layout")]
+pub fn py_normalize_initial_layout(
+    py: Python<'_>,
+    logical_qubits: PyLogicalQubitList,
+    device: PyRef<'_, PyDevice>,
+    initial_layout: PyRef<'_, PyLayout>,
+) -> PyResult<PyLayout> {
+    let logical_qubits = Vec::from(logical_qubits);
+    let device = device.inner.clone();
+    let initial_layout = initial_layout.inner.clone();
+    py.detach(move || normalize_initial_layout(&logical_qubits, &device, &initial_layout))
+        .map(Into::into)
+        .map_err(compiler_error_to_py_err)
+}
+
+/// Validates native movement reachability without performing routing.
+#[pyfunction(name = "validate_reachable_interactions")]
+pub fn py_validate_reachable_interactions(
+    py: Python<'_>,
+    circuit: PyRef<'_, PyCircuit>,
+    device: PyRef<'_, PyDevice>,
+    initial_layout: PyRef<'_, PyLayout>,
+) -> PyResult<()> {
+    let circuit = circuit.inner.clone();
+    let device = device.inner.clone();
+    let initial_layout = initial_layout.inner.clone();
+    py.detach(move || validate_reachable_interactions(&circuit, &device, &initial_layout))
+        .map_err(compiler_error_to_py_err)
 }
 
 /// Routed circuit, selected layouts, and routing diagnostics.

@@ -15,7 +15,7 @@
 use crate::circuit::PyCircuit;
 use crate::compile::error::compiler_error_to_py_err;
 use crate::compile::sabre::{PySabreConfig, PySabreRoutingDiagnostics};
-use crate::compile::transform::layout::{PyLayoutObjective, PyLayoutScore};
+use crate::compile::transform::layout::{PyLayoutDiagnostics, PyLayoutObjective, PyLayoutScore};
 use crate::device::device_impl::PyDevice;
 use crate::device::layout::PyLayout;
 use cqlib_core::compile::sabre::SabreConfig;
@@ -181,6 +181,11 @@ impl PySabreRouteResult {
     #[getter]
     fn layout_score(&self) -> Option<PyLayoutScore> {
         self.inner.layout_score().cloned().map(Into::into)
+    }
+
+    #[getter]
+    fn layout_diagnostics(&self) -> PyLayoutDiagnostics {
+        self.inner.layout_diagnostics().clone().into()
     }
 
     #[getter]

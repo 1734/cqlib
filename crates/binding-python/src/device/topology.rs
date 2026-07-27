@@ -47,8 +47,7 @@
 //! ```
 
 use crate::circuit::PyQubit;
-use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit};
-use cqlib_core::circuit::Qubit;
+use crate::device::qubit::{PyPhysicalQubitLike, PyPhysicalQubitList};
 use cqlib_core::device::{PhysicalQubit, topology::Topology};
 use pyo3::exceptions::PyValueError;
 use pyo3::{Bound, PyAny, PyResult, pyclass, pymethods};
@@ -121,22 +120,13 @@ impl PyTopology {
     #[new]
     #[pyo3(signature = (qubits, couplings))]
     fn new(
-        qubits: PyIntListOrQubitList,
-        couplings: Vec<(PyIntOrQubit, PyIntOrQubit, String)>,
+        qubits: PyPhysicalQubitList,
+        couplings: Vec<(PyPhysicalQubitLike, PyPhysicalQubitLike, String)>,
     ) -> PyResult<Self> {
-        let qubits: Vec<PhysicalQubit> = <PyIntListOrQubitList as Into<Vec<Qubit>>>::into(qubits)
-            .into_iter()
-            .map(PhysicalQubit::from_qubit)
-            .collect();
+        let qubits = Vec::<PhysicalQubit>::from(qubits);
         let couplings: Vec<(PhysicalQubit, PhysicalQubit, String)> = couplings
             .into_iter()
-            .map(|(c, t, s)| {
-                (
-                    PhysicalQubit::from_qubit(c.into()),
-                    PhysicalQubit::from_qubit(t.into()),
-                    s,
-                )
-            })
+            .map(|(c, t, s)| (c.into(), t.into(), s))
             .collect();
         let inner =
             Topology::new(qubits, couplings).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -155,9 +145,6 @@ impl PyTopology {
     ///     Topology: A new line topology with `len(qubits) - 1`
     ///     couplings.
     ///
-    /// Raises:
-    ///     ValueError: If fewer than 2 qubits are provided.
-    ///
     /// Example:
     /// ```python
     /// from cqlib.device import Topology
@@ -166,17 +153,8 @@ impl PyTopology {
     /// topology = Topology.line([0, 1, 2, 3])
     /// ```
     #[staticmethod]
-    fn line(qubits: PyIntListOrQubitList) -> PyResult<Self> {
-        let qubits: Vec<PhysicalQubit> = <PyIntListOrQubitList as Into<Vec<Qubit>>>::into(qubits)
-            .into_iter()
-            .map(PhysicalQubit::from_qubit)
-            .collect();
-
-        if qubits.len() < 2 {
-            return Err(PyValueError::new_err(
-                "Line topology requires at least 2 qubits",
-            ));
-        }
+    fn line(qubits: PyPhysicalQubitList) -> PyResult<Self> {
+        let qubits = Vec::<PhysicalQubit>::from(qubits);
 
         let inner = Topology::line(qubits).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
@@ -210,11 +188,8 @@ impl PyTopology {
     ///
     /// Raises:
     ///     ValueError: If any qubit already exists in the topology.
-    fn add_qubits(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
-        let qubits: Vec<PhysicalQubit> = <PyIntListOrQubitList as Into<Vec<Qubit>>>::into(qubits)
-            .into_iter()
-            .map(PhysicalQubit::from_qubit)
-            .collect();
+    fn add_qubits(&mut self, qubits: PyPhysicalQubitList) -> PyResult<()> {
+        let qubits = Vec::<PhysicalQubit>::from(qubits);
         self.inner
             .add_qubits(qubits)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -236,17 +211,11 @@ impl PyTopology {
     ///     is requested.
     fn add_couplings(
         &mut self,
-        couplings: Vec<(PyIntOrQubit, PyIntOrQubit, String)>,
+        couplings: Vec<(PyPhysicalQubitLike, PyPhysicalQubitLike, String)>,
     ) -> PyResult<()> {
         let couplings: Vec<(PhysicalQubit, PhysicalQubit, String)> = couplings
             .into_iter()
-            .map(|(c, t, s)| {
-                (
-                    PhysicalQubit::from_qubit(c.into()),
-                    PhysicalQubit::from_qubit(t.into()),
-                    s,
-                )
-            })
+            .map(|(c, t, s)| (c.into(), t.into(), s))
             .collect();
         self.inner
             .add_couplings(couplings)
@@ -264,11 +233,8 @@ impl PyTopology {
     ///
     /// Raises:
     ///     ValueError: If any qubit does not exist in the topology.
-    fn remove_qubits(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
-        let qubits: Vec<PhysicalQubit> = <PyIntListOrQubitList as Into<Vec<Qubit>>>::into(qubits)
-            .into_iter()
-            .map(PhysicalQubit::from_qubit)
-            .collect();
+    fn remove_qubits(&mut self, qubits: PyPhysicalQubitList) -> PyResult<()> {
+        let qubits = Vec::<PhysicalQubit>::from(qubits);
         self.inner
             .remove_qubits(qubits)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -286,15 +252,13 @@ impl PyTopology {
     /// Raises:
     ///     ValueError: If a coupling does not exist or endpoint qubits
     ///     are missing.
-    fn remove_couplings(&mut self, couplings: Vec<(PyIntOrQubit, PyIntOrQubit)>) -> PyResult<()> {
+    fn remove_couplings(
+        &mut self,
+        couplings: Vec<(PyPhysicalQubitLike, PyPhysicalQubitLike)>,
+    ) -> PyResult<()> {
         let couplings: Vec<(PhysicalQubit, PhysicalQubit)> = couplings
             .into_iter()
-            .map(|(c, t)| {
-                (
-                    PhysicalQubit::from_qubit(c.into()),
-                    PhysicalQubit::from_qubit(t.into()),
-                )
-            })
+            .map(|(c, t)| (c.into(), t.into()))
             .collect();
         self.inner
             .remove_couplings(couplings)
@@ -320,11 +284,13 @@ impl PyTopology {
     ///     topology.supports_directed_coupling(0, 1)  # True: 0 -> 1
     ///     topology.supports_directed_coupling(1, 0)  # False: no 1 -> 0
     ///     ```
-    fn supports_directed_coupling(&self, control: PyIntOrQubit, target: PyIntOrQubit) -> bool {
-        self.inner.supports_directed_coupling(
-            PhysicalQubit::from_qubit(control.into()),
-            PhysicalQubit::from_qubit(target.into()),
-        )
+    fn supports_directed_coupling(
+        &self,
+        control: PyPhysicalQubitLike,
+        target: PyPhysicalQubitLike,
+    ) -> bool {
+        self.inner
+            .supports_directed_coupling(control.into(), target.into())
     }
 
     /// Checks whether a coupling exists in either direction.
@@ -335,11 +301,13 @@ impl PyTopology {
     /// Args:
     ///     a: First qubit.
     ///     b: Second qubit.
-    fn supports_coupling_either_direction(&self, a: PyIntOrQubit, b: PyIntOrQubit) -> bool {
-        self.inner.supports_coupling_either_direction(
-            PhysicalQubit::from_qubit(a.into()),
-            PhysicalQubit::from_qubit(b.into()),
-        )
+    fn supports_coupling_either_direction(
+        &self,
+        a: PyPhysicalQubitLike,
+        b: PyPhysicalQubitLike,
+    ) -> bool {
+        self.inner
+            .supports_coupling_either_direction(a.into(), b.into())
     }
 
     /// Returns qubits reachable via outgoing couplings from `qubit`.
@@ -357,9 +325,9 @@ impl PyTopology {
     ///     topology = Topology([0, 1, 2], [(0, 1, "CX"), (0, 2, "CX")])
     ///     topology.successors(0)  # [Qubit(1), Qubit(2)]
     ///     ```
-    fn successors(&self, qubit: PyIntOrQubit) -> Vec<PyQubit> {
+    fn successors(&self, qubit: PyPhysicalQubitLike) -> Vec<PyQubit> {
         self.inner
-            .successors(PhysicalQubit::from_qubit(qubit.into()))
+            .successors(qubit.into())
             .map(|pq| PyQubit { inner: pq.qubit() })
             .collect()
     }
@@ -373,9 +341,9 @@ impl PyTopology {
     ///
     /// Returns:
     ///     List[Qubit]: List of predecessors.
-    fn predecessors(&self, qubit: PyIntOrQubit) -> Vec<PyQubit> {
+    fn predecessors(&self, qubit: PyPhysicalQubitLike) -> Vec<PyQubit> {
         self.inner
-            .predecessors(PhysicalQubit::from_qubit(qubit.into()))
+            .predecessors(qubit.into())
             .map(|pq| PyQubit { inner: pq.qubit() })
             .collect()
     }
@@ -389,9 +357,9 @@ impl PyTopology {
     ///
     /// Returns:
     ///     List[Qubit]: List of coupled neighbors.
-    fn neighbors_undirected(&self, qubit: PyIntOrQubit) -> Vec<PyQubit> {
+    fn neighbors_undirected(&self, qubit: PyPhysicalQubitLike) -> Vec<PyQubit> {
         self.inner
-            .neighbors_undirected(PhysicalQubit::from_qubit(qubit.into()))
+            .neighbors_undirected(qubit.into())
             .map(|pq| PyQubit { inner: pq.qubit() })
             .collect()
     }
@@ -419,11 +387,12 @@ impl PyTopology {
     /// Returns:
     ///     Optional[str]: The coupling name if `control -> target`
     ///     exists, `None` otherwise.
-    fn get_coupling_name(&self, control: PyIntOrQubit, target: PyIntOrQubit) -> Option<String> {
-        self.inner.get_coupling_name(
-            PhysicalQubit::from_qubit(control.into()),
-            PhysicalQubit::from_qubit(target.into()),
-        )
+    fn get_coupling_name(
+        &self,
+        control: PyPhysicalQubitLike,
+        target: PyPhysicalQubitLike,
+    ) -> Option<String> {
+        self.inner.get_coupling_name(control.into(), target.into())
     }
 
     /// Checks if a qubit exists in the topology.
@@ -433,9 +402,8 @@ impl PyTopology {
     ///
     /// Returns:
     ///     bool: `True` if the qubit exists in the topology.
-    fn contains_qubit(&self, qubit: PyIntOrQubit) -> bool {
-        self.inner
-            .contains_qubit(&PhysicalQubit::from_qubit(qubit.into()))
+    fn contains_qubit(&self, qubit: PyPhysicalQubitLike) -> bool {
+        self.inner.contains_qubit(&qubit.into())
     }
 
     /// Returns the number of outgoing couplings from a qubit.
@@ -449,9 +417,8 @@ impl PyTopology {
     /// Returns:
     ///     int: Number of outgoing couplings. Returns 0 if the qubit
     ///     does not exist.
-    fn out_degree(&self, qubit: PyIntOrQubit) -> usize {
-        self.inner
-            .out_degree(&PhysicalQubit::from_qubit(qubit.into()))
+    fn out_degree(&self, qubit: PyPhysicalQubitLike) -> usize {
+        self.inner.out_degree(&qubit.into())
     }
 
     /// Returns the number of incoming couplings to a qubit.
@@ -465,9 +432,8 @@ impl PyTopology {
     /// Returns:
     ///     int: Number of incoming couplings. Returns 0 if the qubit
     ///     does not exist.
-    fn in_degree(&self, qubit: PyIntOrQubit) -> usize {
-        self.inner
-            .in_degree(&PhysicalQubit::from_qubit(qubit.into()))
+    fn in_degree(&self, qubit: PyPhysicalQubitLike) -> usize {
+        self.inner.in_degree(&qubit.into())
     }
 
     fn __copy__(&self) -> Self {

@@ -65,8 +65,8 @@ class RewriteConfig:
         """Create a rewrite configuration.
 
         Raises:
-            ValueError: If the target basis is empty or contains a non-gate
-                instruction.
+            CompilerConfigError: If the target basis is empty or contains a
+                non-gate instruction.
         """
         ...
     @staticmethod
@@ -147,8 +147,9 @@ class KnowledgeRewriter:
         """Rewrite ``circuit`` without modifying it.
 
         Raises:
-            ValueError: If configuration, circuit rebuilding, or target-basis
-                validation fails.
+            CompilerConfigError: If configuration or target-basis validation
+                fails.
+            CircuitError: If circuit rebuilding fails.
         """
         ...
     def __repr__(self) -> str: ...
@@ -162,8 +163,9 @@ def rewrite_circuit(
     """Rewrite a circuit using production defaults or an explicit config.
 
     Raises:
-        ValueError: If configuration, circuit rebuilding, or target-basis
-            validation fails.
+        CompilerConfigError: If configuration or target-basis validation
+            fails.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 

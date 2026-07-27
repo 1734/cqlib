@@ -79,6 +79,8 @@
 //! # Ok::<(), cqlib_core::compile::error::CompilerError>(())
 //! ```
 
+use crate::circuit::StandardGate;
+
 mod clean_accumulator;
 mod no_auxiliary;
 mod utils;
@@ -102,4 +104,24 @@ pub enum Su2RotationAxis {
     Y,
     /// Rotation around the Pauli-Z axis.
     Z,
+}
+
+impl Su2RotationAxis {
+    /// Returns the single-qubit rotation gate for this axis.
+    pub fn rotation_gate(self) -> StandardGate {
+        match self {
+            Self::X => StandardGate::RX,
+            Self::Y => StandardGate::RY,
+            Self::Z => StandardGate::RZ,
+        }
+    }
+
+    /// Returns the controlled rotation gate for this axis.
+    pub fn controlled_rotation_gate(self) -> StandardGate {
+        match self {
+            Self::X => StandardGate::CRX,
+            Self::Y => StandardGate::CRY,
+            Self::Z => StandardGate::CRZ,
+        }
+    }
 }

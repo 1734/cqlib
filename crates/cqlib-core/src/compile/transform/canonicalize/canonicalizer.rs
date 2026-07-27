@@ -19,7 +19,7 @@ use crate::circuit::{
     ValueOperation, WhileOp,
 };
 use crate::compile::CompilerError;
-use crate::compile::transform::transformer::{TransformResult, Transformer};
+use crate::compile::transform::transformer::{TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 
 use super::config::CanonicalizeConfig;
@@ -127,7 +127,7 @@ impl Canonicalizer {
     }
 }
 
-// Transformer integration keeps only the common circuit/changed shape; callers
+// Transformer integration keeps only the common outcome shape; callers
 // that need canonicalization rounds should use `Canonicalizer::run` directly.
 impl Transformer for Canonicalizer {
     fn name(&self) -> &'static str {
@@ -138,11 +138,12 @@ impl Transformer for Canonicalizer {
         &self,
         circuit: &Circuit,
         _analysis: Option<&crate::compile::transform::CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let result = self.run(circuit)?;
-        Ok(TransformResult {
-            circuit: result.circuit,
-            changed: result.changed,
+        Ok(if result.changed {
+            TransformOutcome::Changed(result.circuit)
+        } else {
+            TransformOutcome::Unchanged
         })
     }
 }
@@ -261,7 +262,7 @@ impl<'a> CanonicalizeRound<'a> {
             return Ok(RewriteResult::phase(phase));
         }
 
-        if self.config.drops_noops() && is_strict_noop(&instruction, &semantic_params, &qubits)? {
+        if self.config.drops_noops() && is_strict_noop(&instruction, &semantic_params)? {
             return Ok(RewriteResult::drop());
         }
 

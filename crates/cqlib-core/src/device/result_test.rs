@@ -208,6 +208,20 @@ fn test_result_calc_probabilities() {
 }
 
 #[test]
+fn finish_clears_probabilities_computed_from_previous_counts() {
+    let mut res = ExecutionResult::new("t1".into(), mock_qubits(1), 10, 1, None, None);
+    let zero = Outcome::from_bitstring("0").unwrap();
+    let one = Outcome::from_bitstring("1").unwrap();
+
+    res.finish(HashMap::from([(zero.clone(), 10)]), None);
+    res.calc_probabilities();
+    assert!(res.probabilities().is_some());
+
+    res.finish(HashMap::from([(one, 10)]), None);
+    assert!(res.probabilities().is_none());
+}
+
+#[test]
 fn test_result_fail_and_cancel() {
     let mut res = ExecutionResult::new("t2".into(), vec![], 100, 0, None, None);
 

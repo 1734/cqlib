@@ -329,3 +329,15 @@ rule specialize_u_to_z {
     require { a == 0 mod 4*π, b == 0 mod 2*π, c == π mod 2*π }
     rewrite { Z 0 }
 }
+
+rule specialize_fsim_zero_theta {
+    match { FSIM(theta, phi) 0 1 }
+    require { theta == 0 mod 2*π }
+    rewrite { Phase(-phi/2) 0, CRZ(-phi) 0 1 }
+}
+
+rule specialize_u_zero_theta {
+    match { U(theta, phi, lambda) 0 }
+    require { theta == 0 mod 4*π }
+    rewrite { Phase(phi + lambda) 0 }
+}

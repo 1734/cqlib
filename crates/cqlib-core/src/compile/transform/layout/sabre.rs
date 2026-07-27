@@ -22,17 +22,20 @@
 //! not depend on layout algorithms or layout result types.
 
 use super::{
-    CircuitLayoutAnalysis, LayoutDiagnostics, LayoutObjective, LayoutResult, LayoutScore,
-    PhysicalLayoutGraph, Vf2LayoutConfig, analyze_circuit_for_layout, build_physical_layout_graph,
-    greedy_layout_prepared, is_perfect_layout, vf2_perfect_layout_prepared,
+    CircuitLayoutAnalysis, GreedyCandidateOutcome, LayoutDiagnostics, LayoutObjective,
+    LayoutResult, LayoutScore, PhysicalLayoutGraph, Vf2EdgeRequirement, Vf2LayoutConfig,
+    Vf2PreparedOutcome, analyze_circuit_for_layout, greedy_layout_candidate_prepared,
+    is_perfect_layout, try_vf2_perfect_layout_prepared,
 };
 use crate::circuit::Circuit;
-use crate::compile::CompilerError;
 use crate::compile::sabre::{
-    RoutingTarget, SabreConfig, SabreDag, TrialQuality, compare_trial_quality,
-    normalize_initial_layout_for_target, route_trial, route_trial_unchecked, trial_seeds,
-    validate_reachable_interactions_for_target,
+    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata,
+    RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialQuality,
+    interaction_reachability_for_target, movement_component_assignment,
+    normalize_initial_layout_for_target, route_unscored_trial_with_metadata,
+    trial_heuristic_profile, trial_seeds, validate_native_trial_operations,
 };
+use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -40,16 +43,121 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Circuit-side data prepared once for repeated SABRE layout selection.
+///
+/// The fields are intentionally private so the interaction analysis and the
+/// dependency DAGs cannot be supplied from different circuits. A prepared
+/// value can be reused with different physical targets, objectives, and SABRE
+/// configurations.
+#[derive(Debug, Clone)]
+pub struct PreparedSabreCircuit {
+    analysis: CircuitLayoutAnalysis,
+    routing_dag: SabreDag,
+    refinement_dag: SabreDag,
+    backward_refinement_dag: SabreDag,
+}
+
+/// Device-side SABRE data prepared for one circuit's interaction signatures.
+///
+/// The physical graph remains the layout/scoring view. The routing target owns
+/// exact native-plan summaries, SWAP-feasible connectivity, and terminal costs.
+/// Route metadata for the original and bidirectional refinement DAGs is stored
+/// alongside it so layout scoring and final routing reuse the same preparation.
+#[derive(Debug, Clone)]
+pub struct PreparedSabreDeviceTarget {
+    physical: PhysicalLayoutGraph,
+    routing: RoutingTarget,
+    routing_metadata: PreparedRouteMetadata,
+    refinement_metadata: PreparedRouteMetadata,
+    backward_refinement_metadata: PreparedRouteMetadata,
+}
+
+impl PreparedSabreDeviceTarget {
+    /// Returns the physical graph used by layout objective scoring.
+    pub fn physical(&self) -> &PhysicalLayoutGraph {
+        &self.physical
+    }
+
+    pub(crate) fn routing_target(&self) -> &RoutingTarget {
+        &self.routing
+    }
+
+    pub(crate) fn routing_metadata(&self) -> &PreparedRouteMetadata {
+        &self.routing_metadata
+    }
+}
+
+impl PreparedSabreCircuit {
+    /// Returns the reusable circuit layout analysis.
+    pub fn analysis(&self) -> &CircuitLayoutAnalysis {
+        &self.analysis
+    }
+
+    /// Returns logical qubits in source-circuit order.
+    pub fn logical_qubits(&self) -> &[LogicalQubit] {
+        &self.analysis.logical_qubits
+    }
+
+    pub(crate) fn routing_dag(&self) -> &SabreDag {
+        &self.routing_dag
+    }
+}
+
+/// Prepares the circuit-side analysis and dependency models used by SABRE.
+///
+/// Preparing once and calling [`sabre_layout_prepared`] repeatedly avoids
+/// rebuilding circuit analysis and dependency DAGs for every physical target
+/// or SABRE configuration.
+///
+/// # Errors
+///
+/// Returns [`CompilerError::InvalidInput`] when the circuit contains an
+/// operation that must be decomposed before SABRE, and propagates circuit
+/// analysis or DAG-construction failures.
+pub fn prepare_sabre_circuit(circuit: &Circuit) -> Result<PreparedSabreCircuit, CompilerError> {
+    let analysis = analyze_circuit_for_layout(circuit)?;
+    let routing_dag = SabreDag::from_operations(circuit.operations())?;
+    let refinement_dag = SabreDag::refinement_workload(circuit.operations())?;
+    let backward_refinement_dag = refinement_dag.reverse_interactions();
+    Ok(PreparedSabreCircuit {
+        analysis,
+        routing_dag,
+        refinement_dag,
+        backward_refinement_dag,
+    })
+}
+
+/// Prepares exact device-native SABRE data for a prepared circuit.
+pub fn prepare_sabre_device_target(
+    prepared: &PreparedSabreCircuit,
+    device: &Device,
+) -> Result<PreparedSabreDeviceTarget, CompilerError> {
+    let physical = PhysicalLayoutGraph::from_device(device)?;
+    let routing = RoutingTarget::from_device(device, &physical, &prepared.routing_dag)?;
+    let routing_metadata = PreparedRouteMetadata::new(&prepared.routing_dag, &routing)?;
+    let refinement_metadata = PreparedRouteMetadata::new(&prepared.refinement_dag, &routing)?;
+    let backward_refinement_metadata =
+        PreparedRouteMetadata::new(&prepared.backward_refinement_dag, &routing)?;
+    Ok(PreparedSabreDeviceTarget {
+        physical,
+        routing,
+        routing_metadata,
+        refinement_metadata,
+        backward_refinement_metadata,
+    })
+}
+
 /// Selects an initial layout with SABRE forward/backward refinement.
 ///
 /// This function only returns the refined initial layout. It does not insert
 /// SWAP operations or rebuild a physical circuit; callers that need routing
 /// should run the SABRE routing core after selecting a layout.
 ///
-/// Candidate layouts come from deterministic baselines, greedy/VF2 layout when
-/// available, and random trials controlled by [`SabreConfig::layout_trials`].
-/// Each candidate is refined through SABRE forward/backward passes and ranked
-/// by final-route quality, then by [`LayoutObjective`] as a tie-breaker.
+/// Candidate layouts include deterministic component-feasible anchors,
+/// reachable greedy/VF2 layouts when available, and randomized feasible trials
+/// controlled by [`SabreConfig::layout_trials`]. Each candidate is refined
+/// through SABRE forward/backward passes and ranked by final-route quality,
+/// then by [`LayoutObjective`] as a tie-breaker.
 ///
 /// # Errors
 ///
@@ -84,29 +192,65 @@ pub fn sabre_layout(
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
-    let analysis = analyze_circuit_for_layout(circuit)?;
-    let physical = build_physical_layout_graph(device)?;
-    sabre_layout_prepared(circuit, &analysis, &physical, objective, config)
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let target = prepare_sabre_device_target(&prepared, device)?;
+    sabre_layout_prepared(&prepared, &target, objective, config)
 }
 
-/// Selects a SABRE initial layout from already-prepared layout analysis.
+/// Selects a SABRE initial layout from prepared circuit-side data.
 ///
-/// The original circuit is still required because SABRE refinement uses the
-/// operation dependency order to run trial routing. `analysis` and `physical`
-/// are reused for candidate generation and objective scoring.
+/// Reuse `prepared` across targets or configurations to avoid repeating
+/// circuit analysis and dependency-DAG construction.
+///
+/// This API intentionally replaces the former
+/// `sabre_layout_prepared(circuit, analysis, physical, objective, config)`
+/// signature. Keeping circuit-derived data in [`PreparedSabreCircuit`] prevents
+/// callers from combining a circuit with analysis produced from another one.
+///
+/// # Errors
+///
+/// Returns [`CompilerError::InvalidInput`] for invalid SABRE configuration,
+/// insufficient or component-incompatible physical capacity, and unreachable
+/// interactions. Objective-scoring and routing failures are propagated.
+///
+/// # Examples
+///
+/// ```rust
+/// use cqlib_core::circuit::{Circuit, Qubit};
+/// use cqlib_core::compile::sabre::SabreConfig;
+/// use cqlib_core::compile::transform::{
+///     LayoutObjective, prepare_sabre_circuit, prepare_sabre_device_target,
+///     sabre_layout_prepared,
+/// };
+/// use cqlib_core::device::Device;
+///
+/// let mut circuit = Circuit::new(3);
+/// circuit.cx(Qubit::new(0), Qubit::new(2))?;
+/// let prepared = prepare_sabre_circuit(&circuit)?;
+/// let target = prepare_sabre_device_target(&prepared, &Device::line("line-3", 3)?)?;
+///
+/// let result = sabre_layout_prepared(
+///     &prepared,
+///     &target,
+///     &LayoutObjective::topology_only(),
+///     &SabreConfig::deterministic_seeded(42),
+/// )?;
+/// assert_eq!(result.layout.logical_qubits().count(), 3);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn sabre_layout_prepared(
-    circuit: &Circuit,
-    analysis: &CircuitLayoutAnalysis,
-    physical: &PhysicalLayoutGraph,
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreDeviceTarget,
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
     validate_layout_config(config)?;
-    let target = RoutingTarget::from_physical(physical)?;
-    let sabre = SabreDag::from_operations(circuit.operations())?;
-    // Refinement only needs interaction order, not the full operation payload.
-    let forwards = sabre.only_interactions();
-    let backwards = forwards.reverse_interactions();
+    let physical = &prepared_target.physical;
+    let target = &prepared_target.routing;
+    let analysis = &prepared.analysis;
+    let sabre = &prepared.routing_dag;
+    let forwards = &prepared.refinement_dag;
+    let backwards = &prepared.backward_refinement_dag;
     let logical_qubits = analysis.logical_qubits.clone();
 
     if logical_qubits.len() > target.physical_qubits.len() {
@@ -118,15 +262,10 @@ pub fn sabre_layout_prepared(
     }
 
     let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or_else(rand::random));
-    let candidates = initial_layout_candidates(
-        analysis,
-        &logical_qubits,
-        physical,
-        &target,
-        objective,
-        config.layout_trials,
-        &mut rng,
-    )?;
+    let initial_candidates =
+        initial_layout_candidates(prepared, prepared_target, objective, config, &mut rng)?;
+    let candidates = initial_candidates.layouts;
+    let candidate_notes = initial_candidates.notes;
     let candidates_evaluated = candidates.len();
     let trials = candidates
         .into_iter()
@@ -144,97 +283,143 @@ pub fn sabre_layout_prepared(
         })
         .collect::<Vec<_>>();
 
-    let evaluations = trials
+    let outcomes = trials
         .into_par_iter()
         .map(|trial| {
+            match interaction_reachability_for_target(sabre, target, &trial.layout)? {
+                InteractionReachability::Reachable => {}
+                InteractionReachability::UnreachableUnary {
+                    cause: RequirementReachabilityFailure::NoExecutableTerminal,
+                    ..
+                }
+                | InteractionReachability::UnreachablePair {
+                    cause: RequirementReachabilityFailure::NoExecutableTerminal,
+                    ..
+                } => {
+                    return Ok(CandidateOutcome::Infeasible(
+                        CandidateInfeasibleReason::MissingTerminal,
+                    ));
+                }
+                InteractionReachability::UnreachableUnary {
+                    cause: RequirementReachabilityFailure::MovementDisconnected,
+                    ..
+                }
+                | InteractionReachability::UnreachablePair {
+                    cause: RequirementReachabilityFailure::MovementDisconnected,
+                    ..
+                } => {
+                    return Ok(CandidateOutcome::Infeasible(
+                        CandidateInfeasibleReason::MovementUnreachable,
+                    ));
+                }
+            }
             let mut refined = trial.layout;
-            for (forward_seed, backward_seed) in trial.refinement_seeds {
+            for (iteration, (forward_seed, backward_seed)) in
+                trial.refinement_seeds.into_iter().enumerate()
+            {
                 // One refinement iteration routes forward, keeps the final
                 // layout, then routes the reversed interaction DAG. This is
                 // the SABRE layout-refinement loop, not final circuit routing.
-                refined = match route_trial(
-                    &forwards,
-                    &target,
+                refined = match route_unscored_trial_with_metadata(
+                    forwards,
+                    target,
+                    &prepared_target.refinement_metadata,
                     &refined,
-                    &config.heuristic,
+                    &trial_heuristic_profile(&config.heuristic, iteration * 2),
                     forward_seed,
                 ) {
                     Ok(result) => result.final_layout,
-                    Err(CompilerError::InvalidInput(message))
-                        if message.contains("disconnected") =>
-                    {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(error),
+                    Err(error) => return classify_candidate_error(error),
                 };
 
-                refined = match route_trial(
-                    &backwards,
-                    &target,
+                refined = match route_unscored_trial_with_metadata(
+                    backwards,
+                    target,
+                    &prepared_target.backward_refinement_metadata,
                     &refined,
-                    &config.heuristic,
+                    &trial_heuristic_profile(&config.heuristic, iteration * 2 + 1),
                     backward_seed,
                 ) {
                     Ok(result) => result.final_layout,
-                    Err(CompilerError::InvalidInput(message))
-                        if message.contains("disconnected") =>
-                    {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(error),
+                    Err(error) => return classify_candidate_error(error),
                 };
             }
 
             // Rank refined layouts by how well they route the original DAG.
             // Multiple scoring trials reduce seed sensitivity without exposing
             // final SWAP insertion through this layout API.
-            let route_quality =
-                match best_route_quality(&sabre, &target, &refined, config, trial.scoring_seed) {
-                    Ok(quality) => quality,
-                    Err(CompilerError::InvalidInput(message))
-                        if message.contains("disconnected") =>
-                    {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(error),
-                };
+            let route_quality = match best_route_quality(
+                sabre,
+                target,
+                &prepared_target.routing_metadata,
+                &refined,
+                config,
+                trial.scoring_seed,
+            ) {
+                Ok(quality) => quality,
+                Err(error) => return classify_candidate_error(error),
+            };
             let score = objective.score_layout(analysis, physical, &refined)?;
-            Ok(Some(CandidateEvaluation {
+            Ok(CandidateOutcome::Success(CandidateEvaluation {
                 index: trial.index,
                 route_quality,
                 layout: refined,
                 score,
             }))
         })
-        .collect::<Result<Vec<_>, CompilerError>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, CompilerError>>()?;
+    let mut evaluations = Vec::new();
+    let mut missing_terminal = 0usize;
+    let mut movement_unreachable = 0usize;
+    let mut unsupported_native = 0usize;
+    for outcome in outcomes {
+        match outcome {
+            CandidateOutcome::Success(evaluation) => evaluations.push(evaluation),
+            CandidateOutcome::Infeasible(CandidateInfeasibleReason::MissingTerminal) => {
+                missing_terminal = missing_terminal.saturating_add(1);
+            }
+            CandidateOutcome::Infeasible(CandidateInfeasibleReason::MovementUnreachable) => {
+                movement_unreachable = movement_unreachable.saturating_add(1);
+            }
+            CandidateOutcome::Infeasible(CandidateInfeasibleReason::UnsupportedNative) => {
+                unsupported_native = unsupported_native.saturating_add(1);
+            }
+        }
+    }
 
+    let swap_limit = config.trial_objective.swap_limit(
+        config.swap_regret_ratio,
+        evaluations
+            .iter()
+            .map(|evaluation| evaluation.route_quality.abstract_quality.swap_count),
+    );
     let best = evaluations
         .into_iter()
+        .filter(|evaluation| evaluation.route_quality.abstract_quality.swap_count <= swap_limit)
         .min_by(|left, right| {
-            compare_trial_quality(
-                config.trial_objective,
-                left.route_quality,
-                0,
-                right.route_quality,
-                0,
-            )
-            .then_with(|| left.score.total.total_cmp(&right.score.total))
-            .then_with(|| left.index.cmp(&right.index))
+            config
+                .trial_objective
+                .compare(left.route_quality, 0, right.route_quality, 0)
+                .then_with(|| left.score.total.total_cmp(&right.score.total))
+                .then_with(|| left.index.cmp(&right.index))
         })
         .ok_or_else(|| {
-            CompilerError::InvalidInput(
-                "sabre layout found no candidate whose interactions are connected in the usable topology"
-                    .to_string(),
-            )
+            CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoFeasibleLayoutCandidate {
+                evaluated: candidates_evaluated,
+                missing_terminal,
+                movement_unreachable,
+                unsupported_native,
+            })
         })?;
-    let swap_count = best.route_quality.swap_count;
+    let swap_count = best.route_quality.abstract_quality.swap_count;
     let layout = best.layout;
     let score = best.score;
     let is_perfect = is_perfect_layout(analysis, physical, &layout);
 
+    let mut notes = candidate_notes;
+    notes.push(format!(
+        "selected SABRE refined layout with {swap_count} final-route swaps"
+    ));
     Ok(LayoutResult {
         layout,
         score: Some(score.clone()),
@@ -242,9 +427,7 @@ pub fn sabre_layout_prepared(
             is_perfect,
             candidates_evaluated,
             used_fidelity: score.used_fidelity,
-            notes: vec![format!(
-                "selected SABRE refined layout with {swap_count} final-route swaps"
-            )],
+            notes,
         },
     })
 }
@@ -258,6 +441,38 @@ struct CandidateTrial {
     refinement_seeds: Vec<(u64, u64)>,
     /// Seed used to derive final-route scoring trials.
     scoring_seed: u64,
+}
+
+enum CandidateOutcome<T> {
+    Success(T),
+    Infeasible(CandidateInfeasibleReason),
+}
+
+enum CandidateInfeasibleReason {
+    MissingTerminal,
+    MovementUnreachable,
+    UnsupportedNative,
+}
+
+fn classify_candidate_error<T>(error: CompilerError) -> Result<CandidateOutcome<T>, CompilerError> {
+    match error {
+        CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutableUnaryTerminal { .. }
+            | SabreRoutingFailure::NoExecutablePairTerminal { .. },
+        ) => Ok(CandidateOutcome::Infeasible(
+            CandidateInfeasibleReason::MissingTerminal,
+        )),
+        CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachableUnaryPlacement { .. }
+            | SabreRoutingFailure::UnreachablePairPlacement { .. },
+        ) => Ok(CandidateOutcome::Infeasible(
+            CandidateInfeasibleReason::MovementUnreachable,
+        )),
+        CompilerError::DeviceLoweringFailed(_) => Ok(CandidateOutcome::Infeasible(
+            CandidateInfeasibleReason::UnsupportedNative,
+        )),
+        fatal => Err(fatal),
+    }
 }
 
 struct CandidateEvaluation {
@@ -282,12 +497,34 @@ fn validate_layout_config(config: &SabreConfig) -> Result<(), CompilerError> {
             "sabre layout_trials must be greater than zero".to_string(),
         ));
     }
+    if config.layout_assignment_budget == 0 {
+        return Err(CompilerError::InvalidInput(
+            "sabre layout_assignment_budget must be greater than zero".to_string(),
+        ));
+    }
     if config.layout_scoring_trials == 0 {
         return Err(CompilerError::InvalidInput(
             "sabre layout_scoring_trials must be greater than zero".to_string(),
         ));
     }
-    crate::compile::sabre::validate_config(config)
+    if let Some(vf2) = config.vf2_prepass {
+        if vf2.candidate_limit == 0 {
+            return Err(CompilerError::InvalidInput(
+                "sabre vf2_prepass candidate_limit must be greater than zero".to_string(),
+            ));
+        }
+        if vf2.call_limit == 0 {
+            return Err(CompilerError::InvalidInput(
+                "sabre vf2_prepass call_limit must be greater than zero".to_string(),
+            ));
+        }
+    }
+    config.validate()
+}
+
+struct InitialLayoutCandidates {
+    layouts: Vec<Layout>,
+    notes: Vec<String>,
 }
 
 /// Generates the candidate set refined by SABRE layout.
@@ -296,73 +533,166 @@ fn validate_layout_config(config: &SabreConfig) -> Result<(), CompilerError> {
 /// and random physical orders. The result is deduplicated in logical-qubit
 /// order so duplicate layouts from different sources are evaluated once.
 fn initial_layout_candidates(
-    analysis: &CircuitLayoutAnalysis,
-    logical_qubits: &[LogicalQubit],
-    physical: &PhysicalLayoutGraph,
-    target: &RoutingTarget,
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreDeviceTarget,
     objective: &LayoutObjective,
-    layout_trials: usize,
+    config: &SabreConfig,
     rng: &mut StdRng,
-) -> Result<Vec<Layout>, CompilerError> {
+) -> Result<InitialLayoutCandidates, CompilerError> {
+    let analysis = &prepared.analysis;
+    let sabre = &prepared.routing_dag;
+    let physical = &prepared_target.physical;
+    let target = &prepared_target.routing;
     let mut candidates = Vec::new();
-
-    // Always include deterministic extremes so SABRE has reproducible anchors
-    // even when random trials are disabled or collapse to duplicates.
-    let trivial = layout_from_physical_order(logical_qubits, target, &target.physical_qubits)?;
-    candidates.push(trivial);
-
-    let mut reverse_physical = target.physical_qubits.clone();
-    reverse_physical.reverse();
-    candidates.push(layout_from_physical_order(
-        logical_qubits,
+    let mut notes = Vec::new();
+    let logical_qubits = &analysis.logical_qubits;
+    let assignment = match movement_component_assignment(
+        sabre,
         target,
-        &reverse_physical,
+        logical_qubits,
+        config.layout_assignment_budget,
+    )? {
+        ComponentAssignmentSearch::Found(assignment) => assignment,
+        ComponentAssignmentSearch::ProvenInfeasible => {
+            return Err(CompilerError::SabreRoutingFailed(
+                SabreRoutingFailure::MovementAssignmentInfeasible,
+            ));
+        }
+        ComponentAssignmentSearch::BudgetExhausted { expansions } => {
+            return Err(CompilerError::SabreRoutingFailed(
+                SabreRoutingFailure::MovementAssignmentBudgetExhausted {
+                    budget: config.layout_assignment_budget,
+                    expansions,
+                },
+            ));
+        }
+    };
+
+    // Deterministic anchors guarantee that exact movement reachability does not
+    // depend on a random seed, including cross-component terminal pairs.
+    candidates.push(movement_component_layout(
+        logical_qubits,
+        &assignment.components,
+        &assignment.logical_components,
+        target,
+        false,
+        None,
+    )?);
+    candidates.push(movement_component_layout(
+        logical_qubits,
+        &assignment.components,
+        &assignment.logical_components,
+        target,
+        true,
+        None,
     )?);
 
-    if let Ok(greedy) = greedy_layout_prepared(analysis, physical, objective) {
-        candidates.push(normalize_initial_layout_for_target(
-            logical_qubits,
-            target,
-            &greedy.layout,
-        )?);
+    match greedy_layout_candidate_prepared(analysis, physical, objective)? {
+        GreedyCandidateOutcome::Found(greedy) => {
+            let greedy =
+                normalize_initial_layout_for_target(logical_qubits, target, &greedy.layout)?;
+            if interaction_reachability_for_target(sabre, target, &greedy)?
+                == InteractionReachability::Reachable
+            {
+                candidates.push(greedy);
+            }
+        }
+        GreedyCandidateOutcome::Disconnected { left, right } => notes.push(format!(
+            "SABRE greedy prepass candidate mapped an interaction across disconnected physical qubits {left} and {right}"
+        )),
     }
-    if let Ok(vf2) =
-        vf2_perfect_layout_prepared(analysis, physical, objective, &Vf2LayoutConfig::default())
-    {
-        candidates.push(normalize_initial_layout_for_target(
+
+    if let Some(vf2_prepass) = config.vf2_prepass {
+        let vf2_config = Vf2LayoutConfig {
+            candidate_limit: vf2_prepass.candidate_limit,
+            call_limit: Some(vf2_prepass.call_limit),
+            edge_requirement: Vf2EdgeRequirement::PositiveInteractions,
+        };
+        match try_vf2_perfect_layout_prepared(analysis, physical, objective, &vf2_config)? {
+            Vf2PreparedOutcome::Found(vf2) => {
+                let vf2 = normalize_initial_layout_for_target(logical_qubits, target, &vf2.layout)?;
+                if interaction_reachability_for_target(sabre, target, &vf2)?
+                    == InteractionReachability::Reachable
+                {
+                    candidates.push(vf2);
+                }
+            }
+            Vf2PreparedOutcome::NoCandidate => {
+                notes.push("SABRE VF2 prepass found no perfect layout candidate".to_string());
+            }
+            Vf2PreparedOutcome::BudgetExhausted => notes.push(format!(
+                "SABRE VF2 prepass exhausted its call budget of {}",
+                vf2_prepass.call_limit
+            )),
+        }
+    }
+
+    for _ in 0..config.layout_trials {
+        candidates.push(movement_component_layout(
             logical_qubits,
+            &assignment.components,
+            &assignment.logical_components,
             target,
-            &vf2.layout,
+            false,
+            Some(rng),
         )?);
     }
 
-    for _ in 0..layout_trials {
-        let mut physical_order = target.physical_qubits.clone();
-        physical_order.shuffle(rng);
-        candidates.push(layout_from_physical_order(
-            logical_qubits,
-            target,
-            &physical_order,
-        )?);
-    }
-
-    deduplicate_layouts(candidates, logical_qubits)
+    Ok(InitialLayoutCandidates {
+        layouts: deduplicate_layouts(candidates, logical_qubits)?,
+        notes,
+    })
 }
 
-/// Builds a layout by assigning logical qubits to a physical order prefix.
-///
-/// `target.physical_qubits` remains the full physical register. `physical_order`
-/// controls only which physical qubits the active logical qubits occupy.
-fn layout_from_physical_order(
+fn movement_component_layout(
     logical_qubits: &[LogicalQubit],
+    physical_components: &[Vec<PhysicalQubit>],
+    logical_components: &[usize],
     target: &RoutingTarget,
-    physical_order: &[PhysicalQubit],
+    reverse: bool,
+    mut rng: Option<&mut StdRng>,
 ) -> Result<Layout, CompilerError> {
-    let mapping = logical_qubits
+    let mut mapping = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    for (physical_index, physical_component) in physical_components.iter().enumerate() {
+        let mut logical = logical_qubits
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| logical_components[*index] == physical_index)
+            .map(|(_, logical)| *logical)
+            .collect::<Vec<_>>();
+        let mut physical = physical_component.clone();
+        if let Some(rng) = rng.as_deref_mut() {
+            logical.shuffle(rng);
+            physical.shuffle(rng);
+        } else if reverse {
+            physical.reverse();
+        }
+        for (logical, physical) in logical.into_iter().zip(physical) {
+            mapping.insert(logical, physical);
+            used.insert(physical);
+        }
+    }
+
+    let mut idle = logical_qubits
         .iter()
         .copied()
-        .zip(physical_order.iter().copied())
-        .collect::<BTreeMap<_, _>>();
+        .filter(|logical| !mapping.contains_key(logical))
+        .collect::<Vec<_>>();
+    let mut remaining = target
+        .physical_qubits
+        .iter()
+        .copied()
+        .filter(|physical| !used.contains(physical))
+        .collect::<Vec<_>>();
+    if let Some(rng) = rng {
+        idle.shuffle(rng);
+        remaining.shuffle(rng);
+    } else if reverse {
+        remaining.reverse();
+    }
+    mapping.extend(idle.into_iter().zip(remaining));
+
     Layout::new(
         logical_qubits.to_vec(),
         target.physical_qubits.clone(),
@@ -416,32 +746,71 @@ fn deduplicate_layouts(
 fn best_route_quality(
     sabre: &SabreDag,
     target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
     initial_layout: &Layout,
     config: &SabreConfig,
     seed: u64,
 ) -> Result<TrialQuality, CompilerError> {
-    validate_reachable_interactions_for_target(sabre, target, initial_layout)?;
-    let mut best: Option<(usize, TrialQuality)> = None;
-    for (index, seed) in trial_seeds(Some(seed), config.layout_scoring_trials)
+    let unscored = trial_seeds(Some(seed), config.layout_scoring_trials)
         .into_iter()
         .enumerate()
-    {
-        let quality =
-            route_trial_unchecked(sabre, target, initial_layout, &config.heuristic, seed)?.quality;
-        if best.as_ref().is_none_or(|(best_index, best_quality)| {
-            compare_trial_quality(
-                config.trial_objective,
-                quality,
-                index,
-                *best_quality,
-                *best_index,
+        .map(|(index, seed)| {
+            let heuristic = trial_heuristic_profile(&config.heuristic, index);
+            route_unscored_trial_with_metadata(
+                sabre,
+                target,
+                metadata,
+                initial_layout,
+                &heuristic,
+                seed,
             )
-            .is_lt()
-        }) {
-            best = Some((index, quality));
-        }
+            .map(|result| (index, result))
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?;
+    unscored
+        .iter()
+        .try_for_each(|(_, trial)| validate_native_trial_operations(&trial.operations, target))?;
+    let swap_limit = config.trial_objective.swap_limit(
+        config.swap_regret_ratio,
+        unscored.iter().map(|(_, trial)| trial.swap_count),
+    );
+    if config.trial_objective
+        == crate::compile::sabre::SabreTrialObjective::NativeQualityWithinSwapBudget
+    {
+        Ok(unscored
+            .into_iter()
+            .filter(|(_, trial)| trial.swap_count <= swap_limit)
+            .map(|(index, trial)| {
+                let abstract_quality = trial.abstract_quality();
+                trial
+                    .finalize(abstract_quality, target)
+                    .map(|trial| (index, trial.quality))
+            })
+            .collect::<Result<Vec<_>, CompilerError>>()?
+            .into_iter()
+            .min_by(|(left_index, left), (right_index, right)| {
+                config
+                    .trial_objective
+                    .compare(*left, *left_index, *right, *right_index)
+            })
+            .expect("layout_scoring_trials is validated to be non-zero")
+            .1)
+    } else {
+        let (_, trial, abstract_quality) = unscored
+            .into_iter()
+            .map(|(index, trial)| {
+                let abstract_quality = trial.abstract_quality();
+                (index, trial, abstract_quality)
+            })
+            .min_by(|(left_index, _, left), (right_index, _, right)| {
+                config.trial_objective.compare(
+                    TrialQuality::from_abstract(*left),
+                    *left_index,
+                    TrialQuality::from_abstract(*right),
+                    *right_index,
+                )
+            })
+            .expect("layout_scoring_trials is validated to be non-zero");
+        Ok(trial.finalize(abstract_quality, target)?.quality)
     }
-    Ok(best
-        .expect("layout_scoring_trials is validated to be non-zero")
-        .1)
 }

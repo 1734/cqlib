@@ -11,19 +11,19 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{CompileConfig, CompileMode, compile};
+use super::{CompileConfig, CompileMode, CompileTarget, DeviceCompileTarget, compile};
 use crate::circuit::{
     Circuit, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::CompilerError;
 use crate::compile::resource::ResourcePolicy;
-use crate::device::{Device, Layout};
-use crate::util::test_utils::{
+use crate::compile::test_utils::{
     assert_compiled_circuit_equivalent, assert_only_standard_gates,
     assert_two_qubit_operations_supported_by_topology, bell_circuit, contains_high_level_gate,
     generated_small_matrix_circuit, generated_small_routable_circuit, ghz_circuit, qft3_circuit,
-    standard_ops, step_changed,
+    standard_ops,
 };
+use crate::device::{Device, Layout};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -33,11 +33,8 @@ fn compile_normal(circuit: &Circuit) -> super::CompileResult {
         circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Logical,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap()
@@ -56,19 +53,6 @@ fn operation_parameter(circuit: &Circuit, param: &CircuitParam) -> Parameter {
             .cloned()
             .expect("parameter index should exist in compiled circuit"),
     }
-}
-
-fn circuit_contains_symbol(circuit: &Circuit, symbol: &str) -> bool {
-    if circuit.global_phase().get_symbols().contains(symbol) {
-        return true;
-    }
-
-    circuit
-        .operations()
-        .iter()
-        .flat_map(|operation| operation.params.iter())
-        .map(|param| operation_parameter(circuit, param))
-        .any(|parameter| parameter.get_symbols().contains(symbol))
 }
 
 fn stable_circuit_debug(circuit: &Circuit) -> String {
@@ -110,16 +94,13 @@ fn compile_to_basis(circuit: &Circuit, basis: Vec<StandardGate>) -> super::Compi
         circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(
+            target: CompileTarget::Basis(
                 basis
                     .into_iter()
                     .map(Instruction::Standard)
                     .collect::<Vec<_>>(),
             ),
-            device: None,
-            initial_layout: None,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap()
@@ -128,7 +109,7 @@ fn compile_to_basis(circuit: &Circuit, basis: Vec<StandardGate>) -> super::Compi
 fn compile_to_basis_checked(circuit: &Circuit, basis: &[StandardGate]) -> super::CompileResult {
     let result = compile_to_basis(circuit, basis.to_vec());
     assert!(
-        step_changed(&result, "translate.target_basis"),
+        result.step_changed("translate.target_basis"),
         "target-basis translation should change circuit for basis {basis:?}"
     );
     assert_only_standard_gates(&result.circuit, basis);
@@ -143,15 +124,17 @@ fn compile_on_device_checked(
     allowed: &[StandardGate],
 ) -> super::CompileResult {
     let topology = device.topology().clone();
+    let validation_device = device.clone();
     let result = compile(
         circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(seed),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(seed),
         },
     )
     .unwrap();
@@ -165,6 +148,7 @@ fn compile_on_device_checked(
     );
     assert_only_standard_gates(&result.circuit, allowed);
     assert_two_qubit_operations_supported_by_topology(&result.circuit, &topology);
+    validation_device.validate_circuit(&result.circuit).unwrap();
     assert!(result.circuit.qubits().len() <= topology.num_qubits());
     result
 }
@@ -452,20 +436,118 @@ fn ising_device_circuit() -> Circuit {
 // ── Pure logical optimization ──
 
 #[test]
+fn compile_result_exposes_step_queries() {
+    let result = compile_normal(&Circuit::new(1));
+
+    let step = result
+        .step("canonicalize.input")
+        .expect("normal workflow should report input canonicalization");
+    assert_eq!(step.name, "canonicalize.input");
+    assert!(result.step("missing.step").is_none());
+    assert!(!result.step_changed("missing.step"));
+}
+
+#[test]
+fn compile_pipeline_collapses_degenerate_u_to_single_rz() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::U),
+            vec![q0],
+            vec![
+                ParameterValue::Fixed(0.0),
+                ParameterValue::Fixed(0.3),
+                ParameterValue::Fixed(0.7),
+            ],
+            None,
+        )
+        .unwrap();
+    let basis = vec![
+        StandardGate::RZ,
+        StandardGate::X2P,
+        StandardGate::X,
+        StandardGate::CZ,
+    ];
+
+    let result = compile_to_basis(&circuit, basis.clone());
+
+    assert_only_standard_gates(&result.circuit, &basis);
+    let physical_ops = result
+        .circuit
+        .operations()
+        .iter()
+        .filter(|operation| {
+            !matches!(
+                operation.instruction,
+                Instruction::Standard(StandardGate::GPhase)
+            )
+        })
+        .count();
+    assert_eq!(
+        physical_ops,
+        1,
+        "theta=0 U should compile to a single RZ through the full pipeline: {:?}",
+        result.circuit.operations()
+    );
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn compile_pipeline_preserves_entangling_circuit_with_degenerate_u() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cz(q0, q1).unwrap();
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::U),
+            vec![q0],
+            vec![
+                ParameterValue::Fixed(0.0),
+                ParameterValue::Fixed(0.3),
+                ParameterValue::Fixed(0.7),
+            ],
+            None,
+        )
+        .unwrap();
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::U),
+            vec![q1],
+            vec![
+                ParameterValue::Fixed(std::f64::consts::FRAC_PI_2),
+                ParameterValue::Fixed(-0.2),
+                ParameterValue::Fixed(0.9),
+            ],
+            None,
+        )
+        .unwrap();
+    let basis = vec![
+        StandardGate::RZ,
+        StandardGate::X2P,
+        StandardGate::X,
+        StandardGate::CZ,
+    ];
+
+    let result = compile_to_basis(&circuit, basis.clone());
+
+    assert_only_standard_gates(&result.circuit, &basis);
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
 fn compile_bell_to_h_cz_basis() {
     let circuit = bell_circuit();
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(vec![
+            target: CompileTarget::Basis(vec![
                 Instruction::Standard(StandardGate::H),
                 Instruction::Standard(StandardGate::CZ),
             ]),
-            device: None,
-            initial_layout: None,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap();
@@ -543,15 +625,17 @@ proptest! {
         let basis = qcis_cz_basis();
         let device = Device::line("property-line", 5)
             .unwrap()
-            .with_native_gates(native_basis(&basis));
+            .with_native_gates(native_basis(&basis))
+            .unwrap();
         let config = CompileConfig {
-            mode: CompileMode::Enhanced,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
-            resource_policy: ResourcePolicy::default(),
-            seed: Some(2026),
-        };
+                         mode: CompileMode::Enhanced,
+                         target: CompileTarget::Device(DeviceCompileTarget {
+                            device,
+                             initial_layout: None,
+                             seed: Some(2026),
+                         }),
+                         resource_policy: ResourcePolicy::default(),
+                     };
 
         let first = compile(&circuit, config.clone()).unwrap();
         let second = compile(&circuit, config).unwrap();
@@ -571,14 +655,16 @@ fn compile_with_same_seed_is_deterministic() {
     let basis = qcis_cz_basis();
     let device = Device::ring("deterministic-ring", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
     let config = CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(device),
-        initial_layout: None,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(1234),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(1234),
     };
 
     let first = compile(&circuit, config.clone()).unwrap();
@@ -603,11 +689,15 @@ fn compile_with_same_seed_and_initial_layout_is_deterministic() {
     let layout = Layout::from_pairs(&[(0, 2), (1, 0)], 3).unwrap();
     let config = CompileConfig {
         mode: CompileMode::Enhanced,
-        target_basis: None,
-        device: Some(Device::line("initial-layout-line", 3).unwrap()),
-        initial_layout: Some(layout),
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("initial-layout-line", 3)
+                .unwrap()
+                .with_native_gates(native_basis(&[StandardGate::H, StandardGate::CX]))
+                .unwrap(),
+            initial_layout: Some(layout),
+            seed: Some(99),
+        }),
         resource_policy: ResourcePolicy::default(),
-        seed: Some(99),
     };
 
     let first = compile(&circuit, config.clone()).unwrap();
@@ -636,14 +726,11 @@ fn compile_qft3_reports_unsupported_h_cz_target_basis() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(vec![
+            target: CompileTarget::Basis(vec![
                 Instruction::Standard(StandardGate::H),
                 Instruction::Standard(StandardGate::CZ),
             ]),
-            device: None,
-            initial_layout: None,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap_err();
@@ -686,11 +773,8 @@ fn compile_merges_consecutive_same_axis_rotations() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Enhanced,
-            target_basis: None,
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Logical,
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap();
@@ -741,10 +825,10 @@ fn compile_preserves_parameterized_two_qubit_decomposition() {
     let basis = qcis_cz_basis();
     let result = compile_to_basis(&circuit, basis.clone());
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_only_standard_gates(&result.circuit, &basis);
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
-    assert!(circuit_contains_symbol(&result.circuit, "phi"));
+    assert!(result.circuit.uses_symbol("theta"));
+    assert!(result.circuit.uses_symbol("phi"));
     assert_bindings_preserve_semantics(
         &circuit,
         &result.circuit,
@@ -772,9 +856,9 @@ fn compile_preserves_parameterized_mc_gate_decomposition() {
 
     let result = compile_normal(&circuit);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
+    assert!(result.circuit.uses_symbol("theta"));
     assert_bindings_preserve_semantics(
         &circuit,
         &result.circuit,
@@ -803,11 +887,21 @@ fn compile_routes_parameterized_circuit_and_preserves_semantics() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(Device::line("param-line", 3).unwrap()),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device: Device::line("param-line", 3)
+                    .unwrap()
+                    .with_native_gates(native_basis(&[
+                        StandardGate::H,
+                        StandardGate::RX,
+                        StandardGate::RZ,
+                        StandardGate::RZZ,
+                        StandardGate::CX,
+                    ]))
+                    .unwrap(),
+                initial_layout: None,
+                seed: Some(9),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(9),
         },
     )
     .unwrap();
@@ -818,8 +912,8 @@ fn compile_routes_parameterized_circuit_and_preserves_semantics() {
             .iter()
             .any(|step| step.name == "route.sabre" && !step.skipped)
     );
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
-    assert!(circuit_contains_symbol(&result.circuit, "phi"));
+    assert!(result.circuit.uses_symbol("theta"));
+    assert!(result.circuit.uses_symbol("phi"));
     assert!(result.circuit.operations().iter().any(|operation| {
         matches!(
             operation.instruction,
@@ -847,9 +941,9 @@ fn compile_target_basis_translation_preserves_parameterized_semantics() {
     let basis = qcis_cz_basis();
     let result = compile_to_basis(&circuit, basis.clone());
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_only_standard_gates(&result.circuit, &basis);
-    assert!(circuit_contains_symbol(&result.circuit, "theta"));
+    assert!(result.circuit.uses_symbol("theta"));
     assert_bindings_preserve_semantics(
         &circuit,
         &result.circuit,
@@ -889,7 +983,7 @@ fn compile_decomposes_c3x_with_fallback_to_no_auxiliary() {
 
     let result = compile_normal(&circuit);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
     assert_compiled_matrix_equivalent(&result.circuit, &circuit);
 }
@@ -912,7 +1006,7 @@ fn compile_lowers_common_gates_to_qcis_native_basis() {
     let basis = qcis_native_basis();
     let result = compile_to_basis(&circuit, basis.clone());
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_only_standard_gates(&result.circuit, &basis);
     assert_compiled_matrix_equivalent(&result.circuit, &circuit);
 }
@@ -927,7 +1021,7 @@ fn compile_converts_x2p_and_y2p_to_xy2p_basis() {
 
     let result = compile_to_basis(&circuit, vec![StandardGate::XY2P]);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_eq!(standard_ops(&result.circuit), vec![StandardGate::XY2P; 2]);
     assert_compiled_matrix_equivalent(&result.circuit, &circuit);
 }
@@ -941,7 +1035,7 @@ fn compile_converts_xy2p_to_x2p_rz_basis() {
     let basis = vec![StandardGate::RZ, StandardGate::X2P];
     let result = compile_to_basis(&circuit, basis.clone());
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("translate.target_basis"));
     assert_eq!(
         standard_ops(&result.circuit),
         vec![StandardGate::RZ, StandardGate::X2P, StandardGate::RZ]
@@ -969,7 +1063,7 @@ fn compile_decomposes_multi_controlled_qcis_half_rotations() {
 
         let result = compile_normal(&circuit);
 
-        assert!(step_changed(&result, "decompose.mc_gates"));
+        assert!(result.step_changed("decompose.mc_gates"));
         assert!(!contains_high_level_gate(&result.circuit));
         assert_compiled_matrix_equivalent(&result.circuit, &circuit);
     }
@@ -1290,7 +1384,7 @@ fn compile_lowers_multi_controlled_suite_to_qcis_cz_basis() {
     let basis = qcis_cz_basis();
     let result = compile_to_basis_checked(&circuit, &basis);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
 }
 
@@ -1306,7 +1400,7 @@ fn compile_lowers_multi_controlled_suite_to_ion_trap_rx_ry_rzz_basis() {
 
     let result = compile_to_basis_checked(&circuit, &basis);
 
-    assert!(step_changed(&result, "decompose.mc_gates"));
+    assert!(result.step_changed("decompose.mc_gates"));
     assert!(!contains_high_level_gate(&result.circuit));
 }
 
@@ -1320,17 +1414,19 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
         .with_native_gates(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(42),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(42),
         },
     )
     .unwrap();
@@ -1341,7 +1437,7 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
             .iter()
             .any(|step| step.name == "route.sabre" && !step.skipped)
     );
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert_compiled_matrix_equivalent(&result.circuit, &circuit);
     for op in result.circuit.operations() {
         assert!(matches!(
@@ -1354,17 +1450,21 @@ fn compile_ghz3_routes_on_line_device_and_lowers_to_h_cz() {
 #[test]
 fn compile_ghz5_routes_on_line_device() {
     let circuit = ghz_circuit(5);
-    let device = Device::line("test-device", 5).unwrap();
+    let device = Device::line("test-device", 5)
+        .unwrap()
+        .with_native_gates(native_basis(&[StandardGate::H, StandardGate::CX]))
+        .unwrap();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(17),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(17),
         },
     )
     .unwrap();
@@ -1394,23 +1494,32 @@ fn compile_toffoli_on_4q_line_device_decomposes_ccx_before_routing() {
         )
         .unwrap();
     circuit.h(Qubit::new(3)).unwrap();
-    let device = Device::line("test-device", 4).unwrap();
+    let device = Device::line("test-device", 4)
+        .unwrap()
+        .with_native_gates(native_basis(&[
+            StandardGate::H,
+            StandardGate::T,
+            StandardGate::TDG,
+            StandardGate::CX,
+        ]))
+        .unwrap();
     let topology = device.topology().clone();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(17),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(17),
         },
     )
     .unwrap();
 
-    assert!(step_changed(&result, "decompose.routing_basis"));
+    assert!(result.step_changed("decompose.routing_basis"));
     assert!(
         result
             .steps
@@ -1441,23 +1550,25 @@ fn compile_toffoli_routing_basis_prefers_cz_native_decomposition() {
             StandardGate::TDG,
             StandardGate::CZ,
             StandardGate::GPhase,
-        ]));
+        ]))
+        .unwrap();
     let topology = device.topology().clone();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(19),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(19),
         },
     )
     .unwrap();
 
-    assert!(step_changed(&result, "decompose.routing_basis"));
+    assert!(result.step_changed("decompose.routing_basis"));
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::CCX));
     assert!(standard_ops(&result.circuit).contains(&StandardGate::CZ));
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::CX));
@@ -1473,17 +1584,25 @@ fn compile_routing_basis_preserves_existing_two_qubit_standard_gates() {
     circuit.rzz(q0, q1, 0.37).unwrap();
     circuit.crz(q0, q1, 0.19).unwrap();
     circuit.fsim(q0, q1, 0.11, -0.23).unwrap();
-    let device = Device::line("two-qubit-line", 2).unwrap();
+    let device = Device::line("two-qubit-line", 2)
+        .unwrap()
+        .with_native_gates(native_basis(&[
+            StandardGate::RZZ,
+            StandardGate::CRZ,
+            StandardGate::FSIM,
+        ]))
+        .unwrap();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(23),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(23),
         },
     )
     .unwrap();
@@ -1507,11 +1626,12 @@ fn compile_long_range_circuit_on_line_device_to_qcis_native_basis() {
     let basis = qcis_cz_basis();
     let device = Device::line("line-qcis", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 101, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("lower.device_instructions"));
     assert!(result.circuit.qubits().len() <= 4);
 }
 
@@ -1521,11 +1641,12 @@ fn compile_long_range_circuit_on_ring_device_to_qcis_native_basis() {
     let basis = qcis_cz_basis();
     let device = Device::ring("ring-qcis", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 102, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("lower.device_instructions"));
 }
 
 #[test]
@@ -1543,11 +1664,12 @@ fn compile_dense_circuit_on_bidirectional_line_to_cz_native_basis() {
     ];
     let device = Device::bidirectional_line("bidir-line-cz", 4)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 103, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("lower.device_instructions"));
 }
 
 #[test]
@@ -1565,11 +1687,12 @@ fn compile_dense_circuit_on_star_device_to_cx_native_basis() {
     ];
     let device = Device::star("star-cx", 4, 0)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 104, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("lower.device_instructions"));
 }
 
 #[test]
@@ -1587,34 +1710,37 @@ fn compile_ising_circuit_on_grid_device_to_ising_native_basis() {
     ];
     let device = Device::grid("grid-ising", 2, 3)
         .unwrap()
-        .with_native_gates(native_basis(&basis));
+        .with_native_gates(native_basis(&basis))
+        .unwrap();
 
     let result = compile_on_device_checked(&circuit, device, 105, &basis);
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("lower.device_instructions"));
 }
 
 // ── Enhanced mode ──
 
 #[test]
-fn compile_enhanced_ghz3_routes_and_cleans_up() {
+fn compile_enhanced_ghz3_runs_post_routing_and_skips_target_cleanup() {
     let circuit = ghz_circuit(3);
     let device = Device::line("test-device", 3)
         .unwrap()
         .with_native_gates(vec![
             Instruction::Standard(StandardGate::H),
             Instruction::Standard(StandardGate::CZ),
-        ]);
+        ])
+        .unwrap();
 
     let result = compile(
         &circuit,
         CompileConfig {
             mode: CompileMode::Enhanced,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: Some(42),
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: Some(42),
         },
     )
     .unwrap();
@@ -1631,11 +1757,16 @@ fn compile_enhanced_ghz3_routes_and_cleans_up() {
             .iter()
             .any(|step| step.name == "optimize.post_routing" && !step.skipped)
     );
-    assert!(
-        result
-            .steps
-            .iter()
-            .any(|step| step.name == "optimize.target_cleanup" && !step.skipped)
+    let target_cleanup = result
+        .steps
+        .iter()
+        .find(|step| step.name == "optimize.target_cleanup")
+        .unwrap();
+    assert!(target_cleanup.skipped);
+    assert!(!target_cleanup.changed);
+    assert_eq!(
+        target_cleanup.reason.as_deref(),
+        Some("no explicit target basis configured")
     );
     for op in result.circuit.operations() {
         assert!(matches!(
@@ -1655,11 +1786,8 @@ fn compile_reports_error_for_unsupported_target_basis() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: Some(vec![Instruction::Standard(StandardGate::CZ)]),
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Basis(vec![Instruction::Standard(StandardGate::CZ)]),
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap_err();
@@ -1677,11 +1805,12 @@ fn compile_rejects_circuit_wider_than_device() {
         &circuit,
         CompileConfig {
             mode: CompileMode::Normal,
-            target_basis: None,
-            device: Some(device),
-            initial_layout: None,
+            target: CompileTarget::Device(DeviceCompileTarget {
+                device,
+                initial_layout: None,
+                seed: None,
+            }),
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap_err();
@@ -1724,20 +1853,74 @@ measure q[1] -> c[1];
         &c,
         CompileConfig {
             mode: CompileMode::Enhanced,
-            target_basis: Some(native_basis(&basis)),
-            device: None,
-            initial_layout: None,
+            target: CompileTarget::Basis(native_basis(&basis)),
             resource_policy: ResourcePolicy::default(),
-            seed: None,
         },
     )
     .unwrap();
 
-    assert!(step_changed(&result, "translate.target_basis"));
+    assert!(result.step_changed("translate.target_basis"));
     assert!(
         standard_ops(&result.circuit)
             .iter()
             .all(|gate| basis.contains(gate))
     );
     assert!(!standard_ops(&result.circuit).contains(&StandardGate::RY));
+}
+
+fn trivial_bvlike_circuit(num_qubits: u32) -> Circuit {
+    // benchpress trivial_bvlike motif: an up ladder of CXs into the target,
+    // X(target), Z(last control), then the mirrored down ladder. Everything
+    // commutes out except the X and Z.
+    let target = Qubit::new(num_qubits - 1);
+    let last_control = Qubit::new(num_qubits - 2);
+    let mut circuit = Circuit::new(num_qubits as usize);
+    for control in 0..num_qubits - 1 {
+        circuit.cx(Qubit::new(control), target).unwrap();
+    }
+    circuit.x(target).unwrap();
+    circuit.z(last_control).unwrap();
+    for control in (0..num_qubits - 1).rev() {
+        circuit.cx(Qubit::new(control), target).unwrap();
+    }
+    circuit
+}
+
+#[test]
+fn compile_normal_cancels_trivial_bvlike_motif_small() {
+    let circuit = trivial_bvlike_circuit(4);
+
+    let result = compile_normal(&circuit);
+
+    assert!(result.changed);
+    assert_eq!(result.circuit.operations().len(), 2);
+    assert_compiled_matrix_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn compile_normal_cancels_trivial_bvlike_motif_at_scale() {
+    let num_qubits = 20u32;
+    let circuit = trivial_bvlike_circuit(num_qubits);
+
+    let result = compile_normal(&circuit);
+
+    assert!(result.changed);
+    let operations = result.circuit.operations();
+    assert_eq!(operations.len(), 2);
+    assert!(matches!(
+        operations[0].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    assert_eq!(
+        operations[0].qubits.as_slice(),
+        &[Qubit::new(num_qubits - 1)]
+    );
+    assert!(matches!(
+        operations[1].instruction,
+        Instruction::Standard(StandardGate::Z)
+    ));
+    assert_eq!(
+        operations[1].qubits.as_slice(),
+        &[Qubit::new(num_qubits - 2)]
+    );
 }

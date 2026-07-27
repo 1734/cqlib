@@ -13,18 +13,19 @@
 //! SABRE routing core.
 //!
 //! SABRE is a SWAP-based bidirectional heuristic search for mapping logical
-//! qubits onto a device with limited two-qubit connectivity. The algorithm
-//! incrementally routes executable two-qubit operations, scores candidate SWAPs
-//! with current and lookahead interaction distances, and selects the best
-//! routed circuit from deterministic or seeded routing trials.
+//! qubits onto a device with limited connectivity and local instruction
+//! capabilities. The algorithm incrementally routes unary and two-qubit
+//! requirements, scores candidate SWAPs with current and lookahead distances
+//! plus exact native-plan lower bounds, and selects the best routed circuit
+//! from deterministic or seeded routing trials.
 //!
 //! This implementation follows the original SABRE structure and incorporates
 //! selected LightSABRE/Qiskit-style production enhancements: deterministic
-//! multi-trial selection, relative/delta layer scoring, release-valve fallback,
-//! trial-level parallelism, control-flow body restoration, and routing-quality
-//! tie-breakers. It is not a complete implementation of every LightSABRE
-//! heuristic; depth and critical-path scoring are intentionally not used as
-//! default swap-selection terms without benchmark coverage.
+//! multi-trial selection, relative/delta layer scoring, exact movement
+//! feasibility, release-valve fallback, trial-level parallelism, control-flow
+//! body restoration, and native-quality trial selection. It is not a complete
+//! implementation of every LightSABRE heuristic; adaptive Beam, critical-path
+//! scoring, and local exact search remain gated on external quality benchmarks.
 //!
 //! This module is intentionally independent from compiler workflow selection.
 //! It exposes reusable SABRE building blocks, but it does not decide whether a
@@ -46,6 +47,10 @@
 //! - [`sabre_route`] routes a circuit from a supplied initial layout and returns
 //!   a physical circuit with inserted SWAP operations, the final layout, and
 //!   diagnostics.
+//! - [`normalize_initial_layout`] validates and expands a caller-supplied
+//!   layout against a device's usable physical qubits.
+//! - [`validate_reachable_interactions`] performs the same device-aware
+//!   movement and terminal preflight used before routing.
 //!
 //! # Example
 //!
@@ -95,19 +100,26 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod cost;
 mod dag;
 mod heuristic;
 mod layer;
 mod routing;
 
+pub(crate) use cost::MetricAvailability;
 pub(crate) use dag::SabreDag;
-pub use heuristic::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
+pub use heuristic::{
+    SabreConfig, SabreHeuristicConfig, SabreTrialObjective, SabreVf2PrepassConfig,
+};
 pub(crate) use routing::{
-    RoutingTarget, TrialQuality, compare_trial_quality, normalize_initial_layout_for_target,
-    route_trial, route_trial_unchecked, trial_seeds, validate_reachable_interactions_for_target,
+    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata,
+    RequirementReachabilityFailure, RoutingTarget, TrialQuality,
+    interaction_reachability_for_target, movement_component_assignment,
+    normalize_initial_layout_for_target, route_unscored_trial_with_metadata, sabre_route_prepared,
+    trial_heuristic_profile, trial_seeds, validate_native_trial_operations,
 };
 pub use routing::{SabreRoutingDiagnostics, SabreRoutingResult, sabre_route};
-pub use routing::{normalize_initial_layout, validate_config, validate_reachable_interactions};
+pub use routing::{normalize_initial_layout, validate_reachable_interactions};
 
 #[cfg(test)]
 #[path = "./sabre_test.rs"]

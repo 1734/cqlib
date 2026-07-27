@@ -70,6 +70,11 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// Returns the standard gate represented directly by this operation.
+    pub fn standard_gate(&self) -> Option<StandardGate> {
+        self.instruction.standard_gate()
+    }
+
     /// Computes the numerical unitary matrix for this specific operation.
     ///
     /// This method accepts only parameters already stored as fixed values and delegates
@@ -227,6 +232,25 @@ impl fmt::Display for ValueOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_standard_gate_query_delegates_to_instruction() {
+        let standard = Operation {
+            instruction: Instruction::Standard(StandardGate::H),
+            qubits: smallvec![Qubit::new(0)],
+            params: smallvec![],
+            label: None,
+        };
+        let directive = Operation {
+            instruction: Instruction::Directive(crate::circuit::Directive::Barrier),
+            qubits: smallvec![],
+            params: smallvec![],
+            label: None,
+        };
+
+        assert_eq!(standard.standard_gate(), Some(StandardGate::H));
+        assert_eq!(directive.standard_gate(), None);
+    }
 
     #[test]
     fn value_operation_exposes_instance_queries() {

@@ -31,11 +31,11 @@
 //!   skips automatic layout selection.
 //!
 //! The public compiler workflow uses [`route_with_layout`] when
-//! [`CompileConfig::initial_layout`](crate::compile::CompileConfig::initial_layout)
+//! [`DeviceCompileTarget::initial_layout`](crate::compile::DeviceCompileTarget::initial_layout)
 //! is set, otherwise it uses [`route_sabre`]. Routed circuits use physical
 //! qubit identifiers and guarantee undirected physical adjacency for routed
-//! two-qubit operations. Target-basis translation and directed native-gate
-//! legalization remain separate compiler stages.
+//! two-qubit operations. Target-basis translation and exact directed device
+//! lowering remain separate compiler stages.
 //!
 //! # Example
 //!

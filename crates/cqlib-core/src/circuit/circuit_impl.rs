@@ -266,7 +266,7 @@ fn operations_equal(lhs: &Operation, rhs: &Operation) -> bool {
         && lhs.label == rhs.label
 }
 
-fn instructions_equal(lhs: &Instruction, rhs: &Instruction) -> bool {
+pub(crate) fn instructions_equal(lhs: &Instruction, rhs: &Instruction) -> bool {
     match (lhs, rhs) {
         (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
         (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,
@@ -469,7 +469,7 @@ impl Circuit {
         for operation in operations {
             circuit.append_value_operation(operation)?;
         }
-        validate_operation_parameters(circuit.operations(), &circuit.parameters)?;
+        circuit.validate_operation_parameters(circuit.operations())?;
         circuit.validate()?;
         Ok(circuit)
     }
@@ -483,7 +483,7 @@ impl Circuit {
         &mut self,
         operation: ValueOperation,
     ) -> Result<(), CircuitError> {
-        let instruction = lower_instruction(self, operation.instruction)?;
+        let instruction = self.lower_instruction(operation.instruction)?;
         self.append(
             instruction,
             operation.qubits,
@@ -629,10 +629,104 @@ impl Circuit {
         &self.parameters
     }
 
-    /// Returns all symbolic variable names referenced by interned parameters.
+    /// Returns all symbolic variable names present in the parameter registry.
+    ///
+    /// The registry is stable and is not compacted when operations stop using a
+    /// parameter, so this set may include symbols that are no longer referenced
+    /// by the executable IR. Use [`Circuit::used_symbols`] when only live
+    /// dependencies are needed.
     pub fn symbols(&self) -> &IndexSet<String> {
         &self.symbols
     }
+
+    /// Returns symbolic variable names referenced by the executable IR.
+    ///
+    /// This includes the global phase and operation parameters in top-level and
+    /// nested structured control-flow bodies. The result preserves the stable
+    /// insertion order of [`Circuit::symbols`] while filtering out interned but
+    /// unreferenced symbols.
+    pub fn used_symbols(&self) -> IndexSet<String> {
+        let referenced_indices = self.referenced_parameter_indices();
+        let mut referenced_symbols = HashSet::new();
+        for index in referenced_indices {
+            if let Some(parameter) = self.parameters.get_index(index as usize) {
+                referenced_symbols.extend(parameter.get_symbols());
+            }
+        }
+
+        self.symbols
+            .iter()
+            .filter(|symbol| referenced_symbols.contains(symbol.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Returns whether `symbol` is referenced by the circuit's executable IR.
+    ///
+    /// This inspects the global phase and operation parameters, including
+    /// parameters in nested structured control-flow bodies. It intentionally
+    /// does not use the circuit's symbol registry because that registry may
+    /// retain symbols that are interned but no longer referenced.
+    pub fn uses_symbol(&self, symbol: &str) -> bool {
+        self.referenced_parameter_indices()
+            .into_iter()
+            .any(|index| {
+                self.parameters
+                    .get_index(index as usize)
+                    .is_some_and(|parameter| parameter.get_symbols().contains(symbol))
+            })
+    }
+
+    fn referenced_parameter_indices(&self) -> HashSet<u32> {
+        let mut indices = HashSet::new();
+        if let CircuitParam::Index(index) = self.global_phase {
+            indices.insert(index);
+        }
+        Self::collect_operation_parameter_indices(&self.data, &mut indices);
+        indices
+    }
+
+    fn collect_operation_parameter_indices(operations: &[Operation], indices: &mut HashSet<u32>) {
+        for operation in operations {
+            indices.extend(operation.params.iter().filter_map(|param| match param {
+                CircuitParam::Index(index) => Some(*index),
+                CircuitParam::Fixed(_) => None,
+            }));
+
+            if let Instruction::ClassicalControl(control) = &operation.instruction {
+                match control {
+                    ClassicalControlOp::If(op) => {
+                        Self::collect_operation_parameter_indices(
+                            op.then_body().operations(),
+                            indices,
+                        );
+                        if let Some(body) = op.else_body() {
+                            Self::collect_operation_parameter_indices(body.operations(), indices);
+                        }
+                    }
+                    ClassicalControlOp::While(op) => {
+                        Self::collect_operation_parameter_indices(op.body().operations(), indices);
+                    }
+                    ClassicalControlOp::For(op) => {
+                        Self::collect_operation_parameter_indices(op.body().operations(), indices);
+                    }
+                    ClassicalControlOp::Switch(op) => {
+                        for case in op.cases() {
+                            Self::collect_operation_parameter_indices(
+                                case.body().operations(),
+                                indices,
+                            );
+                        }
+                        if let Some(body) = op.default() {
+                            Self::collect_operation_parameter_indices(body.operations(), indices);
+                        }
+                    }
+                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+                }
+            }
+        }
+    }
+
     /// Returns a vector of all qubits in the circuit, preserving their insertion order.
     pub fn qubits(&self) -> Vec<Qubit> {
         self.qubits.iter().cloned().collect()
@@ -1160,7 +1254,7 @@ impl Circuit {
 
     /// Appends an XY gate.
     ///
-    /// Rotation between the $|01\rangle$ and $|10\rangle$ subspace.
+    /// Applies a pi rotation about the axis at angle `theta` in the single-qubit XY plane.
     pub fn xy(
         &mut self,
         qubit: Qubit,
@@ -1175,7 +1269,7 @@ impl Circuit {
         )
     }
 
-    /// Appends a $\sqrt{XY}$ gate (positive phase).
+    /// Appends a positive half-pi rotation in the single-qubit XY plane.
     pub fn xy2p(
         &mut self,
         qubit: Qubit,
@@ -1190,7 +1284,7 @@ impl Circuit {
         )
     }
 
-    /// Appends a $\sqrt{XY}^\dagger$ gate (negative phase).
+    /// Appends a negative half-pi rotation in the single-qubit XY plane.
     pub fn xy2m(
         &mut self,
         qubit: Qubit,
@@ -1596,8 +1690,12 @@ impl Circuit {
 
     /// Inserts a Barrier.
     ///
-    /// A barrier forbids the compiler from optimizing across this line. It has no physical effect
-    /// on the qubits but is crucial for debugging and manual optimization control.
+    /// A barrier forbids the compiler from optimizing or reordering across this line. It has no
+    /// physical effect on the quantum state, but is crucial for debugging and manual optimization
+    /// control.
+    ///
+    /// A non-empty `qubits` list creates a barrier over exactly those qubits. An empty list
+    /// creates a global barrier over every qubit in this circuit.
     pub fn barrier(&mut self, qubits: Vec<Qubit>) -> Result<(), CircuitError> {
         self.append(
             Instruction::Directive(Directive::Barrier),
@@ -1871,8 +1969,9 @@ impl Circuit {
     /// Converts the circuit into a `CircuitGate` instruction.
     ///
     /// This method "freezes" the current circuit and wraps it into an instruction that can be
-    /// appended to another circuit. The provided `params` are bound to the circuit's free symbols
-    /// in the order they were defined.
+    /// appended to another circuit. Its positional parameter signature is
+    /// inferred from symbols currently referenced by the executable IR, in
+    /// stable registry order.
     ///
     /// # Arguments
     ///
@@ -2645,15 +2744,66 @@ impl Circuit {
     }
 }
 
-fn lower_instruction(
-    circuit: &mut Circuit,
-    instruction: ValueInstruction,
-) -> Result<Instruction, CircuitError> {
-    fn lower_operation(
-        circuit: &mut Circuit,
-        operation: ValueOperation,
-    ) -> Result<Operation, CircuitError> {
-        let instruction = lower_instruction(circuit, operation.instruction)?;
+impl Circuit {
+    fn lower_instruction(
+        &mut self,
+        instruction: ValueInstruction,
+    ) -> Result<Instruction, CircuitError> {
+        let op = match instruction {
+            ValueInstruction::Instruction(Instruction::ClassicalControl(_)) => {
+                return Err(CircuitError::InvalidOperation(
+                    "ValueInstruction::Instruction cannot wrap Instruction::ClassicalControl"
+                        .to_string(),
+                ));
+            }
+            ValueInstruction::Instruction(instruction) => return Ok(instruction),
+            ValueInstruction::ClassicalControl(op) => op,
+        };
+
+        let op = match op {
+            ValueClassicalControlOp::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let then_body = self.lower_body(then_body)?;
+                let else_body = else_body.map(|body| self.lower_body(body)).transpose()?;
+                IfOp::new(condition, then_body, else_body).map(ClassicalControlOp::If)?
+            }
+            ValueClassicalControlOp::While { condition, body } => {
+                let body = self.lower_body(body)?;
+                WhileOp::new(condition, body).map(ClassicalControlOp::While)?
+            }
+            ValueClassicalControlOp::For {
+                var,
+                start,
+                stop,
+                step,
+                body,
+            } => {
+                let body = self.lower_body(body)?;
+                ForOp::new(var, start, stop, step, body).map(ClassicalControlOp::For)?
+            }
+            ValueClassicalControlOp::Switch {
+                target,
+                cases,
+                default,
+            } => {
+                let cases = cases
+                    .into_iter()
+                    .map(|case| Ok(SwitchCase::new(case.value, self.lower_body(case.body)?)))
+                    .collect::<Result<Vec<_>, CircuitError>>()?;
+                let default = default.map(|body| self.lower_body(body)).transpose()?;
+                SwitchOp::new(target, cases, default).map(ClassicalControlOp::Switch)?
+            }
+            ValueClassicalControlOp::Break => ClassicalControlOp::Break,
+            ValueClassicalControlOp::Continue => ClassicalControlOp::Continue,
+        };
+        Ok(Instruction::ClassicalControl(op))
+    }
+
+    fn lower_operation(&mut self, operation: ValueOperation) -> Result<Operation, CircuitError> {
+        let instruction = self.lower_instruction(operation.instruction)?;
         let params = operation
             .params
             .into_iter()
@@ -2662,10 +2812,10 @@ fn lower_instruction(
                 |(param_index, param)| -> Result<CircuitParam, CircuitError> {
                     match param {
                         ParameterValue::Param(param) => {
-                            let (index, is_new) = circuit.parameters.insert_full(param.clone());
+                            let (index, is_new) = self.parameters.insert_full(param.clone());
                             if is_new {
                                 for sym in param.get_symbols() {
-                                    circuit.symbols.insert(sym);
+                                    self.symbols.insert(sym);
                                 }
                             }
                             Ok(CircuitParam::Index(index as u32))
@@ -2691,119 +2841,59 @@ fn lower_instruction(
         })
     }
 
-    fn lower_body(
-        circuit: &mut Circuit,
-        body: ValueControlBody,
-    ) -> Result<ControlBody, CircuitError> {
+    fn lower_body(&mut self, body: ValueControlBody) -> Result<ControlBody, CircuitError> {
         body.operations()
             .iter()
             .cloned()
-            .map(|operation| lower_operation(circuit, operation))
+            .map(|operation| self.lower_operation(operation))
             .collect::<Result<Vec<_>, _>>()
             .map(ControlBody::new)
     }
 
-    let op = match instruction {
-        ValueInstruction::Instruction(Instruction::ClassicalControl(_)) => {
-            return Err(CircuitError::InvalidOperation(
-                "ValueInstruction::Instruction cannot wrap Instruction::ClassicalControl"
-                    .to_string(),
-            ));
-        }
-        ValueInstruction::Instruction(instruction) => return Ok(instruction),
-        ValueInstruction::ClassicalControl(op) => op,
-    };
-
-    let op = match op {
-        ValueClassicalControlOp::If {
-            condition,
-            then_body,
-            else_body,
-        } => {
-            let then_body = lower_body(circuit, then_body)?;
-            let else_body = else_body
-                .map(|body| lower_body(circuit, body))
-                .transpose()?;
-            IfOp::new(condition, then_body, else_body).map(ClassicalControlOp::If)?
-        }
-        ValueClassicalControlOp::While { condition, body } => {
-            let body = lower_body(circuit, body)?;
-            WhileOp::new(condition, body).map(ClassicalControlOp::While)?
-        }
-        ValueClassicalControlOp::For {
-            var,
-            start,
-            stop,
-            step,
-            body,
-        } => {
-            let body = lower_body(circuit, body)?;
-            ForOp::new(var, start, stop, step, body).map(ClassicalControlOp::For)?
-        }
-        ValueClassicalControlOp::Switch {
-            target,
-            cases,
-            default,
-        } => {
-            let cases = cases
-                .into_iter()
-                .map(|case| Ok(SwitchCase::new(case.value, lower_body(circuit, case.body)?)))
-                .collect::<Result<Vec<_>, CircuitError>>()?;
-            let default = default.map(|body| lower_body(circuit, body)).transpose()?;
-            SwitchOp::new(target, cases, default).map(ClassicalControlOp::Switch)?
-        }
-        ValueClassicalControlOp::Break => ClassicalControlOp::Break,
-        ValueClassicalControlOp::Continue => ClassicalControlOp::Continue,
-    };
-    Ok(Instruction::ClassicalControl(op))
-}
-
-fn validate_operation_parameters(
-    operations: &[Operation],
-    parameters: &IndexSet<Parameter>,
-) -> Result<(), CircuitError> {
-    for operation in operations {
-        for param in &operation.params {
-            match param {
-                CircuitParam::Fixed(value) => {
-                    if !value.is_finite() {
-                        return Err(CircuitError::InvalidParameterValue(0, *value));
+    fn validate_operation_parameters(&self, operations: &[Operation]) -> Result<(), CircuitError> {
+        for operation in operations {
+            for param in &operation.params {
+                match param {
+                    CircuitParam::Fixed(value) => {
+                        if !value.is_finite() {
+                            return Err(CircuitError::InvalidParameterValue(0, *value));
+                        }
                     }
-                }
-                CircuitParam::Index(index) => {
-                    if parameters.get_index(*index as usize).is_none() {
-                        return Err(CircuitError::InvalidParameterIndex(*index));
+                    CircuitParam::Index(index) => {
+                        if self.parameters.get_index(*index as usize).is_none() {
+                            return Err(CircuitError::InvalidParameterIndex(*index));
+                        }
                     }
                 }
             }
-        }
-        if let Instruction::ClassicalControl(op) = &operation.instruction {
-            match op {
-                ClassicalControlOp::If(op) => {
-                    validate_operation_parameters(op.then_body().operations(), parameters)?;
-                    if let Some(body) = op.else_body() {
-                        validate_operation_parameters(body.operations(), parameters)?;
+            if let Instruction::ClassicalControl(op) = &operation.instruction {
+                match op {
+                    ClassicalControlOp::If(op) => {
+                        self.validate_operation_parameters(op.then_body().operations())?;
+                        if let Some(body) = op.else_body() {
+                            self.validate_operation_parameters(body.operations())?;
+                        }
                     }
-                }
-                ClassicalControlOp::While(op) => {
-                    validate_operation_parameters(op.body().operations(), parameters)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    validate_operation_parameters(op.body().operations(), parameters)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        validate_operation_parameters(case.body().operations(), parameters)?;
+                    ClassicalControlOp::While(op) => {
+                        self.validate_operation_parameters(op.body().operations())?;
                     }
-                    if let Some(body) = op.default() {
-                        validate_operation_parameters(body.operations(), parameters)?;
+                    ClassicalControlOp::For(op) => {
+                        self.validate_operation_parameters(op.body().operations())?;
                     }
+                    ClassicalControlOp::Switch(op) => {
+                        for case in op.cases() {
+                            self.validate_operation_parameters(case.body().operations())?;
+                        }
+                        if let Some(body) = op.default() {
+                            self.validate_operation_parameters(body.operations())?;
+                        }
+                    }
+                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
                 }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn infer_classical_circuit_id(

@@ -85,10 +85,19 @@ impl PyFrozenCircuit {
             .collect()
     }
 
-    /// Returns symbolic parameter names in circuit insertion order.
+    /// Returns interned symbol names in circuit insertion order.
+    ///
+    /// This stable registry may include symbols no longer referenced by the
+    /// frozen executable IR.
     #[getter]
     fn symbols(&self) -> Vec<String> {
         self.inner.circuit().symbols().iter().cloned().collect()
+    }
+
+    /// Returns symbols actually referenced by the frozen executable IR.
+    #[getter]
+    fn used_symbols(&self) -> Vec<String> {
+        self.inner.used_symbols().iter().cloned().collect()
     }
 
     fn __repr__(&self) -> String {
@@ -119,8 +128,29 @@ pub struct PyCircuitGate {
 impl PyCircuitGate {
     /// Creates a reusable gate from a frozen circuit definition.
     #[new]
-    fn new(name: String, circuit: PyFrozenCircuit) -> PyResult<Self> {
-        CircuitGate::new(name, circuit.inner)
+    #[pyo3(signature = (name, circuit, signature_params=None))]
+    fn new(
+        name: String,
+        circuit: PyFrozenCircuit,
+        signature_params: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let result = match signature_params {
+            Some(params) => CircuitGate::with_signature(name, circuit.inner, params),
+            None => CircuitGate::new(name, circuit.inner),
+        };
+        result
+            .map(|inner| Self { inner })
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Creates a reusable gate with an explicit positional parameter signature.
+    #[staticmethod]
+    fn with_signature(
+        name: String,
+        circuit: PyFrozenCircuit,
+        signature_params: Vec<String>,
+    ) -> PyResult<Self> {
+        CircuitGate::with_signature(name, circuit.inner, signature_params)
             .map(|inner| Self { inner })
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
@@ -143,10 +173,22 @@ impl PyCircuitGate {
         self.inner.num_params()
     }
 
-    /// Returns symbolic parameter names in positional order.
+    /// Returns the positional parameter signature used to invoke this gate.
+    #[getter]
+    fn signature_params(&self) -> Vec<String> {
+        self.inner.signature_params().iter().cloned().collect()
+    }
+
+    /// Returns symbols actually referenced by the backing circuit.
+    #[getter]
+    fn used_symbols(&self) -> Vec<String> {
+        self.inner.used_symbols().iter().cloned().collect()
+    }
+
+    /// Backward-compatible alias for `used_symbols`.
     #[getter]
     fn symbols(&self) -> Vec<String> {
-        self.inner.symbols().into_iter().collect()
+        self.used_symbols()
     }
 
     /// Returns the immutable circuit definition.

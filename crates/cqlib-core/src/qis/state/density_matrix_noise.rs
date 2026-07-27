@@ -667,10 +667,7 @@ impl DensityMatrixNoise {
         Ok(())
     }
 
-    /// Applies the XY2P gate (√XY+) with optional noise.
-    ///
-    /// A native gate for certain superconducting platforms representing
-    /// a partial iSWAP-like rotation in the XY plane.
+    /// Applies a positive half-pi single-qubit XY-plane rotation with optional noise.
     ///
     /// # Arguments
     ///
@@ -682,7 +679,7 @@ impl DensityMatrixNoise {
         Ok(())
     }
 
-    /// Applies the XY2M gate (√XY-) with optional noise.
+    /// Applies a negative half-pi single-qubit XY-plane rotation with optional noise.
     ///
     /// The Hermitian conjugate of XY2P.
     ///

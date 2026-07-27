@@ -22,7 +22,7 @@
 //!
 //! 1. [`analyze_circuit_for_layout`] extracts weighted logical interactions
 //!    from a [`Circuit`](crate::circuit::Circuit).
-//! 2. [`build_physical_layout_graph`] turns a [`Device`](crate::device::Device)
+//! 2. [`PhysicalLayoutGraph::from_device`] turns a [`Device`](crate::device::Device)
 //!    into a compiler-local physical topology and calibration view.
 //! 3. A concrete algorithm, such as [`trivial_layout`], [`greedy_layout`],
 //!    [`vf2_perfect_layout`], or [`sabre_layout`], returns a [`LayoutResult`].
@@ -52,24 +52,28 @@ mod greedy;
 mod objective;
 mod result;
 mod sabre;
+mod scoring;
 mod trivial;
 mod vf2;
 mod vf2_engine;
 
-pub use crate::compile::physical_target::{
-    DistanceTable, PhysicalLayoutGraph, build_physical_layout_graph,
-};
+pub use crate::compile::physical_target::{DistanceTable, PhysicalLayoutGraph};
 pub use analysis::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, analyze_circuit_for_layout,
 };
+pub(crate) use greedy::{GreedyCandidateOutcome, greedy_layout_candidate_prepared};
 pub use greedy::{greedy_layout, greedy_layout_prepared};
 pub use objective::{LayoutObjective, LayoutScore};
 pub use result::{LayoutDiagnostics, LayoutResult};
-pub use sabre::{sabre_layout, sabre_layout_prepared};
+pub use sabre::{
+    PreparedSabreCircuit, PreparedSabreDeviceTarget, prepare_sabre_circuit,
+    prepare_sabre_device_target, sabre_layout, sabre_layout_prepared,
+};
 pub use trivial::{trivial_layout, trivial_layout_prepared};
 pub use vf2::{
     Vf2EdgeRequirement, Vf2LayoutConfig, vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
+pub(crate) use vf2::{Vf2PreparedOutcome, try_vf2_perfect_layout_prepared};
 
 /// Returns whether a layout realizes all positive-weight interactions directly.
 ///
@@ -102,6 +106,9 @@ fn is_perfect_layout(
 
 #[cfg(test)]
 mod greedy_test;
+
+#[cfg(test)]
+mod gate_aware_test;
 
 #[cfg(test)]
 mod layout_test;

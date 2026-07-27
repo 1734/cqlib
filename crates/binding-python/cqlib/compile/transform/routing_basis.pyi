@@ -41,8 +41,8 @@ class LowerToRoutingBasis:
         """Lower ``circuit`` without modifying it.
 
         Raises:
-            ValueError: If lowering cannot satisfy SABRE's 0/1/2-qubit
-                gate-like operation contract.
+            CompilerConfigError: If lowering cannot satisfy SABRE's 0/1/2-
+                qubit gate-like operation contract.
         """
         ...
     def __copy__(self) -> LowerToRoutingBasis: ...
@@ -58,7 +58,7 @@ def lower_to_routing_basis(
     basis. The input circuit is not modified.
 
     Raises:
-        ValueError: If lowering cannot satisfy SABRE's 0/1/2-qubit gate-like
-            operation contract.
+        CompilerConfigError: If lowering cannot satisfy SABRE's 0/1/2-qubit
+            gate-like operation contract.
     """
     ...

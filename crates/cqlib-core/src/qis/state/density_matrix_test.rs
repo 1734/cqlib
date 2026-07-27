@@ -13,12 +13,38 @@
 use crate::circuit::{Circuit, Qubit, StandardGate};
 use crate::qis::QisError;
 use crate::qis::hamiltonian::Hamiltonian;
+use crate::qis::metrics::purity_mixed;
 use crate::qis::pauli::{Pauli, PauliString};
 use crate::qis::state::density_matrix::DensityMatrix;
 use crate::qis::state::statevector::Statevector;
 use approx::assert_relative_eq;
 use num_complex::Complex64;
 use std::f64::consts::PI;
+
+#[test]
+fn maximally_mixed_constructs_normalized_uniform_states() {
+    for num_qubits in 0..=2 {
+        let dm = DensityMatrix::maximally_mixed(num_qubits);
+        let dim = 1usize << num_qubits;
+        let expected = 1.0 / dim as f64;
+
+        assert_eq!(dm.num_qubits, num_qubits);
+        assert_eq!(dm.data().len(), dim * dim);
+        for row in 0..dim {
+            for col in 0..dim {
+                let value = dm.data()[row * dim + col];
+                if row == col {
+                    assert_relative_eq!(value.re, expected);
+                    assert_relative_eq!(value.im, 0.0);
+                } else {
+                    assert_eq!(value, Complex64::new(0.0, 0.0));
+                }
+            }
+        }
+        assert_relative_eq!(dm.trace().re, 1.0);
+        assert_relative_eq!(purity_mixed(&dm).unwrap(), expected);
+    }
+}
 
 #[test]
 fn test_from_state_normalization() {

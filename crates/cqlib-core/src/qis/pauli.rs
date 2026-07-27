@@ -555,6 +555,38 @@ impl PauliString {
         }
     }
 
+    /// Returns the dense complex matrix representation of this Pauli string.
+    ///
+    /// Qubit zero is the least-significant tensor factor, so an $N$-qubit
+    /// string is expanded as $P_{N-1} \otimes \cdots \otimes P_0$. The
+    /// string's global [`Phase`] is included in the returned matrix.
+    ///
+    /// This method is intended for small-system analysis and verification.
+    /// The returned matrix has dimensions $2^N \times 2^N$ and requires
+    /// $O(4^N)$ memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cqlib_core::qis::PauliString;
+    /// use num_complex::Complex64;
+    ///
+    /// let pauli: PauliString = "X".parse().unwrap();
+    /// let matrix = pauli.to_matrix();
+    /// assert_eq!(matrix[[0, 1]], Complex64::new(1.0, 0.0));
+    /// assert_eq!(matrix[[1, 0]], Complex64::new(1.0, 0.0));
+    /// ```
+    pub fn to_matrix(&self) -> Array2<Complex64> {
+        let mut matrix = Array2::from_elem((1, 1), Complex64::new(1.0, 0.0));
+        for qubit in (0..self.num_qubits).rev() {
+            matrix = kronecker_product(&matrix, &self.get_pauli(qubit).to_matrix());
+        }
+
+        let phase = self.phase.to_complex();
+        matrix.mapv_inplace(|value| value * phase);
+        matrix
+    }
+
     /// Returns the Pauli operator at the specified qubit index, or an error if out of bounds.
     ///
     /// # Arguments
@@ -884,6 +916,30 @@ impl PauliString {
             _ => 0,
         }
     }
+}
+
+fn kronecker_product(left: &Array2<Complex64>, right: &Array2<Complex64>) -> Array2<Complex64> {
+    let (left_rows, left_cols) = left.dim();
+    let (right_rows, right_cols) = right.dim();
+    let mut result = Array2::from_elem(
+        (left_rows * right_rows, left_cols * right_cols),
+        Complex64::new(0.0, 0.0),
+    );
+
+    for left_row in 0..left_rows {
+        for left_col in 0..left_cols {
+            for right_row in 0..right_rows {
+                for right_col in 0..right_cols {
+                    result[[
+                        left_row * right_rows + right_row,
+                        left_col * right_cols + right_col,
+                    ]] = left[[left_row, left_col]] * right[[right_row, right_col]];
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Multiplies two Pauli strings, returning a new instance.

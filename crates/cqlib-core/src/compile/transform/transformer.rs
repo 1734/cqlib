@@ -14,22 +14,39 @@ use crate::circuit::Circuit;
 use crate::compile::CompilerError;
 use crate::compile::transform::analysis::CircuitAnalysis;
 
-/// Common output shape for compiler transforms over a circuit.
+/// Outcome of applying a compiler transform to a circuit.
+///
+/// `Unchanged` means the input compiler IR can be retained exactly as-is.
+/// `Changed` carries the replacement circuit that callers must adopt.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TransformResult {
-    /// Transformed circuit.
-    pub circuit: Circuit,
-    /// Whether the transform changed the compiler IR representation.
-    ///
-    /// A transform reports `false` when it found no applicable operation or
-    /// reached the same representation. This is a transform-local contract:
-    /// callers should not pre-scan circuits to infer whether a transform should
-    /// run.
-    pub changed: bool,
+#[allow(clippy::large_enum_variant)] // Boxing would allocate on every changed pass.
+pub enum TransformOutcome {
+    /// The input circuit representation can be retained without rebuilding it.
+    Unchanged,
+    /// The transform produced a replacement circuit representation.
+    Changed(Circuit),
 }
 
-/// Common interface for compiler transforms that consume one circuit and produce
-/// a rebuilt circuit.
+impl TransformOutcome {
+    /// Whether the transform produced a replacement circuit.
+    pub const fn changed(&self) -> bool {
+        matches!(self, Self::Changed(_))
+    }
+
+    /// Resolves the outcome into an owned circuit.
+    ///
+    /// This helper is intended for APIs that promise an owned circuit. Core
+    /// workflows should match on the outcome directly so `Unchanged` remains
+    /// zero-copy.
+    pub fn into_circuit(self, original: &Circuit) -> Circuit {
+        match self {
+            Self::Unchanged => original.clone(),
+            Self::Changed(circuit) => circuit,
+        }
+    }
+}
+
+/// Common interface for compiler transforms over an immutable circuit.
 ///
 /// # Implementing
 ///
@@ -51,5 +68,59 @@ pub trait Transformer {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError>;
+    ) -> Result<TransformOutcome, CompilerError>;
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ResolvedTransform {
+    pub(crate) circuit: Circuit,
+    pub(crate) changed: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_transform_for_test(
+    outcome: TransformOutcome,
+    original: &Circuit,
+) -> ResolvedTransform {
+    let changed = outcome.changed();
+    ResolvedTransform {
+        circuit: outcome.into_circuit(original),
+        changed,
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait TransformerTestExt: Transformer {
+    fn transform_resolved(
+        &self,
+        circuit: &Circuit,
+        analysis: Option<&CircuitAnalysis>,
+    ) -> Result<ResolvedTransform, CompilerError> {
+        self.transform(circuit, analysis)
+            .map(|outcome| resolve_transform_for_test(outcome, circuit))
+    }
+}
+
+#[cfg(test)]
+impl<T: Transformer + ?Sized> TransformerTestExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_reports_change_and_resolves_owned_circuit() {
+        let original = Circuit::new(1);
+        assert!(!TransformOutcome::Unchanged.changed());
+        assert_eq!(
+            TransformOutcome::Unchanged.into_circuit(&original),
+            original
+        );
+
+        let changed = Circuit::new(2);
+        let outcome = TransformOutcome::Changed(changed.clone());
+        assert!(outcome.changed());
+        assert_eq!(outcome.into_circuit(&original), changed);
+    }
 }

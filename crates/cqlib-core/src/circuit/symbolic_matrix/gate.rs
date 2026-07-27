@@ -483,7 +483,7 @@ pub fn circuit_to_symbolic_matrix(
                             .circuit()
                             .as_ref()
                             .ok_or(CircuitError::NoMatrixRepresentation)?;
-                        let symbols = sub_circuit.circuit().symbols();
+                        let symbols = sub_circuit.used_symbols();
                         let expected = symbols.len();
                         let actual = params.len();
                         if actual != expected {

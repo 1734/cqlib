@@ -28,6 +28,20 @@
 //! covered span, static size delta, source position, and rule id. The selector
 //! then greedily keeps the first non-overlapping patches, producing a stable
 //! patch set that never rewrites the same operation span twice in one round.
+//!
+//! Incremental fixpoint execution reuses a per-block [`BlockMatchCache`]
+//! across rounds and restricts rescans to dirty anchor ranges derived from
+//! the previously applied patches; see [`select_rewrites_for_anchor_ranges`]
+//! for the exact workset contract. When dirty anchors cover at least
+//! [`DIRTY_FULL_SCAN_PERCENT`] percent of the eligible anchors, the block is
+//! rescanned in full because incremental bookkeeping stops paying off.
+//!
+//! Candidate generation for large anchor sets runs on rayon. This is
+//! deterministic: anchors are visited in ascending order, per-anchor
+//! candidate lists are merged in that order, and the comparator in
+//! [`select_candidate_patches`] is a strict total order (source position and
+//! rule id break all ties), so the selected patch set never depends on
+//! thread scheduling.
 
 use crate::circuit::{
     Circuit, CircuitParam, Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
@@ -47,6 +61,30 @@ use crate::compile::transform::rewrite::config::{GPhaseCost, LocalRewriteCost, R
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+
+/// Anchor count above which candidate generation switches to rayon.
+///
+/// Below this threshold, thread-pool dispatch costs more than the matching
+/// work it saves. This knob is independent of
+/// `SMALL_CIRCUIT_FULL_SCAN_THRESHOLD` in `rewriter.rs` (which selects the
+/// incremental engines); the two intentionally live in separate files next to
+/// the code they tune, so adjust each only against its own measurements.
+const PARALLEL_ANCHOR_THRESHOLD: usize = 16_384;
+/// Dirty-to-eligible anchor percentage at which a block rescan falls back to
+/// a full scan. Past this point the restricted scan touches most of the block
+/// anyway, and full scans have cheaper per-anchor bookkeeping.
+const DIRTY_FULL_SCAN_PERCENT: usize = 50;
+
+/// Returns whether the instruction is a global-phase operation.
+///
+/// Global-phase operations never occupy a block position after a round: they
+/// are absorbed into the owning sequence's phase delta instead of being
+/// emitted. Every patch consumer and every dirty-range computation must
+/// classify them identically, so this predicate is the single source of
+/// truth shared by `rewriter.rs` and this module.
+pub(super) fn is_gphase_instruction(instruction: &Instruction) -> bool {
+    matches!(instruction, Instruction::Standard(StandardGate::GPhase))
+}
 
 /// A rewrite rule prepared for repeated matching.
 struct CompiledRule {
@@ -74,7 +112,7 @@ pub(super) struct ReplacementItem {
     pub(super) instruction: Instruction,
     pub(super) qubits: SmallVec<[Qubit; 3]>,
     pub(super) params: SmallVec<[ParameterValue; 3]>,
-    key: RewriteInstructionKey,
+    pub(super) key: RewriteInstructionKey,
 }
 
 /// A selected replacement for matched operation positions in one block.
@@ -88,28 +126,91 @@ pub(super) struct RewritePatch {
     pub(super) replacements: Vec<ReplacementItem>,
 }
 
-#[derive(Clone)]
+/// One step of the shared patch application plan for a block.
+///
+/// Applying a set of selected patches always means the same walk over the
+/// block: emit each patch's replacements at its first matched position, drop
+/// the remaining matched positions, and keep every other position in place.
+/// All three patch consumers — the rebuilding emitter and the linear
+/// workspace splice in `rewriter.rs`, and [`BlockMatchCache::into_rewritten`]
+/// here — drive off this single plan so their application order cannot
+/// diverge.
+pub(super) enum PatchPlanStep<'a> {
+    /// Emit the patch's replacements; occurs at the patch's first matched
+    /// position, before the step for that position itself.
+    Replacements(&'a RewritePatch),
+    /// Drop the matched source operation at this position.
+    DropMatched,
+    /// Keep the source operation at this position unchanged.
+    Keep(usize),
+}
+
+/// Builds the shared application plan for applying `patches` to a block of
+/// `block_len` operations.
+///
+/// The plan is the linearization of "patches by first position plus matched
+/// positions to skip" that every patch consumer previously computed by hand.
+/// Steps are ordered by source position; a [`PatchPlanStep::Replacements`]
+/// step immediately precedes the [`PatchPlanStep::DropMatched`] step of its
+/// patch's first matched position. Errors if any patch references a matched
+/// position outside the block, which would indicate a selector bug.
+pub(super) fn patch_application_plan(
+    block_len: usize,
+    patches: &[RewritePatch],
+) -> Result<Vec<PatchPlanStep<'_>>, CompilerError> {
+    let mut patches_by_start = HashMap::with_capacity(patches.len());
+    let mut matched = vec![false; block_len];
+    for patch in patches {
+        patches_by_start.insert(patch.first_position, patch);
+        for &position in &patch.matched_positions {
+            let Some(entry) = matched.get_mut(position) else {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "rewrite patch matched position {position} outside block of length {block_len}"
+                )));
+            };
+            *entry = true;
+        }
+    }
+
+    let mut steps = Vec::with_capacity(block_len + patches.len());
+    for (position, &is_matched) in matched.iter().enumerate() {
+        if let Some(patch) = patches_by_start.remove(&position) {
+            steps.push(PatchPlanStep::Replacements(patch));
+        }
+        if is_matched {
+            steps.push(PatchPlanStep::DropMatched);
+        } else {
+            steps.push(PatchPlanStep::Keep(position));
+        }
+    }
+    Ok(steps)
+}
+
+#[derive(Debug, Clone)]
 struct CandidatePatch {
     patch: RewritePatch,
     before: LocalRewriteCost,
     after: LocalRewriteCost,
 }
 
-struct BlockContext<'a> {
-    operations: &'a [Operation],
+/// Per-block matching inputs cached across fixpoint rounds.
+///
+/// Rule matching probes the same operation many times across anchors, rules,
+/// and commutation checks, so per-position instruction keys and resolved
+/// symbolic parameters are computed once and reused. `instruction_set` and
+/// `qubit_count` feed the static rule filters; if a round changes either of
+/// them, previously clean anchors may match differently and the block must be
+/// rescanned in full.
+#[derive(Debug, Clone)]
+pub(super) struct BlockMatchCache {
     instruction_keys: Vec<RewriteInstructionKey>,
     resolved_params: Vec<SmallVec<[Parameter; 3]>>,
     instruction_set: HashSet<RewriteInstructionKey>,
     qubit_count: usize,
 }
 
-impl<'a> BlockContext<'a> {
-    /// Builds cached matching context for one linear operation block.
-    ///
-    /// Per-position instruction keys and resolved symbolic parameters are
-    /// cached once because rule matching probes the same operation many times
-    /// across anchors, rules, and commutation checks.
-    fn new(circuit: &'a Circuit, operations: &'a [Operation]) -> Result<Self, CompilerError> {
+impl BlockMatchCache {
+    pub(super) fn new(circuit: &Circuit, operations: &[Operation]) -> Result<Self, CompilerError> {
         let mut resolved_params = Vec::with_capacity(operations.len());
         let mut instruction_keys = Vec::with_capacity(operations.len());
         let mut touched_qubits = HashSet::new();
@@ -130,21 +231,174 @@ impl<'a> BlockContext<'a> {
                 .map(|param| resolve_operation_param(circuit, param))
                 .collect::<Result<SmallVec<[_; 3]>, _>>()?;
 
-            for &qubit in &operation.qubits {
-                touched_qubits.insert(qubit);
-            }
+            touched_qubits.extend(operation.qubits.iter().copied());
             instruction_set.insert(key.clone());
             instruction_keys.push(key);
             resolved_params.push(params);
         }
 
         Ok(Self {
-            operations,
             instruction_keys,
             resolved_params,
             instruction_set,
             qubit_count: touched_qubits.len(),
         })
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.instruction_keys.len()
+    }
+
+    pub(super) fn params(&self, position: usize) -> &[Parameter] {
+        &self.resolved_params[position]
+    }
+
+    /// Like [`BlockMatchCache::into_rewritten`], but clones the cache first
+    /// and discards the summary-change flag.
+    pub(super) fn rewritten(
+        &self,
+        operations: &[Operation],
+        patches: &[RewritePatch],
+    ) -> Option<Self> {
+        self.clone()
+            .into_rewritten(operations, patches)
+            .map(|(cache, _)| cache)
+    }
+
+    /// Derives the cache for the block after applying `patches`, consuming
+    /// the old cache so unchanged entries move instead of clone.
+    ///
+    /// Returns the new cache together with whether the block summary
+    /// (`instruction_set` or `qubit_count`) changed. A changed summary can
+    /// alter static filter results for anchors far from the applied patches,
+    /// so callers must fall back to a full rescan of the block in that case.
+    ///
+    /// Returns `None` when the cache cannot be derived incrementally: the
+    /// operation slice no longer matches the cached length, the source block
+    /// contains a global-phase operation (its absorption into the phase delta
+    /// would shift content this incremental view cannot model), or a patch
+    /// references a position outside the block. Callers must treat `None` as
+    /// "rebuild from scratch or rescan fully", never as an error.
+    ///
+    /// Global-phase replacements never occupy a block position (the emitter
+    /// folds them into the phase delta), so they are skipped here as well;
+    /// every other replacement contributes its key, resolved parameters, and
+    /// touched qubits.
+    pub(super) fn into_rewritten(
+        self,
+        operations: &[Operation],
+        patches: &[RewritePatch],
+    ) -> Option<(Self, bool)> {
+        if operations.len() != self.len()
+            || operations
+                .iter()
+                .any(|operation| is_gphase_instruction(&operation.instruction))
+        {
+            return None;
+        }
+
+        let steps = patch_application_plan(operations.len(), patches).ok()?;
+        let expected_len = operations
+            .len()
+            .saturating_add(
+                patches
+                    .iter()
+                    .map(|patch| {
+                        patch
+                            .replacements
+                            .iter()
+                            .filter(|replacement| !is_gphase_instruction(&replacement.instruction))
+                            .count()
+                    })
+                    .sum::<usize>(),
+            )
+            .saturating_sub(
+                patches
+                    .iter()
+                    .map(|patch| patch.matched_positions.len())
+                    .sum::<usize>(),
+            );
+        let mut instruction_keys = Vec::with_capacity(expected_len);
+        let mut resolved_params = Vec::with_capacity(expected_len);
+        let mut instruction_set = HashSet::new();
+        let mut touched_qubits = HashSet::new();
+        let old_instruction_set = self.instruction_set;
+        let old_qubit_count = self.qubit_count;
+        let mut old_entries = self.instruction_keys.into_iter().zip(self.resolved_params);
+
+        for step in steps {
+            match step {
+                PatchPlanStep::Replacements(patch) => {
+                    for replacement in &patch.replacements {
+                        if is_gphase_instruction(&replacement.instruction) {
+                            continue;
+                        }
+                        instruction_set.insert(replacement.key.clone());
+                        instruction_keys.push(replacement.key.clone());
+                        resolved_params.push(
+                            replacement
+                                .params
+                                .iter()
+                                .map(|value| match value {
+                                    ParameterValue::Fixed(value) => Parameter::from(*value),
+                                    ParameterValue::Param(parameter) => parameter.clone(),
+                                })
+                                .collect(),
+                        );
+                        touched_qubits.extend(replacement.qubits.iter().copied());
+                    }
+                }
+                PatchPlanStep::DropMatched => {
+                    old_entries.next()?;
+                }
+                PatchPlanStep::Keep(position) => {
+                    let (old_key, old_params) = old_entries.next()?;
+                    instruction_set.insert(old_key.clone());
+                    instruction_keys.push(old_key);
+                    resolved_params.push(old_params);
+                    touched_qubits.extend(operations[position].qubits.iter().copied());
+                }
+            }
+        }
+
+        if old_entries.next().is_some() || instruction_keys.len() != expected_len {
+            return None;
+        }
+        let qubit_count = touched_qubits.len();
+        let summary_changed =
+            instruction_set != old_instruction_set || qubit_count != old_qubit_count;
+        Some((
+            Self {
+                instruction_keys,
+                resolved_params,
+                instruction_set,
+                qubit_count,
+            },
+            summary_changed,
+        ))
+    }
+}
+
+struct BlockContext<'a> {
+    operations: &'a [Operation],
+    cache: &'a BlockMatchCache,
+}
+
+impl<'a> BlockContext<'a> {
+    /// Builds cached matching context for one linear operation block.
+    ///
+    /// Per-position instruction keys and resolved symbolic parameters are
+    /// cached once because rule matching probes the same operation many times
+    /// across anchors, rules, and commutation checks.
+    fn new(operations: &'a [Operation], cache: &'a BlockMatchCache) -> Result<Self, CompilerError> {
+        if operations.len() != cache.len() {
+            return Err(CompilerError::InvariantViolation(format!(
+                "rewrite block cache length {} does not match operation length {}",
+                cache.len(),
+                operations.len()
+            )));
+        }
+        Ok(Self { operations, cache })
     }
 
     fn len(&self) -> usize {
@@ -156,11 +410,11 @@ impl<'a> BlockContext<'a> {
     }
 
     fn key(&self, position: usize) -> &RewriteInstructionKey {
-        &self.instruction_keys[position]
+        &self.cache.instruction_keys[position]
     }
 
     fn params(&self, position: usize) -> &[Parameter] {
-        &self.resolved_params[position]
+        &self.cache.resolved_params[position]
     }
 }
 
@@ -193,6 +447,23 @@ impl CompiledRuleSet {
 
     fn get(&self, index: usize) -> &CompiledRule {
         &self.rules[index]
+    }
+
+    pub(super) fn max_match_reach(&self, config: &RewriteConfig) -> usize {
+        self.rules
+            .iter()
+            .filter(|rule| {
+                rule.kind != RuleKind::Commute
+                    && config.allows_kind(rule.kind)
+                    && rule.match_len <= config.max_pattern_len()
+            })
+            .map(|rule| {
+                rule.match_len
+                    .saturating_sub(1)
+                    .saturating_mul(config.max_window_ops())
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     pub(super) fn lowerable_rules(
@@ -300,51 +571,175 @@ fn push_compiled_rule(
     Ok(())
 }
 
-pub(super) fn select_rewrites_in_context(
-    circuit: &Circuit,
+/// Selects the rewrite patches for one block, optionally restricted to dirty
+/// anchor ranges from the incremental workset.
+///
+/// `anchor_ranges` encodes the workset contract:
+///
+/// - `None`: full scan of every anchor. Used for the first round and after
+///   any block-level summary change (instruction-set or qubit-count
+///   transition, global-phase involvement, unstable scope) that invalidates
+///   incremental state.
+/// - `Some(ranges)`: scan only anchors inside `ranges`. The caller guarantees
+///   that every anchor outside the ranges was proven candidate-free against
+///   block content it can still observe, because matching at an anchor reads
+///   at most `max_match_reach` operations ahead and all applied patches are
+///   covered by the ranges.
+/// - `Some(&[])`: the whole block was proven candidate-free in the previous
+///   round and is unchanged, so the call short-circuits to an empty patch
+///   set. This is the normal steady state of a converged block, not an error.
+///
+/// When the dirty ranges cover at least [`DIRTY_FULL_SCAN_PERCENT`] percent
+/// of the eligible anchors, the restriction is dropped and the block is
+/// scanned in full; the result is identical, only cheaper to compute.
+pub(super) fn select_rewrites_for_anchor_ranges(
     operations: &[Operation],
+    cache: &BlockMatchCache,
     rules: &CompiledRuleSet,
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
+    anchor_ranges: Option<&[Range<usize>]>,
 ) -> Result<Vec<RewritePatch>, CompilerError> {
-    let block = BlockContext::new(circuit, operations)?;
+    let block = BlockContext::new(operations, cache)?;
+    let mut anchors = anchors_for_ranges(block.len(), anchor_ranges);
+    if anchor_ranges.is_some() {
+        let eligible_total = (0..block.len())
+            .filter(|&anchor| is_eligible_anchor(&block, anchor, rules, config))
+            .count();
+        let dirty_eligible = anchors
+            .iter()
+            .filter(|&&anchor| is_eligible_anchor(&block, anchor, rules, config))
+            .count();
+        if eligible_total > 0
+            && dirty_eligible.saturating_mul(100)
+                >= eligible_total.saturating_mul(DIRTY_FULL_SCAN_PERCENT)
+        {
+            anchors = (0..block.len()).collect();
+        }
+    }
+    let scans = scan_anchors(&block, &anchors, rules, config, target_context);
     let mut candidates = Vec::new();
+    for scan in scans {
+        candidates.extend(scan?);
+    }
 
-    for anchor in 0..block.len() {
-        let operation = block.operation(anchor);
-        if config.skips_labeled_ops() && operation.label.is_some() {
+    select_candidate_patches(candidates, block.len(), target_context)
+}
+
+fn is_eligible_anchor(
+    block: &BlockContext<'_>,
+    anchor: usize,
+    rules: &CompiledRuleSet,
+    config: &RewriteConfig,
+) -> bool {
+    let operation = block.operation(anchor);
+    if config.skips_labeled_ops() && operation.label.is_some() {
+        return false;
+    }
+    rules
+        .candidates_for_first_instruction(block.key(anchor))
+        .iter()
+        .any(|&rule_index| {
+            let rule = rules.get(rule_index);
+            rule.kind != RuleKind::Commute
+                && config.allows_kind(rule.kind)
+                && rule.match_len <= config.max_pattern_len()
+        })
+}
+
+fn anchors_for_ranges(block_len: usize, ranges: Option<&[Range<usize>]>) -> Vec<usize> {
+    let Some(ranges) = ranges else {
+        return (0..block_len).collect();
+    };
+    let mut anchors = Vec::new();
+    let mut previous_end = 0;
+    for range in ranges {
+        let start = range.start.min(block_len).max(previous_end);
+        let end = range.end.min(block_len);
+        if start < end {
+            anchors.extend(start..end);
+            previous_end = end;
+        }
+    }
+    anchors
+}
+
+fn scan_anchors(
+    block: &BlockContext<'_>,
+    anchors: &[usize],
+    rules: &CompiledRuleSet,
+    config: &RewriteConfig,
+    target_context: Option<&TargetContext>,
+) -> Vec<Result<Vec<CandidatePatch>, CompilerError>> {
+    let scan = |&anchor: &usize| scan_anchor(block, anchor, rules, config, target_context);
+    if anchors.len() < PARALLEL_ANCHOR_THRESHOLD {
+        return anchors.iter().map(scan).collect();
+    }
+
+    use rayon::prelude::*;
+    anchors.par_iter().map(scan).collect()
+}
+
+fn scan_anchor(
+    block: &BlockContext<'_>,
+    anchor: usize,
+    rules: &CompiledRuleSet,
+    config: &RewriteConfig,
+    target_context: Option<&TargetContext>,
+) -> Result<Vec<CandidatePatch>, CompilerError> {
+    let mut candidates = Vec::new();
+    let operation = block.operation(anchor);
+    if config.skips_labeled_ops() && operation.label.is_some() {
+        return Ok(candidates);
+    }
+    let first_key = block.key(anchor);
+
+    for &rule_index in rules.candidates_for_first_instruction(first_key) {
+        let compiled = rules.get(rule_index);
+        if !rule_passes_static_filters(compiled, config, block, target_context) {
             continue;
         }
-        let first_key = block.key(anchor);
-
-        for &rule_index in rules.candidates_for_first_instruction(first_key) {
-            let compiled = rules.get(rule_index);
-            if !rule_passes_static_filters(compiled, config, &block, target_context) {
-                continue;
-            }
-            if let Some(candidate) = try_match_rule(
-                &block,
-                anchor,
-                compiled,
-                &rules.commutation,
-                config,
-                target_context,
-            )? {
-                candidates.push(candidate);
-            }
+        if let Some(candidate) = try_match_rule(
+            block,
+            anchor,
+            compiled,
+            &rules.commutation,
+            config,
+            target_context,
+        )? {
+            candidates.push(candidate);
         }
     }
 
+    Ok(candidates)
+}
+
+fn select_candidate_patches(
+    mut candidates: Vec<CandidatePatch>,
+    block_len: usize,
+    target_context: Option<&TargetContext>,
+) -> Result<Vec<RewritePatch>, CompilerError> {
     // Rank candidate patches by the local objective before taking any patch.
-    // Lower `after` cost is preferred; for equal outputs, higher `before` cost
-    // means the patch removed more expensive work. The remaining keys make the
-    // choice deterministic and prefer broader, smaller replacement patches
-    // near the front of the block. After sorting, the greedy pass below keeps
-    // only non-overlapping spans, so a selected patch owns every operation
-    // position it covers for this rewrite round.
+    // With an explicit target, prefer the patch that legalizes more unsupported
+    // operations so a cheap single-gate rewrite cannot occupy part of a better
+    // multi-operation lowering. The remaining keys make the choice deterministic.
     candidates.sort_by(|lhs, rhs| {
-        lhs.after
-            .cmp(&rhs.after)
+        let lhs_unsupported_reduction = lhs
+            .before
+            .unsupported_ops
+            .saturating_sub(lhs.after.unsupported_ops);
+        let rhs_unsupported_reduction = rhs
+            .before
+            .unsupported_ops
+            .saturating_sub(rhs.after.unsupported_ops);
+        let target_reduction_order = if target_context.is_some() {
+            rhs_unsupported_reduction.cmp(&lhs_unsupported_reduction)
+        } else {
+            std::cmp::Ordering::Equal
+        };
+
+        target_reduction_order
+            .then_with(|| lhs.after.cmp(&rhs.after))
             .then_with(|| lhs.before.cmp(&rhs.before).reverse())
             .then_with(|| {
                 rhs.patch
@@ -361,7 +756,7 @@ pub(super) fn select_rewrites_in_context(
             .then_with(|| lhs.patch.rule_id.cmp(&rhs.patch.rule_id))
     });
 
-    let mut occupied_spans = vec![false; block.len()];
+    let mut occupied_spans = vec![false; block_len];
     let mut patches = Vec::new();
     for candidate in candidates {
         let first_position = candidate.patch.first_position;
@@ -369,7 +764,7 @@ pub(super) fn select_rewrites_in_context(
         if first_position > last_position || last_position >= occupied_spans.len() {
             return Err(CompilerError::InvariantViolation(format!(
                 "rewrite candidate span {first_position}..={last_position} is outside block of length {}",
-                block.len()
+                block_len
             )));
         }
         if occupied_spans[first_position..=last_position]
@@ -419,7 +814,7 @@ fn rule_passes_static_filters(
     rule.kind != RuleKind::Commute
         && config.allows_kind(rule.kind)
         && rule.match_len <= config.max_pattern_len()
-        && rule.qubit_count <= block.qubit_count
+        && rule.qubit_count <= block.cache.qubit_count
         && rule_passes_target_filter(rule, target_context, block)
 }
 
@@ -442,7 +837,7 @@ fn rule_passes_target_filter(
 
     rule.match_keys
         .iter()
-        .all(|key| block.instruction_set.contains(key))
+        .all(|key| block.cache.instruction_set.contains(key))
         && rule
             .rewrite_keys
             .iter()
