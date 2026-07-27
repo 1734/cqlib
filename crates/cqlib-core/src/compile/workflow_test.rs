@@ -64,6 +64,21 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
     }
 }
 
+fn workflow_state_without_target_basis() -> WorkflowState {
+    let current = Circuit::new(1);
+    WorkflowState {
+        analysis: CircuitAnalysis::analyze(&current),
+        current,
+        changed: false,
+        steps: Vec::new(),
+        target_basis: None,
+        two_qubit_target: TwoQubitSynthesisTarget::unconstrained(),
+        device_metadata: None,
+        one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
+        pending_one_qubit_resynthesis: false,
+    }
+}
+
 fn binding_case(bindings: &[(&'static str, f64)]) -> Option<HashMap<&'static str, f64>> {
     Some(bindings.iter().copied().collect())
 }
@@ -293,9 +308,18 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
         "resynthesize.two_qubit_blocks.post_routing",
         "optimize.post_routing",
         "translate.target_basis",
+        "optimize.target_cleanup",
     ] {
         assert!(enhanced.step(name).unwrap().skipped, "{name}");
     }
+    assert_eq!(
+        enhanced
+            .step("optimize.target_cleanup")
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("no explicit target basis configured")
+    );
     assert!(
         enhanced
             .step("optimize.one_qubit_fixed_point")
@@ -306,6 +330,33 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             .contains("max_rounds=4")
     );
     assert!(enhanced.circuit.operations().is_empty());
+}
+
+#[test]
+fn enhanced_explicit_basis_runs_target_cleanup() {
+    let mut circuit = Circuit::new(1);
+    circuit.rz(Qubit::new(0), 0.25).unwrap();
+    let target_gates = [StandardGate::RZ, StandardGate::X2P, StandardGate::CZ];
+    let target_basis = target_gates
+        .iter()
+        .copied()
+        .map(Instruction::Standard)
+        .collect::<Vec<_>>();
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Basis(target_basis.clone()),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    let cleanup = result.step("optimize.target_cleanup").unwrap();
+    assert!(!cleanup.skipped);
+    assert!(
+        standard_ops(&result.circuit)
+            .iter()
+            .all(|gate| target_gates.contains(gate))
+    );
 }
 
 #[test]
@@ -1793,7 +1844,7 @@ fn workflow_config_can_build_enhanced_workflow() {
 }
 
 #[test]
-fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
+fn target_cleanup_config_only_available_for_explicit_basis() {
     let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
     let target_basis = vec![
         Instruction::Standard(StandardGate::RZ),
@@ -1807,13 +1858,12 @@ fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
         RewritePhase::PostDecomposition,
         RewritePhase::PostRouting,
     ] {
-        let config = workflow.rewrite_config_for_state(phase, &state).unwrap();
+        let config = workflow.rewrite_config(phase).unwrap();
         assert!(config.target_instruction_basis().is_none());
     }
 
-    let cleanup_config = workflow
-        .rewrite_config_for_state(RewritePhase::TargetCleanup, &state)
-        .unwrap();
+    let cleanup_config = workflow.target_cleanup_config(&state).unwrap();
+    let cleanup_config = cleanup_config.unwrap();
     let cleanup_basis = cleanup_config.target_instruction_basis().unwrap();
     assert_eq!(cleanup_basis.len(), target_basis.len());
     assert!(matches!(
@@ -1824,6 +1874,13 @@ fn target_basis_constraints_only_apply_to_target_cleanup_rewrite_phase() {
             Instruction::Standard(StandardGate::CZ)
         ]
     ));
+
+    assert!(
+        workflow
+            .target_cleanup_config(&workflow_state_without_target_basis())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

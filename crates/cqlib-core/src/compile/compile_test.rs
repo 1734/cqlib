@@ -1721,7 +1721,7 @@ fn compile_ising_circuit_on_grid_device_to_ising_native_basis() {
 // ── Enhanced mode ──
 
 #[test]
-fn compile_enhanced_ghz3_routes_and_cleans_up() {
+fn compile_enhanced_ghz3_runs_post_routing_and_skips_target_cleanup() {
     let circuit = ghz_circuit(3);
     let device = Device::line("test-device", 3)
         .unwrap()
@@ -1757,11 +1757,16 @@ fn compile_enhanced_ghz3_routes_and_cleans_up() {
             .iter()
             .any(|step| step.name == "optimize.post_routing" && !step.skipped)
     );
-    assert!(
-        result
-            .steps
-            .iter()
-            .any(|step| step.name == "optimize.target_cleanup" && !step.skipped)
+    let target_cleanup = result
+        .steps
+        .iter()
+        .find(|step| step.name == "optimize.target_cleanup")
+        .unwrap();
+    assert!(target_cleanup.skipped);
+    assert!(!target_cleanup.changed);
+    assert_eq!(
+        target_cleanup.reason.as_deref(),
+        Some("no explicit target basis configured")
     );
     for op in result.circuit.operations() {
         assert!(matches!(

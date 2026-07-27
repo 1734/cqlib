@@ -218,8 +218,7 @@ impl CompilerWorkflow {
             Canonicalizer::production().transform(circuit, Some(analysis))
         })?;
         self.apply_definition_decomposition(state)?;
-        let rewrite_config =
-            self.rewrite_config_for_state(RewritePhase::PreDecomposition, state)?;
+        let rewrite_config = self.rewrite_config(RewritePhase::PreDecomposition)?;
         state.apply_transform(
             "optimization",
             "optimize.pre_decomposition",
@@ -258,8 +257,7 @@ impl CompilerWorkflow {
     }
 
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let rewrite_config =
-            self.rewrite_config_for_state(RewritePhase::PostDecomposition, state)?;
+        let rewrite_config = self.rewrite_config(RewritePhase::PostDecomposition)?;
         state.apply_transform(
             "optimization",
             "optimize.post_decomposition",
@@ -297,15 +295,21 @@ impl CompilerWorkflow {
     fn lower_target(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         self.apply_target_translation(state)?;
         if self.config.mode == CompileMode::Enhanced {
-            let cleanup_config =
-                self.rewrite_config_for_state(RewritePhase::TargetCleanup, state)?;
-            state.apply_transform(
-                "optimization",
-                "optimize.target_cleanup",
-                |circuit, analysis| {
-                    KnowledgeRewriter::new(cleanup_config).transform(circuit, Some(analysis))
-                },
-            )?;
+            if let Some(cleanup_config) = self.target_cleanup_config(state)? {
+                state.apply_transform(
+                    "optimization",
+                    "optimize.target_cleanup",
+                    |circuit, analysis| {
+                        KnowledgeRewriter::new(cleanup_config).transform(circuit, Some(analysis))
+                    },
+                )?;
+            } else {
+                state.record_skipped(
+                    "optimization",
+                    "optimize.target_cleanup",
+                    "no explicit target basis configured",
+                );
+            }
         }
         if matches!(
             self.config.target,
@@ -480,21 +484,17 @@ impl CompilerWorkflow {
         Ok(config)
     }
 
-    fn rewrite_config_for_state(
+    fn target_cleanup_config(
         &self,
-        phase: RewritePhase,
         state: &WorkflowState,
-    ) -> Result<RewriteConfig, CompilerError> {
-        let config = self.rewrite_config(phase)?;
-        if !matches!(phase, RewritePhase::TargetCleanup) {
-            return Ok(config);
-        }
-
+    ) -> Result<Option<RewriteConfig>, CompilerError> {
         let Some(target_basis) = state.target_basis.as_deref() else {
-            return Ok(config);
+            return Ok(None);
         };
 
-        config.with_target_instructions(target_basis.to_vec())
+        self.rewrite_config(RewritePhase::TargetCleanup)?
+            .with_target_instructions(target_basis.to_vec())
+            .map(Some)
     }
 
     fn apply_definition_decomposition(
@@ -748,7 +748,7 @@ impl CompilerWorkflow {
             return Ok(());
         }
 
-        let rewrite_config = self.rewrite_config_for_state(RewritePhase::PostRouting, state)?;
+        let rewrite_config = self.rewrite_config(RewritePhase::PostRouting)?;
         state.apply_transform(
             "optimization",
             "optimize.post_routing",
