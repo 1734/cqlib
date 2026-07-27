@@ -22,7 +22,7 @@ use crate::compile::test_utils::{
     assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
 };
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
-use crate::compile::transform::{CircuitAnalysis, OptimizeOneQubitRuns};
+use crate::compile::transform::{CircuitAnalysis, OptimizeOneQubitRuns, TransformOutcome};
 use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
     SabreRoutingFailure, compile,
@@ -77,6 +77,69 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
         pending_one_qubit_resynthesis: false,
     }
+}
+
+#[test]
+fn apply_transform_preserves_current_storage_on_unchanged() {
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(Qubit::new(0)).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    let operation_ptr = state.current.operations().as_ptr();
+    let analysis = state.analysis.clone();
+
+    let changed = state
+        .apply_transform("test", "unchanged", |_circuit, _analysis| {
+            Ok(TransformOutcome::Unchanged)
+        })
+        .unwrap();
+
+    assert!(!changed);
+    assert_eq!(state.current.operations().as_ptr(), operation_ptr);
+    assert_eq!(state.analysis, analysis);
+    assert!(!state.changed);
+    assert_eq!(state.steps.len(), 1);
+    assert!(!state.steps[0].changed);
+}
+
+#[test]
+fn apply_transform_adopts_changed_circuit_and_refreshes_analysis() {
+    let mut state = workflow_state_without_target_basis();
+    let mut replacement = Circuit::new(1);
+    replacement.measure_bits([Qubit::new(0)]).unwrap();
+
+    let changed = state
+        .apply_transform("test", "changed", |_circuit, _analysis| {
+            Ok(TransformOutcome::Changed(replacement))
+        })
+        .unwrap();
+
+    assert!(changed);
+    assert!(state.changed);
+    assert!(state.analysis.has_measurement);
+    assert!(state.steps[0].changed);
+}
+
+#[test]
+fn apply_transform_error_leaves_workflow_state_untouched() {
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(Qubit::new(0)).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    let operation_ptr = state.current.operations().as_ptr();
+    let analysis = state.analysis.clone();
+
+    let error = state
+        .apply_transform("test", "error", |_circuit, _analysis| {
+            Err(CompilerError::InvariantViolation(
+                "expected failure".to_string(),
+            ))
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, CompilerError::InvariantViolation(_)));
+    assert_eq!(state.current.operations().as_ptr(), operation_ptr);
+    assert_eq!(state.analysis, analysis);
+    assert!(!state.changed);
+    assert!(state.steps.is_empty());
 }
 
 fn binding_case(bindings: &[(&'static str, f64)]) -> Option<HashMap<&'static str, f64>> {

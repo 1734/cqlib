@@ -16,13 +16,13 @@ use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     Circuit, ClassicalControlOp, ClassicalExpr, Instruction, Parameter, Qubit, StandardGate,
 };
-use crate::compile::transform::{TransformResult, Transformer};
+use crate::compile::transform::{ResolvedTransform, TransformerTestExt};
 
 const EPSILON: f64 = 1e-9;
 
-fn run(circuit: &Circuit) -> TransformResult {
+fn run(circuit: &Circuit) -> ResolvedTransform {
     CommutativeCancellation::new()
-        .transform(circuit, None)
+        .transform_resolved(circuit, None)
         .unwrap()
 }
 

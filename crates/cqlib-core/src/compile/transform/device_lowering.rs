@@ -44,7 +44,7 @@ use crate::compile::knowledge::{
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
 use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use crate::device::{Device, PhysicalQubit};
 use ndarray::Array2;
 use num_complex::Complex64;
@@ -90,7 +90,7 @@ impl Transformer for DeviceLowerer<'_> {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let library = RuleLibrary::builtin_rules()
             .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
         let scan = collect_root_states(circuit)?;
@@ -136,10 +136,7 @@ impl Transformer for DeviceLowerer<'_> {
             )
         });
         if !scan.has_gphase && all_roots_native && !has_fusible_one_qubit_run(circuit) {
-            return Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
         }
         DeviceCircuitLowerer::run(circuit, self.device, library, &planner)
     }
@@ -165,7 +162,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
         device: &'a Device,
         library: &'a RuleLibrary,
         planner: &'a DevicePlanner<'a>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut lowerer = Self {
@@ -191,9 +188,10 @@ impl<'a> DeviceCircuitLowerer<'a> {
         let circuit = lowerer
             .rebuild
             .finish(source.qubits(), operations, global_phase)?;
-        Ok(TransformResult {
-            circuit,
-            changed: lowerer.changed,
+        Ok(if lowerer.changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
         })
     }
 

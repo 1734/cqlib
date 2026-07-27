@@ -18,7 +18,7 @@ use crate::circuit::{
     StandardGate, UnitaryGate, ValueInstruction, ValueOperation, circuit_to_matrix,
 };
 use crate::compile::test_utils::generated_small_matrix_circuit;
-use crate::compile::transform::Transformer;
+use crate::compile::transform::TransformerTestExt;
 use ndarray::array;
 use num_complex::Complex64;
 use proptest::prelude::*;
@@ -347,7 +347,7 @@ fn canonicalizer_implements_transformer_trait() {
     circuit.i(Qubit::new(0)).unwrap();
 
     let transformer = &Canonicalizer::production();
-    let result = transformer.transform(&circuit, None).unwrap();
+    let result = transformer.transform_resolved(&circuit, None).unwrap();
 
     assert!(result.changed);
     assert!(result.circuit.operations().is_empty());

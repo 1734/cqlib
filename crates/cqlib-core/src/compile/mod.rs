@@ -77,7 +77,7 @@
 //!
 //! The workflow preserves classical-control structure. Transforms that support
 //! control-flow bodies recurse into them and report whether they changed the IR
-//! through [`TransformResult`](transform::TransformResult). The workflow does
+//! through [`TransformOutcome`](transform::TransformOutcome). The workflow does
 //! not pre-scan control-flow trees to decide whether a transform should run.
 //! This module does not currently lower dynamic classical control into a
 //! hardware runtime instruction format.

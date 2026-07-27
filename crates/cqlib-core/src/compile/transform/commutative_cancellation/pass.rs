@@ -23,7 +23,7 @@ use crate::compile::transform::commutative_cancellation::sets::{
     OperationView, find_cancellable_ops, is_unitary_gate_like,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::transformer::{TransformResult, Transformer};
+use crate::compile::transform::transformer::{TransformOutcome, Transformer};
 use smallvec::SmallVec;
 
 /// Global self-inverse cancellation over exact commutation sets.
@@ -64,7 +64,7 @@ impl Transformer for CommutativeCancellation {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         CancellationPass::run(circuit, &self.checker)
     }
 }
@@ -79,7 +79,7 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
     fn run(
         source: &'source Circuit,
         checker: &'checker CommutationChecker,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut pass = Self {
@@ -89,18 +89,12 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
         };
         let (operations, changed) = pass.process_sequence(source.operations(), &root_classical)?;
         if !changed {
-            return Ok(TransformResult {
-                circuit: source.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
         }
         let circuit = pass
             .rebuild
             .finish(source.qubits(), operations, source.global_phase())?;
-        Ok(TransformResult {
-            circuit,
-            changed: true,
-        })
+        Ok(TransformOutcome::Changed(circuit))
     }
 
     /// Processes one flat operation sequence, recursing into control flow.

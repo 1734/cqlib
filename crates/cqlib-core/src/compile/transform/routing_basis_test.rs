@@ -15,7 +15,7 @@ use super::LowerToRoutingBasis;
 use crate::circuit::{Circuit, Instruction, MCGate, ParameterValue, Qubit, StandardGate};
 use crate::compile::CompilerError;
 use crate::compile::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
-use crate::compile::transform::Transformer;
+use crate::compile::transform::TransformerTestExt;
 
 fn assert_no_gate_like_operation_exceeds_two_qubits(circuit: &Circuit) {
     for operation in circuit.operations() {
@@ -45,7 +45,7 @@ fn routing_basis_lowers_ccx_to_two_qubit_operations() {
     let source = ccx_circuit();
 
     let result = LowerToRoutingBasis::default()
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap();
 
     assert!(result.changed);
@@ -86,7 +86,7 @@ fn routing_basis_lowers_trivial_mcx_to_two_qubit_operations() {
         .unwrap();
 
     let result = LowerToRoutingBasis::default()
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap();
 
     assert!(result.changed);
@@ -105,7 +105,7 @@ fn routing_basis_prefers_cz_for_cz_only_basis() {
         Instruction::Standard(StandardGate::GPhase),
     ]));
 
-    let result = transform.transform(&source, None).unwrap();
+    let result = transform.transform_resolved(&source, None).unwrap();
     let gates = standard_ops(&result.circuit);
 
     assert!(!gates.contains(&StandardGate::CCX));
@@ -124,7 +124,7 @@ fn routing_basis_preserves_existing_two_qubit_standard_gates() {
         .unwrap();
 
     let result = LowerToRoutingBasis::default()
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap();
 
     assert!(!result.changed);
@@ -144,7 +144,7 @@ fn routing_basis_fast_path_does_not_run_optimization_rewrites() {
     source.cx(q0, q1).unwrap();
 
     let result = LowerToRoutingBasis::default()
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap();
 
     assert!(!result.changed);
@@ -163,7 +163,7 @@ fn routing_basis_validation_reports_route_sabre_contract() {
         .unwrap();
 
     let err = LowerToRoutingBasis::default()
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap_err();
 
     assert!(matches!(

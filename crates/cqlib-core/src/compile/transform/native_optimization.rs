@@ -50,7 +50,7 @@ use crate::compile::transform::resynthesis::{
 };
 use crate::compile::transform::target_basis::{TargetBasisCost, TargetBasisCostModel};
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, DeviceLowerer, TransformResult, Transformer,
+    Canonicalizer, CircuitAnalysis, DeviceLowerer, TransformOutcome, Transformer,
 };
 use crate::device::Device;
 use ndarray::Array2;
@@ -117,7 +117,7 @@ impl<'a> NativeOptimizer<'a> {
     ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
         let initial = Canonicalizer::production()
             .transform(circuit, None)?
-            .circuit;
+            .into_circuit(circuit);
         self.device.validate_circuit(&initial)?;
         let mut current = initial.clone();
         let mut best = initial;
@@ -135,43 +135,73 @@ impl<'a> NativeOptimizer<'a> {
         let mut restored_best = false;
         let mut resynthesis_session = NativeResynthesisSession::new(policy);
 
-        while rounds < self.max_rounds && stale < self.max_stale_rounds {
+        'optimization: while rounds < self.max_rounds && stale < self.max_stale_rounds {
             rounds += 1;
-            let resynthesized = resynthesize_two_qubit_blocks_incremental(
+            let resynthesis_outcome = resynthesize_two_qubit_blocks_incremental(
                 &current,
                 self.resynthesis.clone(),
                 context.clone(),
                 &mut resynthesis_session,
             )?;
-            let locally_optimized = OptimizeNativeLocalGates::new(context.clone())
-                .transform(&resynthesized.circuit, None)?;
+            let resynthesis_changed = resynthesis_outcome.changed();
+            let resynthesized = match &resynthesis_outcome {
+                TransformOutcome::Unchanged => &current,
+                TransformOutcome::Changed(circuit) => circuit,
+            };
+            let local_outcome =
+                OptimizeNativeLocalGates::new(context.clone()).transform(resynthesized, None)?;
+            let local_changed = local_outcome.changed();
             // A fully stable round makes the remaining passes deterministic
             // no-ops: lowering and canonicalization reproduce `current` (the
             // entry point already validated it as exact-native), so this is
             // the `candidate == current` break below without paying for the
             // full-circuit lowering, canonicalization, validation, and cost
             // evaluation in between.
-            if !resynthesized.changed && !locally_optimized.changed {
+            if !resynthesis_changed && !local_changed {
                 break;
             }
-            let locally_optimized = locally_optimized.circuit;
-            let legalized =
-                match DeviceLowerer::new(self.device).transform(&locally_optimized, None) {
-                    Ok(result) => result.circuit,
-                    // Frame propagation is speculative: materializing a combined
-                    // phase as RZ may be impossible on devices whose discrete
-                    // phase gates cannot synthesize arbitrary RZ. Discard only
-                    // that local candidate and retain this round's 2Q result.
-                    Err(CompilerError::DeviceLoweringFailed(_)) => {
-                        DeviceLowerer::new(self.device)
-                            .transform(&resynthesized.circuit, None)?
-                            .circuit
+            let legalized = match local_outcome {
+                TransformOutcome::Changed(locally_optimized) => {
+                    match DeviceLowerer::new(self.device).transform(&locally_optimized, None) {
+                        Ok(TransformOutcome::Unchanged) => locally_optimized,
+                        Ok(TransformOutcome::Changed(legalized)) => legalized,
+                        // Frame propagation is speculative: materializing a combined
+                        // phase as RZ may be impossible on devices whose discrete
+                        // phase gates cannot synthesize arbitrary RZ. Discard only
+                        // that local candidate and retain this round's 2Q result.
+                        Err(CompilerError::DeviceLoweringFailed(_)) => {
+                            let fallback = match &resynthesis_outcome {
+                                TransformOutcome::Unchanged => &current,
+                                TransformOutcome::Changed(circuit) => circuit,
+                            };
+                            match DeviceLowerer::new(self.device).transform(fallback, None)? {
+                                TransformOutcome::Changed(legalized) => legalized,
+                                TransformOutcome::Unchanged => match resynthesis_outcome {
+                                    TransformOutcome::Changed(resynthesized) => resynthesized,
+                                    TransformOutcome::Unchanged => break 'optimization,
+                                },
+                            }
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
-                };
-            let candidate = Canonicalizer::production()
-                .transform(&legalized, None)?
-                .circuit;
+                }
+                TransformOutcome::Unchanged => {
+                    let resynthesized = match resynthesis_outcome {
+                        TransformOutcome::Changed(circuit) => circuit,
+                        TransformOutcome::Unchanged => unreachable!(
+                            "a stable native optimization round exits before legalization"
+                        ),
+                    };
+                    match DeviceLowerer::new(self.device).transform(&resynthesized, None)? {
+                        TransformOutcome::Unchanged => resynthesized,
+                        TransformOutcome::Changed(legalized) => legalized,
+                    }
+                }
+            };
+            let candidate = match Canonicalizer::production().transform(&legalized, None)? {
+                TransformOutcome::Unchanged => legalized,
+                TransformOutcome::Changed(candidate) => candidate,
+            };
             // Debug builds validate every round to keep the safety net tight
             // while developing; release builds validate only accepted
             // candidates. The terminal workflow validation remains the final
@@ -407,7 +437,7 @@ impl Transformer for OptimizeNativeLocalGates {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let policy = LocalOptimizationPolicy::Device(self.device_context.clone());
         LocalOneQPass::run(circuit, &policy)
     }
@@ -425,7 +455,7 @@ pub(crate) enum LocalOptimizationPolicy {
 pub(crate) fn optimize_one_qubit_runs_with_policy(
     circuit: &Circuit,
     policy: &LocalOptimizationPolicy,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     LocalOneQPass::run(circuit, policy)
 }
 
@@ -445,7 +475,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
     fn run(
         source: &'source Circuit,
         policy: &'policy LocalOptimizationPolicy,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut pass = Self {
@@ -461,9 +491,10 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         let circuit = pass
             .rebuild
             .finish(source.qubits(), rewrite.operations, global_phase)?;
-        Ok(TransformResult {
-            circuit,
-            changed: rewrite.changed,
+        Ok(if rewrite.changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
         })
     }
 

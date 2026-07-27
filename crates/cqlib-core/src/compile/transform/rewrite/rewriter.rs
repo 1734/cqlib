@@ -31,7 +31,7 @@ use crate::compile::transform::rewrite::matcher::{
 
 use crate::compile::transform::lowering_support::LoweringTarget;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{TransformResult, Transformer};
+use crate::compile::transform::{TransformOutcome, Transformer};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -401,7 +401,7 @@ fn builtin_compiled_rules() -> Result<Arc<CompiledRuleSet>, CompilerError> {
     }
 }
 
-// Transformer integration exposes only the generic transform result; direct
+// Transformer integration exposes only the generic transform outcome; direct
 // callers should use `KnowledgeRewriter::run` when rewrite statistics matter.
 impl Transformer for KnowledgeRewriter {
     fn name(&self) -> &'static str {
@@ -412,11 +412,12 @@ impl Transformer for KnowledgeRewriter {
         &self,
         circuit: &Circuit,
         _analysis: Option<&crate::compile::transform::CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let result = self.run(circuit)?;
-        Ok(TransformResult {
-            circuit: result.circuit,
-            changed: result.changed,
+        Ok(if result.changed {
+            TransformOutcome::Changed(result.circuit)
+        } else {
+            TransformOutcome::Unchanged
         })
     }
 }

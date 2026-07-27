@@ -32,7 +32,7 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::transform::decompose::unitary::DeviceTwoQubitSynthesisContext;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::smallvec;
 use std::collections::{HashMap, HashSet};
 
@@ -90,7 +90,7 @@ impl Transformer for ResynthesizeTwoQubitBlocks {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         resynthesize_two_qubit_blocks_with_device(
             circuit,
             self.config.clone(),
@@ -101,13 +101,13 @@ impl Transformer for ResynthesizeTwoQubitBlocks {
 
 /// Runs numeric two-qubit block resynthesis on `circuit`.
 ///
-/// The returned circuit is unchanged when the input has no fixed numeric
+/// Returns [`TransformOutcome::Unchanged`] when the input has no fixed numeric
 /// two-qubit standard gates or when every candidate fails the strict
 /// improvement and commutation checks.
 pub fn resynthesize_two_qubit_blocks(
     circuit: &Circuit,
     config: TwoQubitBlockResynthesisConfig,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     resynthesize_two_qubit_blocks_with_device(circuit, config, None)
 }
 
@@ -115,12 +115,9 @@ fn resynthesize_two_qubit_blocks_with_device(
     circuit: &Circuit,
     config: TwoQubitBlockResynthesisConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     if !has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit) {
-        return Ok(TransformResult {
-            circuit: circuit.clone(),
-            changed: false,
-        });
+        return Ok(TransformOutcome::Unchanged);
     }
 
     let pass = ResynthesisPass {
@@ -139,7 +136,7 @@ pub(crate) fn resynthesize_two_qubit_blocks_incremental(
     config: TwoQubitBlockResynthesisConfig,
     device_context: DeviceTwoQubitSynthesisContext,
     session: &mut NativeResynthesisSession,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     session.begin_round(&config);
     let result = ResynthesisPass {
         source: circuit,
@@ -172,13 +169,13 @@ struct SequenceRewrite {
 }
 
 impl<'a, 'session> ResynthesisPass<'a, 'session> {
-    fn run(self) -> Result<TransformResult, CompilerError> {
+    fn run(self) -> Result<TransformOutcome, CompilerError> {
         self.run_with_stats().map(|(result, _)| result)
     }
 
     fn run_with_stats(
         mut self,
-    ) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
+    ) -> Result<(TransformOutcome, TwoQubitSynthesisCacheStats), CompilerError> {
         let root_classical = self.rebuild.root_classical().clone();
         let rewrite = self.process_sequence(
             self.source.operations(),
@@ -193,13 +190,12 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
             self.rebuild
                 .finish(self.source.qubits(), rewrite.operations, global_phase)?;
         let stats = self.synthesis_cache.stats();
-        Ok((
-            TransformResult {
-                circuit,
-                changed: rewrite.changed,
-            },
-            stats,
-        ))
+        let outcome = if rewrite.changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
+        };
+        Ok((outcome, stats))
     }
 
     fn process_sequence(

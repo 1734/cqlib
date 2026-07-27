@@ -24,7 +24,7 @@ use crate::compile::transform::native_optimization::{
     LocalOptimizationPolicy, optimize_one_qubit_runs_with_policy,
 };
 use crate::compile::transform::target_basis::TargetBasisCostModel;
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 
 /// Exact one-qubit optimization for logical or explicit-basis workflows.
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ impl Transformer for OptimizeOneQubitRuns {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         optimize_one_qubit_runs_with_policy(circuit, &self.policy)
     }
 }

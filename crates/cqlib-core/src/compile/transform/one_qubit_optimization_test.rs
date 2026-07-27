@@ -13,6 +13,7 @@
 use super::*;
 use crate::circuit::{ClassicalControlOp, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::test_utils::assert_compiled_circuit_equivalent;
+use crate::compile::transform::TransformerTestExt;
 
 #[test]
 fn logical_fuses_numeric_run_to_one_u() {
@@ -23,10 +24,10 @@ fn logical_fuses_numeric_run_to_one_u() {
     circuit.rz(q0, 0.7).unwrap();
 
     let first = OptimizeOneQubitRuns::logical()
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     let second = OptimizeOneQubitRuns::logical()
-        .transform(&first.circuit, None)
+        .transform_resolved(&first.circuit, None)
         .unwrap();
 
     assert!(first.changed);
@@ -49,7 +50,7 @@ fn logical_run_crosses_disjoint_qubit_operation() {
     circuit.rz(q0, -0.3).unwrap();
 
     let result = OptimizeOneQubitRuns::logical()
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -69,7 +70,7 @@ fn basis_uses_lowered_cost_and_keeps_exact_semantics() {
     ])
     .unwrap();
 
-    let result = optimizer.transform(&circuit, None).unwrap();
+    let result = optimizer.transform_resolved(&circuit, None).unwrap();
 
     assert!(result.changed);
     assert!(result.circuit.operations().is_empty());
@@ -92,7 +93,7 @@ fn labeled_gate_is_a_boundary() {
     circuit.rz(q0, -0.3).unwrap();
 
     let result = OptimizeOneQubitRuns::logical()
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(!result.changed);
@@ -112,7 +113,7 @@ fn optimizer_recurses_into_control_flow_bodies() {
         .unwrap();
 
     let result = OptimizeOneQubitRuns::logical()
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -142,7 +143,7 @@ fn measurement_flushes_or_discards_pending_frame_safely() {
     circuit.measure_bits([q0]).unwrap();
 
     let result = OptimizeOneQubitRuns::logical()
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);

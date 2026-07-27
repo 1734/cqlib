@@ -19,7 +19,7 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::knowledge::KnowledgeInstructionKey;
 use crate::compile::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
-use crate::compile::transform::Transformer;
+use crate::compile::transform::TransformerTestExt;
 
 fn target_basis(gates: &[StandardGate]) -> Vec<Instruction> {
     gates.iter().copied().map(Instruction::Standard).collect()
@@ -28,7 +28,7 @@ fn target_basis(gates: &[StandardGate]) -> Vec<Instruction> {
 fn run_target_lowering(circuit: &Circuit, basis: &[StandardGate]) -> Circuit {
     TargetBasisLowerer::new(target_basis(basis))
         .unwrap()
-        .transform(circuit, None)
+        .transform_resolved(circuit, None)
         .unwrap()
         .circuit
 }
@@ -52,7 +52,7 @@ fn assert_target_lowering_fails_with(
 ) {
     let err = TargetBasisLowerer::new(target_basis(basis))
         .unwrap()
-        .transform(circuit, None)
+        .transform_resolved(circuit, None)
         .unwrap_err();
     let CompilerError::InvalidInput(message) = err else {
         panic!("expected invalid input error, got {err:?}");

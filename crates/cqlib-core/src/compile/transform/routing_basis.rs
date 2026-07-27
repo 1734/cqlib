@@ -24,7 +24,7 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::transform::rebuild::CircuitRebuildContext;
 use crate::compile::transform::{
-    CircuitAnalysis, KnowledgeRewriter, RewriteConfig, TransformResult, Transformer,
+    CircuitAnalysis, KnowledgeRewriter, RewriteConfig, TransformOutcome, Transformer,
 };
 
 /// Lowers gate-like operations to SABRE's 0/1/2-qubit input contract.
@@ -97,22 +97,16 @@ impl Transformer for LowerToRoutingBasis {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         if !has_unroutable_gate_like_operation(circuit.operations()) {
-            return Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
         }
 
         if can_directly_lower_top_level_ccx(circuit.operations()) {
             let circuit =
                 directly_lower_top_level_ccx(circuit, self.preferred_ccx_two_qubit_gate())?;
             validate_routing_basis_contract(circuit.operations())?;
-            return Ok(TransformResult {
-                circuit,
-                changed: true,
-            });
+            return Ok(TransformOutcome::Changed(circuit));
         }
 
         let config =
@@ -125,8 +119,16 @@ impl Transformer for LowerToRoutingBasis {
             }
         };
 
-        validate_routing_basis_contract(result.circuit.operations())?;
-        Ok(result)
+        match result {
+            TransformOutcome::Unchanged => {
+                validate_routing_basis_contract(circuit.operations())?;
+                Ok(TransformOutcome::Unchanged)
+            }
+            TransformOutcome::Changed(lowered) => {
+                validate_routing_basis_contract(lowered.operations())?;
+                Ok(TransformOutcome::Changed(lowered))
+            }
+        }
     }
 }
 

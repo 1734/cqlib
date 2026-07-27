@@ -59,7 +59,7 @@ use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer, KnowledgeRewriter,
     LayoutObjective, LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
-    RewriteConfig, TargetBasisLowerer, TransformResult, Transformer,
+    RewriteConfig, TargetBasisLowerer, TransformOutcome, Transformer,
     TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
 };
 use crate::device::{Device, Topology};
@@ -102,14 +102,17 @@ impl WorkflowState {
         &mut self,
         stage: &'static str,
         name: &'static str,
-        transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformResult, CompilerError>,
-    ) -> Result<(), CompilerError> {
-        let TransformResult { circuit, changed } = transform(&self.current, &self.analysis)?;
-        if changed {
-            self.analysis = CircuitAnalysis::analyze(&circuit);
-        }
-        self.current = circuit;
-        self.changed |= changed;
+        transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformOutcome, CompilerError>,
+    ) -> Result<bool, CompilerError> {
+        let changed = match transform(&self.current, &self.analysis)? {
+            TransformOutcome::Unchanged => false,
+            TransformOutcome::Changed(circuit) => {
+                self.analysis = CircuitAnalysis::analyze(&circuit);
+                self.current = circuit;
+                self.changed = true;
+                true
+            }
+        };
         self.steps.push(WorkflowStepReport {
             stage,
             name,
@@ -117,7 +120,7 @@ impl WorkflowState {
             skipped: false,
             reason: None,
         });
-        Ok(())
+        Ok(changed)
     }
 
     fn record_skipped(
@@ -226,7 +229,8 @@ impl CompilerWorkflow {
             |circuit, analysis| {
                 KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
             },
-        )
+        )?;
+        Ok(())
     }
 
     /// Lowers opaque unitary and multi-controlled operations.
@@ -349,7 +353,8 @@ impl CompilerWorkflow {
     fn lower_output(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         state.apply_transform("output", "canonicalize.output", |circuit, analysis| {
             Canonicalizer::production().transform(circuit, Some(analysis))
-        })
+        })?;
+        Ok(())
     }
 
     fn lower_device_instructions(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -366,7 +371,8 @@ impl CompilerWorkflow {
             "translation",
             "lower.device_instructions",
             |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
-        )
+        )?;
+        Ok(())
     }
 
     fn canonicalize_native_input(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -504,7 +510,8 @@ impl CompilerWorkflow {
     ) -> Result<(), CompilerError> {
         state.apply_transform("init", "decompose.definitions", |circuit, analysis| {
             DecomposeDefinitions.transform(circuit, Some(analysis))
-        })
+        })?;
+        Ok(())
     }
 
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -524,7 +531,8 @@ impl CompilerWorkflow {
         };
         state.apply_transform("translation", "decompose.unitary", |circuit, analysis| {
             decomposer.transform(circuit, Some(analysis))
-        })
+        })?;
+        Ok(())
     }
 
     fn unitary_decompose_config_for_state(&self, state: &WorkflowState) -> UnitaryDecomposeConfig {
@@ -538,7 +546,8 @@ impl CompilerWorkflow {
         let config = self.mc_gate_decompose_config();
         state.apply_transform("translation", "decompose.mc_gates", |circuit, analysis| {
             DecomposeMcGates::new(config).transform(circuit, Some(analysis))
-        })
+        })?;
+        Ok(())
     }
 
     fn apply_two_qubit_resynthesis(
@@ -561,7 +570,8 @@ impl CompilerWorkflow {
         };
         state.apply_transform(stage, name, |circuit, analysis| {
             resynthesizer.transform(circuit, Some(analysis))
-        })
+        })?;
+        Ok(())
     }
 
     fn apply_post_routing_resynthesis(
@@ -618,7 +628,8 @@ impl CompilerWorkflow {
             |circuit, analysis| {
                 LowerToRoutingBasis::new(preferred_basis).transform(circuit, Some(analysis))
             },
-        )
+        )?;
+        Ok(())
     }
 
     fn mc_gate_decompose_config(&self) -> McGateDecomposeConfig {
@@ -756,7 +767,8 @@ impl CompilerWorkflow {
             |circuit, analysis| {
                 KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
             },
-        )
+        )?;
+        Ok(())
     }
 
     fn apply_commutative_cancellation(
@@ -766,8 +778,7 @@ impl CompilerWorkflow {
     ) -> Result<bool, CompilerError> {
         state.apply_transform("optimization", name, |circuit, analysis| {
             CommutativeCancellation::new().transform(circuit, Some(analysis))
-        })?;
-        Ok(state.steps.last().is_some_and(|step| step.changed))
+        })
     }
 
     fn apply_one_qubit_optimization(
@@ -787,8 +798,7 @@ impl CompilerWorkflow {
             optimizer.transform(circuit, Some(analysis))
         });
         state.one_qubit_optimizer = Some(optimizer);
-        result?;
-        Ok(state.steps.last().is_some_and(|step| step.changed))
+        result
     }
 
     fn close_one_qubit_resynthesis(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
@@ -877,7 +887,8 @@ impl CompilerWorkflow {
 
         state.apply_transform("translation", name, |circuit, analysis| {
             lowerer.transform(circuit, Some(analysis))
-        })
+        })?;
+        Ok(())
     }
 
     fn validate_explicit_target_basis(

@@ -52,7 +52,7 @@ use crate::compile::transform::decompose::rule::{
     NumericUnitarySynthesisKey,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::smallvec;
@@ -125,7 +125,7 @@ impl Transformer for DecomposeUnitaries {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let local_analysis;
         let analysis = match analysis {
             Some(analysis) => analysis,
@@ -135,24 +135,13 @@ impl Transformer for DecomposeUnitaries {
             }
         };
         if !analysis.has_unitary_gates {
-            return Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
         }
-        let result = decompose_unitaries_transform_with_device(
+        decompose_unitaries_transform_with_device(
             circuit,
             self.config.clone(),
             self.device_context.clone(),
-        )?;
-        if result.changed {
-            Ok(result)
-        } else {
-            Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            })
-        }
+        )
     }
 }
 
@@ -177,13 +166,13 @@ pub fn decompose_unitaries(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
 ) -> Result<Circuit, CompilerError> {
-    Ok(decompose_unitaries_transform(circuit, config)?.circuit)
+    Ok(decompose_unitaries_transform(circuit, config)?.into_circuit(circuit))
 }
 
 fn decompose_unitaries_transform(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     decompose_unitaries_transform_with_rule_stats(circuit, config).map(|(result, _)| result)
 }
 
@@ -191,7 +180,7 @@ fn decompose_unitaries_transform_with_device(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     decompose_unitaries_transform_with_context(circuit, config, device_context)
         .map(|(result, _)| result)
 }
@@ -203,14 +192,14 @@ fn decompose_unitaries_transform_with_device(
 pub fn decompose_unitaries_with_rule_stats(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
-) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError> {
     decompose_unitaries_transform_with_rule_stats(circuit, config)
 }
 
 fn decompose_unitaries_transform_with_rule_stats(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
-) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError> {
     decompose_unitaries_transform_with_context(circuit, config, None)
 }
 
@@ -218,7 +207,7 @@ fn decompose_unitaries_transform_with_context(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
-) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError> {
     let decomposer = UnitaryDecomposer {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
@@ -256,7 +245,7 @@ struct DeviceUnitaryCacheKey {
 }
 
 impl<'a> UnitaryDecomposer<'a> {
-    fn run(mut self) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+    fn run(mut self) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError> {
         let root_classical = self.rebuild.root_classical().clone();
         let mut operations = Vec::with_capacity(self.source.operations().len());
         let phase_delta =
@@ -268,13 +257,16 @@ impl<'a> UnitaryDecomposer<'a> {
             .rebuild
             .finish(self.source.qubits(), operations, self.top_phase)?;
         let stats = self.rule_cache.stats();
-        Ok((
-            TransformResult {
-                circuit,
-                changed: self.changed,
-            },
-            stats,
-        ))
+        // Even when no unitary was synthesized, rebuilding can compact and
+        // remap the parameter table. In that case the source IR cannot be
+        // retained exactly, so the rebuilt representation is still Changed.
+        let changed = self.changed || circuit != *self.source;
+        let outcome = if changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
+        };
+        Ok((outcome, stats))
     }
 
     fn apply_sequence(
@@ -675,8 +667,19 @@ mod tests {
     use crate::circuit::gate::gate_matrix;
     use crate::circuit::symbolic_matrix::{SymbolicComplex, SymbolicMatrix};
     use crate::circuit::{CircuitError, ClassicalExpr, circuit_to_matrix};
+    use crate::compile::transform::{
+        ResolvedTransform, TransformerTestExt, resolve_transform_for_test,
+    };
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    fn decompose_unitaries_with_rule_stats(
+        circuit: &Circuit,
+        config: UnitaryDecomposeConfig,
+    ) -> Result<(ResolvedTransform, DecompositionRuleStats), CompilerError> {
+        super::decompose_unitaries_with_rule_stats(circuit, config)
+            .map(|(outcome, stats)| (resolve_transform_for_test(outcome, circuit), stats))
+    }
 
     fn config_for_native_2q(gate: StandardGate) -> UnitaryDecomposeConfig {
         UnitaryDecomposeConfig {
@@ -712,7 +715,7 @@ mod tests {
         circuit.h(Qubit::new(0)).unwrap();
 
         let result = DecomposeUnitaries::default()
-            .transform(&circuit, None)
+            .transform_resolved(&circuit, None)
             .unwrap();
 
         assert!(!result.changed);

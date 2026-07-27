@@ -16,7 +16,7 @@ use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Directive,
     Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
 };
-use crate::compile::transform::{DeviceLowerer, Transformer};
+use crate::compile::transform::{DeviceLowerer, TransformerTestExt};
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{
     Device, EdgeProp, InstructionProp, Layout, LogicalQubit, PhysicalQubit, QubitProp, Topology,
@@ -316,7 +316,7 @@ fn predicted_native_counts_match_the_actual_device_lowerer() {
     )
     .unwrap();
     let lowered = DeviceLowerer::new(&device)
-        .transform(&routed.circuit, None)
+        .transform_resolved(&routed.circuit, None)
         .unwrap()
         .circuit;
     let actual_native_two_qubit = lowered
@@ -390,7 +390,7 @@ fn predicted_makespan_schedules_parallel_native_leaves() {
     // max(H, H) + CX + max(H, H) = 10 + 100 + 10.
     assert_eq!(result.diagnostics.predicted_makespan, Some(120.0));
     let lowered = DeviceLowerer::new(&device)
-        .transform(&result.circuit, None)
+        .transform_resolved(&result.circuit, None)
         .unwrap()
         .circuit;
     assert_eq!(lowered.operations().len(), 5);
@@ -881,7 +881,7 @@ fn every_trial_objective_is_structurally_deterministic_across_thread_counts() {
         assert_eq!(single.diagnostics, parallel.diagnostics);
 
         let lowered = DeviceLowerer::new(&device)
-            .transform(&single.circuit, None)
+            .transform_resolved(&single.circuit, None)
             .unwrap()
             .circuit;
         device.validate_circuit(&lowered).unwrap();
@@ -914,7 +914,7 @@ fn seeded_grid_unary_and_control_flow_corpus_is_thread_deterministic() {
         assert_eq!(single.diagnostics, parallel.diagnostics);
         assert_eq!(single.circuit, parallel.circuit);
         let lowered = DeviceLowerer::new(device)
-            .transform(&single.circuit, None)
+            .transform_resolved(&single.circuit, None)
             .unwrap()
             .circuit;
         device.validate_circuit(&lowered).unwrap();
@@ -1013,7 +1013,7 @@ fn control_flow_body_is_routed_and_restored() {
         other => panic!("expected routed if/else operation, got {other:?}"),
     }
     let lowered = DeviceLowerer::new(&device)
-        .transform(&result.circuit, None)
+        .transform_resolved(&result.circuit, None)
         .unwrap()
         .circuit;
     device.validate_circuit(&lowered).unwrap();
@@ -1104,7 +1104,7 @@ fn control_flow_epilogue_avoids_topology_edges_without_a_native_swap_plan() {
             != HashSet::from([p0, p2])
     }));
     let lowered = DeviceLowerer::new(&device)
-        .transform(&result.circuit, None)
+        .transform_resolved(&result.circuit, None)
         .unwrap()
         .circuit;
     device.validate_circuit(&lowered).unwrap();
@@ -1560,7 +1560,7 @@ fn fallback_triggers_when_attempt_limit_is_zero() {
     assert!(result.diagnostics.fallback_count > 0);
     assert_all_two_qubit_operations_are_adjacent_on_line(&result.circuit);
     let lowered = DeviceLowerer::new(&device)
-        .transform(&result.circuit, None)
+        .transform_resolved(&result.circuit, None)
         .unwrap()
         .circuit;
     device.validate_circuit(&lowered).unwrap();
@@ -1623,7 +1623,7 @@ fn fallback_emits_the_verified_order_of_a_directional_native_swap() {
         [p1.qubit(), p2.qubit()]
     );
     let lowered = DeviceLowerer::new(&device)
-        .transform(&result.circuit, None)
+        .transform_resolved(&result.circuit, None)
         .unwrap()
         .circuit;
     device.validate_circuit(&lowered).unwrap();

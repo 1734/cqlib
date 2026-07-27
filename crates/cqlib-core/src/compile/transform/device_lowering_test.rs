@@ -22,7 +22,7 @@ use crate::compile::device_planning::cost::{
     MetricAvailability, RobustDurationKey, RobustErrorKey,
 };
 use crate::compile::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
-use crate::compile::transform::Transformer;
+use crate::compile::transform::TransformerTestExt;
 use crate::device::{Device, EdgeProp, InstructionProp, PhysicalQubit, QubitProp};
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -42,7 +42,7 @@ fn exact_native_circuit_is_unchanged() {
             .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(!result.changed);
@@ -85,7 +85,7 @@ fn lowerer_prefers_lower_error_reverse_cx_realization() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -121,7 +121,7 @@ fn reverse_native_swap_uses_symmetric_direction_template() {
     .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -145,7 +145,7 @@ fn missing_reverse_cx_support_returns_structured_failure() {
     .unwrap();
 
     let error = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap_err();
     let CompilerError::DeviceLoweringFailed(failure) = error else {
         panic!("expected device lowering failure");
@@ -180,7 +180,7 @@ fn reverse_cx_direction_template_preserves_unitary() {
     .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap();
 
     assert_eq!(
@@ -217,7 +217,7 @@ fn reverse_rzx_direction_template_preserves_symbolic_unitary() {
     .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&source, None)
+        .transform_resolved(&source, None)
         .unwrap();
 
     assert_eq!(
@@ -271,7 +271,7 @@ fn symmetric_direction_templates_preserve_unitary() {
         .unwrap();
 
         let result = DeviceLowerer::new(&device)
-            .transform(&source, None)
+            .transform_resolved(&source, None)
             .unwrap();
 
         assert_eq!(standard_ops(&result.circuit), vec![gate], "gate={gate:?}");
@@ -303,7 +303,7 @@ fn top_level_gphase_is_folded_without_a_device_capability() {
         .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert_eq!(result.circuit.operations().len(), 1);
@@ -332,7 +332,7 @@ fn body_local_gphase_remains_a_semantic_marker_accepted_by_verifier() {
         .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     let Instruction::ClassicalControl(ClassicalControlOp::If(control)) =
@@ -364,7 +364,7 @@ fn selected_rule_binds_symbolic_parameters_when_emitted() {
         .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -409,7 +409,7 @@ fn while_for_and_switch_bodies_are_lowered_recursively() {
     .unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -438,7 +438,7 @@ fn fused_lowering_eliminates_h_pairs_between_same_target_cx() {
     circuit.cx(q2, q1).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // Each CX lowers to (RZ X2P RZ) CZ (RZ X2P RZ); the H pair between the two
@@ -470,7 +470,7 @@ fn fused_lowering_merges_rz_pair_with_exact_phase() {
     circuit.t(q0).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // T + T lowers to RZ(π/4) RZ(π/4) plus two GPhase(π/8); the RZ pair fuses
@@ -500,7 +500,7 @@ fn fused_lowering_barrier_blocks_run_fusion() {
     circuit.t(q0).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     let gates = standard_ops(&result.circuit);
@@ -521,7 +521,7 @@ fn fused_lowering_delays_emission_across_unrelated_two_qubit_gate() {
     circuit.t(q0).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // The CX on disjoint qubits does not flush q0, so T + T still merges into
@@ -551,7 +551,7 @@ fn fused_lowering_falls_back_when_no_one_qubit_synthesis_path() {
     circuit.x(q0).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // X lowers to X2P X2P; the fused run is an X rotation but the device has
@@ -580,10 +580,10 @@ fn fused_lowering_is_deterministic() {
     };
 
     let first = DeviceLowerer::new(&device)
-        .transform(&build(), None)
+        .transform_resolved(&build(), None)
         .unwrap();
     let second = DeviceLowerer::new(&device)
-        .transform(&build(), None)
+        .transform_resolved(&build(), None)
         .unwrap();
 
     assert_eq!(first.circuit, second.circuit);
@@ -605,7 +605,7 @@ fn fused_lowering_cancels_x_pair_through_x2p_leaves_with_exact_phase() {
     circuit.x(q0).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // Each X lowers to X2P X2P + GPhase(π/2). The four X2P leaves merge into
@@ -674,7 +674,7 @@ fn fast_path_does_not_block_peephole_fusion_on_fully_native_device() {
     circuit.x(q0).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // Every gate is already native, but RZ + RZ still merges and X + X still
@@ -706,7 +706,7 @@ fn fast_path_does_not_block_general_native_run_synthesis() {
 
     assert!(has_fusible_one_qubit_run(&circuit));
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);
@@ -768,7 +768,7 @@ fn general_native_run_fuses_inside_control_flow_body() {
     );
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     let Instruction::ClassicalControl(ClassicalControlOp::If(control)) =
         &result.circuit.operations()[0].instruction
@@ -866,7 +866,7 @@ fn peephole_x_merge_respects_planner_cost_choice() {
     circuit.x(q0).unwrap();
 
     let result = DeviceLowerer::new(&noisy_x)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     assert_eq!(
         standard_ops(&result.circuit),
@@ -882,7 +882,7 @@ fn peephole_x_merge_respects_planner_cost_choice() {
         &[(StandardGate::CZ, 0.01)],
     );
     let result = DeviceLowerer::new(&good_x)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     assert_eq!(standard_ops(&result.circuit), vec![StandardGate::X]);
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
@@ -907,7 +907,7 @@ fn fused_run_choice_respects_calibration_error() {
         &[(StandardGate::CZ, 0.01)],
     );
     let result = DeviceLowerer::new(&noisy_u)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     assert_eq!(
         standard_ops(&result.circuit),
@@ -927,7 +927,7 @@ fn fused_run_choice_respects_calibration_error() {
         &[(StandardGate::CZ, 0.01)],
     );
     let result = DeviceLowerer::new(&good_u)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     assert_eq!(standard_ops(&result.circuit), vec![StandardGate::U]);
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
@@ -944,11 +944,11 @@ fn lowering_is_idempotent_on_qcis_native_output() {
     circuit.cx(q0, q1).unwrap();
 
     let first = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
     assert!(first.changed);
     let second = DeviceLowerer::new(&device)
-        .transform(&first.circuit, None)
+        .transform_resolved(&first.circuit, None)
         .unwrap();
 
     assert!(!second.changed);
@@ -966,7 +966,7 @@ fn lowering_wide_sparse_circuit_only_plans_used_qubits() {
     circuit.cx(q0, q1).unwrap();
 
     let result = DeviceLowerer::new(&device)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     // Planning is bounded to the used qubits, so a wide but sparse circuit

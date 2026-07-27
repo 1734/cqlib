@@ -11,6 +11,7 @@
 // that they have been altered from the originals.
 
 use super::*;
+use crate::compile::transform::TransformerTestExt;
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit};
 
 fn assert_same_native_result(
@@ -32,7 +33,7 @@ fn run_rebuild_every_use(
     circuit: &Circuit,
 ) -> Result<NativeOptimizationResult, CompilerError> {
     let initial = Canonicalizer::production()
-        .transform(circuit, None)?
+        .transform_resolved(circuit, None)?
         .circuit;
     optimizer.device.validate_circuit(&initial)?;
     let mut current = initial.clone();
@@ -59,7 +60,7 @@ fn run_rebuild_every_use(
             optimizer.resynthesis.clone(),
             resynthesis_context,
         )
-        .transform(&current, None)?
+        .transform_resolved(&current, None)?
         .circuit;
         let local_context = DeviceTwoQubitSynthesisContext::build(
             optimizer.device,
@@ -67,20 +68,21 @@ fn run_rebuild_every_use(
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
         let locally_optimized = OptimizeNativeLocalGates::new(local_context)
-            .transform(&resynthesized, None)?
+            .transform_resolved(&resynthesized, None)?
             .circuit;
-        let legalized =
-            match DeviceLowerer::new(optimizer.device).transform(&locally_optimized, None) {
-                Ok(result) => result.circuit,
-                Err(CompilerError::DeviceLoweringFailed(_)) => {
-                    DeviceLowerer::new(optimizer.device)
-                        .transform(&resynthesized, None)?
-                        .circuit
-                }
-                Err(error) => return Err(error),
-            };
+        let legalized = match DeviceLowerer::new(optimizer.device)
+            .transform_resolved(&locally_optimized, None)
+        {
+            Ok(result) => result.circuit,
+            Err(CompilerError::DeviceLoweringFailed(_)) => {
+                DeviceLowerer::new(optimizer.device)
+                    .transform_resolved(&resynthesized, None)?
+                    .circuit
+            }
+            Err(error) => return Err(error),
+        };
         let candidate = Canonicalizer::production()
-            .transform(&legalized, None)?
+            .transform_resolved(&legalized, None)?
             .circuit;
         optimizer.device.validate_circuit(&candidate)?;
         if candidate == current {
@@ -349,7 +351,7 @@ fn one_qubit_fusion_requires_exact_physical_improvement() {
     .unwrap();
 
     let result = OptimizeNativeLocalGates::new(context)
-        .transform(&circuit, None)
+        .transform_resolved(&circuit, None)
         .unwrap();
 
     assert!(result.changed);

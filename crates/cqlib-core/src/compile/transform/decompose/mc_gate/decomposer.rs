@@ -50,7 +50,7 @@ use crate::compile::transform::decompose::rule::{
     ResourceSignature,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use crate::device::Device;
 use std::collections::BTreeSet;
 
@@ -100,7 +100,7 @@ impl Transformer for DecomposeMcGates {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let local_analysis;
         let analysis = match analysis {
             Some(analysis) => analysis,
@@ -110,10 +110,7 @@ impl Transformer for DecomposeMcGates {
             }
         };
         if !analysis.has_mc_gates {
-            return Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
         }
         decompose_mc_gates(circuit, self.config)
     }
@@ -143,9 +140,9 @@ impl Transformer for DecomposeMcGates {
 /// ```rust
 /// use cqlib_core::circuit::{Circuit, Instruction, MCGate, Qubit, StandardGate};
 /// use cqlib_core::compile::resource::ResourcePolicy;
-/// use cqlib_core::compile::transform::decompose::mc_gate::{
+/// use cqlib_core::compile::transform::{TransformOutcome, decompose::mc_gate::{
 ///     McGateDecomposeConfig, decompose_mc_gates,
-/// };
+/// }};
 ///
 /// let mut circuit = Circuit::new(3);
 /// circuit
@@ -166,16 +163,18 @@ impl Transformer for DecomposeMcGates {
 /// )
 /// .unwrap();
 ///
-/// assert!(result.changed);
+/// let TransformOutcome::Changed(decomposed) = result else {
+///     panic!("the MC gate should be decomposed");
+/// };
 /// assert!(matches!(
-///     result.circuit.operations()[0].instruction,
+///     decomposed.operations()[0].instruction,
 ///     Instruction::Standard(StandardGate::CCX),
 /// ));
 /// ```
 pub fn decompose_mc_gates(
     circuit: &Circuit,
     config: McGateDecomposeConfig,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     McGateDecomposer::new(circuit, config)?.run()
 }
 
@@ -186,7 +185,7 @@ pub fn decompose_mc_gates(
 pub fn decompose_mc_gates_with_rule_stats(
     circuit: &Circuit,
     config: McGateDecomposeConfig,
-) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError> {
     McGateDecomposer::new(circuit, config)?.run_with_rule_stats()
 }
 
@@ -205,7 +204,7 @@ pub fn decompose_mc_gates_for_device(
     circuit: &Circuit,
     device: &Device,
     resource_policy: ResourcePolicy,
-) -> Result<TransformResult, CompilerError> {
+) -> Result<TransformOutcome, CompilerError> {
     decompose_mc_gates(
         circuit,
         McGateDecomposeConfig {
@@ -267,13 +266,13 @@ impl<'a> McGateDecomposer<'a> {
     ///
     /// Ancilla leases are scoped to the synthesis of one source operation and
     /// must all be released when the pass completes.
-    fn run(self) -> Result<TransformResult, CompilerError> {
+    fn run(self) -> Result<TransformOutcome, CompilerError> {
         self.run_with_rule_stats().map(|(result, _)| result)
     }
 
     fn run_with_rule_stats(
         mut self,
-    ) -> Result<(TransformResult, DecompositionRuleStats), CompilerError> {
+    ) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError> {
         let source = self.source;
         let root_classical = self.rebuild.root_classical().clone();
         let mut operations = Vec::with_capacity(source.operations().len());
@@ -288,13 +287,12 @@ impl<'a> McGateDecomposer<'a> {
             .rebuild
             .finish(qubits, operations, source.global_phase())?;
         let stats = self.rule_cache.stats();
-        Ok((
-            TransformResult {
-                circuit,
-                changed: self.changed,
-            },
-            stats,
-        ))
+        let outcome = if self.changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
+        };
+        Ok((outcome, stats))
     }
 
     /// Rebuilds a sequence of operations for a control-flow body.

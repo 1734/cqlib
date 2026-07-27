@@ -23,7 +23,7 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
 
@@ -44,7 +44,7 @@ impl Transformer for DecomposeDefinitions {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let local_analysis;
         let analysis = match analysis {
             Some(analysis) => analysis,
@@ -54,10 +54,7 @@ impl Transformer for DecomposeDefinitions {
             }
         };
         if !analysis.has_circuit_gate_definitions && !analysis.has_unitary_circuit_definitions {
-            return Ok(TransformResult {
-                circuit: circuit.clone(),
-                changed: false,
-            });
+            return Ok(TransformOutcome::Unchanged);
         }
         expand_definitions_transform(circuit)
     }
@@ -91,10 +88,10 @@ impl Transformer for DecomposeDefinitions {
 /// ));
 /// ```
 pub fn expand_definitions(circuit: &Circuit) -> Result<Circuit, CompilerError> {
-    Ok(expand_definitions_transform(circuit)?.circuit)
+    Ok(expand_definitions_transform(circuit)?.into_circuit(circuit))
 }
 
-fn expand_definitions_transform(circuit: &Circuit) -> Result<TransformResult, CompilerError> {
+fn expand_definitions_transform(circuit: &Circuit) -> Result<TransformOutcome, CompilerError> {
     DefinitionExpander::new(circuit)?.run()
 }
 
@@ -116,7 +113,7 @@ impl<'a> DefinitionExpander<'a> {
         })
     }
 
-    fn run(mut self) -> Result<TransformResult, CompilerError> {
+    fn run(mut self) -> Result<TransformOutcome, CompilerError> {
         let qubit_map = QubitMap::Identity;
         let symbol_bindings = HashMap::new();
         let root_classical = self.rebuild.root_classical().clone();
@@ -138,9 +135,10 @@ impl<'a> DefinitionExpander<'a> {
         let target = self
             .rebuild
             .finish(self.source.qubits(), operations, self.top_phase)?;
-        Ok(TransformResult {
-            circuit: target,
-            changed: self.changed,
+        Ok(if self.changed {
+            TransformOutcome::Changed(target)
+        } else {
+            TransformOutcome::Unchanged
         })
     }
 
@@ -592,6 +590,7 @@ mod tests {
     use crate::circuit::ParameterValue;
     use crate::circuit::gate::{FrozenCircuit, UnitaryGate};
     use crate::circuit::{ClassicalDataOp, ClassicalExpr};
+    use crate::compile::transform::TransformerTestExt;
     use ndarray::array;
     use num_complex::Complex;
     use std::collections::HashMap;
@@ -609,7 +608,9 @@ mod tests {
         let mut circuit = Circuit::new(1);
         circuit.h(Qubit::new(0)).unwrap();
 
-        let result = DecomposeDefinitions.transform(&circuit, None).unwrap();
+        let result = DecomposeDefinitions
+            .transform_resolved(&circuit, None)
+            .unwrap();
 
         assert!(!result.changed);
         assert_eq!(result.circuit.operations().len(), 1);
@@ -626,7 +627,9 @@ mod tests {
             .measure_bits([Qubit::new(0), Qubit::new(1)])
             .unwrap();
 
-        let result = DecomposeDefinitions.transform(&circuit, None).unwrap();
+        let result = DecomposeDefinitions
+            .transform_resolved(&circuit, None)
+            .unwrap();
 
         assert!(!result.changed);
         assert_eq!(result.circuit.operations().len(), 1);

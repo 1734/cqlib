@@ -35,7 +35,7 @@
 //! use cqlib_core::circuit::{Circuit, Qubit};
 //! use cqlib_core::circuit::{Instruction, StandardGate};
 //! use cqlib_core::compile::transform::{
-//!     ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig, Transformer,
+//!     ResynthesizeTwoQubitBlocks, TransformOutcome, TwoQubitBlockResynthesisConfig, Transformer,
 //! };
 //! use cqlib_core::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 //!
@@ -51,8 +51,10 @@
 //! ]))?;
 //! let config = TwoQubitBlockResynthesisConfig::normal(target);
 //! let result = ResynthesizeTwoQubitBlocks::new(config).transform(&circuit, None)?;
-//! assert!(result.changed);
-//! assert!(result.circuit.operations().is_empty());
+//! let TransformOutcome::Changed(resynthesized) = result else {
+//!     panic!("the cancelling block should be resynthesized");
+//! };
+//! assert!(resynthesized.operations().is_empty());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

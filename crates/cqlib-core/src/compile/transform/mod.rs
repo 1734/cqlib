@@ -22,9 +22,9 @@
 //! # Transform Contract
 //!
 //! Circuit-to-circuit passes implement [`Transformer`]. A transformer takes an
-//! immutable circuit reference and returns a [`TransformResult`] containing a
-//! rebuilt circuit and a `changed` flag. The flag reports whether that
-//! transform changed the compiler IR representation. Callers should not
+//! immutable circuit reference and returns a [`TransformOutcome`].
+//! [`TransformOutcome::Unchanged`] retains the input IR exactly as-is, while
+//! [`TransformOutcome::Changed`] carries its replacement. Callers should not
 //! pre-scan a circuit to infer whether a transform should run; the transform
 //! itself owns traversal of any operation forms it supports, including
 //! structured classical-control bodies.
@@ -99,4 +99,6 @@ pub use routing_basis::LowerToRoutingBasis;
 pub use target_basis::{
     TargetBasisCost, TargetBasisCostModel, TargetBasisLowerer, TargetBasisSignature,
 };
-pub use transformer::{TransformResult, Transformer};
+#[cfg(test)]
+pub(crate) use transformer::{ResolvedTransform, TransformerTestExt, resolve_transform_for_test};
+pub use transformer::{TransformOutcome, Transformer};

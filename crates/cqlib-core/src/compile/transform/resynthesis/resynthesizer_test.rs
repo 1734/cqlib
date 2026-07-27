@@ -15,13 +15,22 @@ use crate::compile::test_utils::assert_compiled_circuit_equivalent;
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
 };
+use crate::compile::transform::{ResolvedTransform, resolve_transform_for_test};
 use crate::device::Device;
+
+fn resynthesize_two_qubit_blocks(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+) -> Result<ResolvedTransform, CompilerError> {
+    super::resynthesize_two_qubit_blocks(circuit, config)
+        .map(|outcome| resolve_transform_for_test(outcome, circuit))
+}
 
 fn resynthesize_two_qubit_blocks_with_cache_budget(
     circuit: &Circuit,
     config: TwoQubitBlockResynthesisConfig,
     budget: usize,
-) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
+) -> Result<(ResolvedTransform, TwoQubitSynthesisCacheStats), CompilerError> {
     let pass = ResynthesisPass {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
@@ -31,6 +40,7 @@ fn resynthesize_two_qubit_blocks_with_cache_budget(
         incremental: None,
     };
     pass.run_with_stats()
+        .map(|(outcome, stats)| (resolve_transform_for_test(outcome, circuit), stats))
 }
 
 fn resynthesize_two_qubit_blocks_with_device_cache_budget(
@@ -38,7 +48,7 @@ fn resynthesize_two_qubit_blocks_with_device_cache_budget(
     config: TwoQubitBlockResynthesisConfig,
     device_context: DeviceTwoQubitSynthesisContext,
     budget: usize,
-) -> Result<(TransformResult, TwoQubitSynthesisCacheStats), CompilerError> {
+) -> Result<(ResolvedTransform, TwoQubitSynthesisCacheStats), CompilerError> {
     ResynthesisPass {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
@@ -48,6 +58,7 @@ fn resynthesize_two_qubit_blocks_with_device_cache_budget(
         incremental: None,
     }
     .run_with_stats()
+    .map(|(outcome, stats)| (resolve_transform_for_test(outcome, circuit), stats))
 }
 
 fn cx_config() -> TwoQubitBlockResynthesisConfig {

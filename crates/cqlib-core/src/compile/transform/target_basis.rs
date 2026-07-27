@@ -40,7 +40,7 @@ use crate::compile::transform::decompose::unitary::euler_1q::{
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
 use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformResult, Transformer};
+use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
 
@@ -208,7 +208,10 @@ impl TargetBasisCostModel {
     ) -> Result<TargetBasisCost, CompilerError> {
         let source = Circuit::from_operations(qubits, operations, None, None)
             .map_err(CompilerError::Circuit)?;
-        let lowered = self.lowerer.transform(&source, None)?.circuit;
+        let lowered = match self.lowerer.transform(&source, None)? {
+            TransformOutcome::Unchanged => source,
+            TransformOutcome::Changed(lowered) => lowered,
+        };
         let mut cost = TargetBasisCost::default();
         let mut depths = HashMap::new();
         for operation in lowered.operations() {
@@ -257,7 +260,7 @@ impl Transformer for TargetBasisLowerer {
         &self,
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let library = RuleLibrary::builtin_rules()
             .map_err(|err| CompilerError::InvariantViolation(err.to_string()))?;
         CircuitLowerer::run(circuit, &self.plans, library)
@@ -421,7 +424,7 @@ impl<'a> CircuitLowerer<'a> {
         source: &'a Circuit,
         plans: &'a LoweringPlans,
         library: &'a RuleLibrary,
-    ) -> Result<TransformResult, CompilerError> {
+    ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut lowerer = Self {
@@ -444,9 +447,10 @@ impl<'a> CircuitLowerer<'a> {
             .rebuild
             .finish(source.qubits(), operations, global_phase)?;
 
-        Ok(TransformResult {
-            circuit,
-            changed: lowerer.changed,
+        Ok(if lowerer.changed {
+            TransformOutcome::Changed(circuit)
+        } else {
+            TransformOutcome::Unchanged
         })
     }
 

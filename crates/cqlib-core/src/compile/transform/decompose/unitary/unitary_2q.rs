@@ -1368,7 +1368,7 @@ impl CxBasisData {
 mod tests {
     use super::*;
     use crate::circuit::{Circuit, Instruction, Parameter, UnitaryGate, circuit_to_matrix};
-    use crate::compile::transform::{TargetBasisLowerer, Transformer};
+    use crate::compile::transform::{TargetBasisLowerer, TransformerTestExt};
     use approx::assert_abs_diff_eq;
     use ndarray::linalg::kron;
     use rand::rngs::StdRng;
@@ -1635,7 +1635,7 @@ mod tests {
             .collect::<Vec<_>>();
         let lowered = TargetBasisLowerer::new(target_basis)
             .unwrap()
-            .transform(&synthesized, None)
+            .transform_resolved(&synthesized, None)
             .unwrap()
             .circuit;
 
