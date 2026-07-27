@@ -81,9 +81,9 @@ Cqlib 文档
    :caption: 错误缓解
 
    documentation/1_cqlib/6_error_mitigation/0_overview
-   documentation/1_cqlib/6_error_mitigation/1_zne_rust_core
-   documentation/1_cqlib/6_error_mitigation/2_virtual_distillation_rust_core
-   documentation/1_cqlib/6_error_mitigation/3_python_binding_status
+   documentation/1_cqlib/6_error_mitigation/1_zne
+   documentation/1_cqlib/6_error_mitigation/2_virtual_distillation
+   documentation/1_cqlib/6_error_mitigation/3_unified_api
 
 .. toctree::
    :maxdepth: 2
