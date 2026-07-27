@@ -194,9 +194,11 @@ impl PyResynthesizeTwoQubitBlocks {
     fn run(&self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<PyTransformResult> {
         let circuit = circuit.inner.clone();
         let config = self.config.inner.clone();
-        py.detach(move || ResynthesizeTwoQubitBlocks::new(config).transform(&circuit, None))
-            .map(PyTransformResult::from)
-            .map_err(compiler_error_to_py_err)
+        py.detach(move || {
+            let outcome = ResynthesizeTwoQubitBlocks::new(config).transform(&circuit, None)?;
+            Ok(PyTransformResult::from_outcome(circuit, outcome))
+        })
+        .map_err(compiler_error_to_py_err)
     }
 
     fn __repr__(&self) -> String {
@@ -235,7 +237,9 @@ fn py_resynthesize_two_qubit_blocks(
         },
         |value| value.inner,
     );
-    py.detach(move || resynthesize_two_qubit_blocks(&circuit, config))
-        .map(PyTransformResult::from)
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let outcome = resynthesize_two_qubit_blocks(&circuit, config)?;
+        Ok(PyTransformResult::from_outcome(circuit, outcome))
+    })
+    .map_err(compiler_error_to_py_err)
 }

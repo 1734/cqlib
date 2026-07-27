@@ -61,9 +61,11 @@ impl PyTargetBasisLowerer {
     fn run(&self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<PyTransformResult> {
         let lowerer = self.inner.clone();
         let circuit = circuit.inner.clone();
-        py.detach(move || lowerer.transform(&circuit, None))
-            .map(Into::into)
-            .map_err(compiler_error_to_py_err)
+        py.detach(move || {
+            let outcome = lowerer.transform(&circuit, None)?;
+            Ok(PyTransformResult::from_outcome(circuit, outcome))
+        })
+        .map_err(compiler_error_to_py_err)
     }
 
     fn __repr__(&self) -> String {

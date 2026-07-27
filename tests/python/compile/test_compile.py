@@ -527,7 +527,7 @@ def test_compile_explicit_target_basis_takes_precedence_over_device_native_gates
     assert_unitary_equivalent(source, result.circuit)
 
 
-def test_compile_enhanced_device_workflow_runs_cleanup_steps():
+def test_compile_enhanced_device_workflow_runs_post_routing_and_skips_target_cleanup():
     source = Circuit(3)
     source.h(0)
     source.cx(0, 2)
@@ -539,7 +539,10 @@ def test_compile_enhanced_device_workflow_runs_cleanup_steps():
     assert result.mode == CompileMode.enhanced()
     assert not step(result, "route.sabre").skipped
     assert not step(result, "optimize.post_routing").skipped
-    assert not step(result, "optimize.target_cleanup").skipped
+    target_cleanup = step(result, "optimize.target_cleanup")
+    assert target_cleanup.skipped
+    assert not target_cleanup.changed
+    assert target_cleanup.reason == "no explicit target basis configured"
     assert_only_standard_basis(result.circuit, {"H", "CZ"})
 
 
