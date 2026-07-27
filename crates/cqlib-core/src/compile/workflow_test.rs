@@ -11,7 +11,9 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{CompilerWorkflow, RewritePhase, WorkflowState, sabre_config_for_mode};
+use super::{
+    CompilerWorkflow, DeviceSynthesisPlacement, RewritePhase, WorkflowState, sabre_config_for_mode,
+};
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
     Circuit, CircuitGate, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit,
@@ -140,6 +142,52 @@ fn apply_transform_error_leaves_workflow_state_untouched() {
     assert_eq!(state.analysis, analysis);
     assert!(!state.changed);
     assert!(state.steps.is_empty());
+}
+
+#[test]
+fn two_qubit_resynthesis_returns_the_recorded_changed_status() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+
+    let mut stable_state = workflow_state_without_target_basis();
+    stable_state.current = Circuit::new(2);
+    stable_state.current.h(q0).unwrap();
+    stable_state.analysis = CircuitAnalysis::analyze(&stable_state.current);
+
+    let stable_changed = workflow
+        .apply_two_qubit_resynthesis(
+            &mut stable_state,
+            "test",
+            "resynthesis.stable",
+            DeviceSynthesisPlacement::PreLayoutEnvelope,
+        )
+        .unwrap();
+
+    assert!(!stable_changed);
+    assert!(!stable_state.steps.last().unwrap().changed);
+
+    let mut changed_state = workflow_state_with_target_basis(vec![
+        Instruction::Standard(StandardGate::U),
+        Instruction::Standard(StandardGate::CX),
+    ]);
+    changed_state.current = Circuit::new(2);
+    changed_state.current.cx(q0, q1).unwrap();
+    changed_state.current.cx(q0, q1).unwrap();
+    changed_state.analysis = CircuitAnalysis::analyze(&changed_state.current);
+
+    let resynthesis_changed = workflow
+        .apply_two_qubit_resynthesis(
+            &mut changed_state,
+            "test",
+            "resynthesis.changed",
+            DeviceSynthesisPlacement::PreLayoutEnvelope,
+        )
+        .unwrap();
+
+    assert!(resynthesis_changed);
+    assert!(changed_state.steps.last().unwrap().changed);
+    assert!(changed_state.current.operations().is_empty());
 }
 
 fn binding_case(bindings: &[(&'static str, f64)]) -> Option<HashMap<&'static str, f64>> {

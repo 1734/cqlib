@@ -556,7 +556,7 @@ impl CompilerWorkflow {
         stage: &'static str,
         name: &'static str,
         placement: DeviceSynthesisPlacement,
-    ) -> Result<(), CompilerError> {
+    ) -> Result<bool, CompilerError> {
         let config = self.two_qubit_resynthesis_config_for_state(state);
         let resynthesizer = if let Some(target) = self
             .strict_device_target()
@@ -570,8 +570,7 @@ impl CompilerWorkflow {
         };
         state.apply_transform(stage, name, |circuit, analysis| {
             resynthesizer.transform(circuit, Some(analysis))
-        })?;
-        Ok(())
+        })
     }
 
     fn apply_post_routing_resynthesis(
@@ -591,7 +590,8 @@ impl CompilerWorkflow {
             "optimization",
             "resynthesize.two_qubit_blocks.post_routing",
             DeviceSynthesisPlacement::ExactPhysical,
-        )
+        )?;
+        Ok(())
     }
 
     fn two_qubit_resynthesis_config_for_state(
@@ -834,14 +834,12 @@ impl CompilerWorkflow {
                 break;
             }
 
-            let before_resynthesis = state.current.clone();
-            self.apply_two_qubit_resynthesis(
+            let resynthesis_changed = self.apply_two_qubit_resynthesis(
                 state,
                 "optimization",
                 "resynthesize.two_qubit_blocks.after_one_qubit",
                 DeviceSynthesisPlacement::PreLayoutEnvelope,
             )?;
-            let resynthesis_changed = state.current != before_resynthesis;
             let cleanup_changed = if resynthesis_changed {
                 self.apply_one_qubit_optimization(state, "optimize.one_qubit.after_resynthesis")?
             } else {
