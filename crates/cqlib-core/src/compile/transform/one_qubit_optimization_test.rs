@@ -14,6 +14,25 @@ use super::*;
 use crate::circuit::{ClassicalControlOp, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::test_utils::assert_compiled_circuit_equivalent;
 use crate::compile::transform::TransformerTestExt;
+use std::sync::Arc;
+
+#[test]
+fn basis_optimizer_reuses_supplied_cost_model() {
+    let cost_model = Arc::new(
+        TargetBasisCostModel::new(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::X2P),
+        ])
+        .unwrap(),
+    );
+
+    let optimizer = OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(&cost_model));
+
+    let LocalOptimizationPolicy::Basis(actual) = &optimizer.policy else {
+        panic!("expected a target-basis optimization policy");
+    };
+    assert!(Arc::ptr_eq(actual, &cost_model));
+}
 
 #[test]
 fn logical_fuses_numeric_run_to_one_u() {

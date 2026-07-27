@@ -58,6 +58,7 @@ use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+use std::sync::Arc;
 
 const PHASE_EPS: f64 = 1e-12;
 
@@ -447,7 +448,7 @@ impl Transformer for OptimizeNativeLocalGates {
 #[derive(Debug, Clone)]
 pub(crate) enum LocalOptimizationPolicy {
     Logical,
-    Basis(TargetBasisCostModel),
+    Basis(Arc<TargetBasisCostModel>),
     Device(DeviceTwoQubitSynthesisContext),
 }
 

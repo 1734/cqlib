@@ -12,7 +12,8 @@
 // that they have been altered from the originals.
 
 use super::{
-    CompilerWorkflow, DeviceSynthesisPlacement, RewritePhase, WorkflowState, sabre_config_for_mode,
+    CompilerWorkflow, DeviceSynthesisPlacement, PreparedTargetBasis, RewritePhase, WorkflowState,
+    sabre_config_for_mode,
 };
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
@@ -34,6 +35,7 @@ use ndarray::array;
 use num_complex::Complex64;
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 fn compile_config(mode: CompileMode) -> CompileConfig {
     CompileConfig {
@@ -51,14 +53,18 @@ fn run_workflow(circuit: &Circuit, mode: CompileMode) -> super::CompileResult {
 
 fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowState {
     let current = Circuit::new(1);
-    let two_qubit_target = TwoQubitSynthesisTarget::from_instructions(Some(&target_basis)).unwrap();
-    let one_qubit_optimizer = Some(OptimizeOneQubitRuns::basis(target_basis.clone()).unwrap());
+    let prepared_target_basis = PreparedTargetBasis::new(target_basis).unwrap();
+    let two_qubit_target =
+        TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared_target_basis.cost_model));
+    let one_qubit_optimizer = Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
+        &prepared_target_basis.cost_model,
+    )));
     WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
         changed: false,
         steps: Vec::new(),
-        target_basis: Some(target_basis),
+        prepared_target_basis: Some(prepared_target_basis),
         two_qubit_target,
         device_metadata: None,
         one_qubit_optimizer,
@@ -73,7 +79,7 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         current,
         changed: false,
         steps: Vec::new(),
-        target_basis: None,
+        prepared_target_basis: None,
         two_qubit_target: TwoQubitSynthesisTarget::unconstrained(),
         device_metadata: None,
         one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),

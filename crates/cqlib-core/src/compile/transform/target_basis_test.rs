@@ -13,13 +13,14 @@
 
 use super::{TargetBasisCostModel, TargetBasisLowerer};
 use crate::circuit::{
-    Circuit, ClassicalControlOp, ClassicalExpr, Instruction, Operation, Parameter, ParameterValue,
-    Qubit, StandardGate, ValueOperation,
+    Circuit, ClassicalControlOp, ClassicalExpr, Instruction, MCGate, Operation, Parameter,
+    ParameterValue, Qubit, StandardGate, ValueOperation,
 };
 use crate::compile::CompilerError;
 use crate::compile::knowledge::KnowledgeInstructionKey;
 use crate::compile::test_utils::{assert_compiled_circuit_equivalent, standard_ops};
 use crate::compile::transform::TransformerTestExt;
+use std::sync::Arc;
 
 fn target_basis(gates: &[StandardGate]) -> Vec<Instruction> {
     gates.iter().copied().map(Instruction::Standard).collect()
@@ -63,6 +64,53 @@ fn assert_target_lowering_fails_with(
             "expected error message {message:?} to contain {snippet:?}"
         );
     }
+}
+
+#[test]
+fn lowerer_clones_share_basis_and_planning_graph() {
+    let instructions: Arc<[Instruction]> =
+        target_basis(&[StandardGate::RZ, StandardGate::X2P, StandardGate::CZ]).into();
+    let lowerer = TargetBasisLowerer::from_shared_basis(Arc::clone(&instructions)).unwrap();
+    let cloned = lowerer.clone();
+
+    assert!(Arc::ptr_eq(&lowerer.target_basis, &instructions));
+    assert!(Arc::ptr_eq(&lowerer.target_basis, &cloned.target_basis));
+    assert!(Arc::ptr_eq(&lowerer.plans, &cloned.plans));
+}
+
+#[test]
+fn cost_model_reuses_supplied_lowerer() {
+    let lowerer = Arc::new(
+        TargetBasisLowerer::new(target_basis(&[
+            StandardGate::RZ,
+            StandardGate::X2P,
+            StandardGate::CZ,
+        ]))
+        .unwrap(),
+    );
+
+    let model = TargetBasisCostModel::from_lowerer(Arc::clone(&lowerer)).unwrap();
+
+    assert!(Arc::ptr_eq(&model.lowerer, &lowerer));
+}
+
+#[test]
+fn cost_model_rejects_non_standard_shared_lowerer() {
+    let lowerer = Arc::new(
+        TargetBasisLowerer::new(vec![Instruction::McGate(Box::new(MCGate::new(
+            2,
+            StandardGate::X,
+        )))])
+        .unwrap(),
+    );
+
+    let error = TargetBasisCostModel::from_lowerer(lowerer).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("target-basis cost model requires standard instructions")
+    );
 }
 
 fn u_circuit(theta: f64, phi: f64, lambda: f64) -> Circuit {

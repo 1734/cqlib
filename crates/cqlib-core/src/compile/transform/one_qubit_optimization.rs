@@ -25,6 +25,7 @@ use crate::compile::transform::native_optimization::{
 };
 use crate::compile::transform::target_basis::TargetBasisCostModel;
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
+use std::sync::Arc;
 
 /// Exact one-qubit optimization for logical or explicit-basis workflows.
 #[derive(Debug, Clone)]
@@ -44,9 +45,15 @@ impl OptimizeOneQubitRuns {
     /// Builds an optimizer whose candidates are costed after exact lowering to
     /// `target_basis`.
     pub fn basis(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
-        Ok(Self {
-            policy: LocalOptimizationPolicy::Basis(TargetBasisCostModel::new(target_basis)?),
-        })
+        Ok(Self::basis_with_cost_model(Arc::new(
+            TargetBasisCostModel::new(target_basis)?,
+        )))
+    }
+
+    pub(crate) fn basis_with_cost_model(cost_model: Arc<TargetBasisCostModel>) -> Self {
+        Self {
+            policy: LocalOptimizationPolicy::Basis(cost_model),
+        }
     }
 }
 

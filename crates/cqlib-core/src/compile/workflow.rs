@@ -59,11 +59,12 @@ use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer, KnowledgeRewriter,
     LayoutObjective, LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
-    RewriteConfig, TargetBasisLowerer, TransformOutcome, Transformer,
+    RewriteConfig, TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
     TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
 };
 use crate::device::{Device, Topology};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use super::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
@@ -90,11 +91,32 @@ struct WorkflowState {
     analysis: CircuitAnalysis,
     changed: bool,
     steps: Vec<WorkflowStepReport>,
-    target_basis: Option<Vec<Instruction>>,
+    prepared_target_basis: Option<PreparedTargetBasis>,
     two_qubit_target: TwoQubitSynthesisTarget,
     device_metadata: Option<DeviceCompilationMetadata>,
     one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
     pending_one_qubit_resynthesis: bool,
+}
+
+struct PreparedTargetBasis {
+    instructions: Arc<[Instruction]>,
+    lowerer: Arc<TargetBasisLowerer>,
+    cost_model: Arc<TargetBasisCostModel>,
+}
+
+impl PreparedTargetBasis {
+    fn new(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
+        let instructions: Arc<[Instruction]> = target_basis.into();
+        let lowerer = Arc::new(TargetBasisLowerer::from_shared_basis(Arc::clone(
+            &instructions,
+        ))?);
+        let cost_model = Arc::new(TargetBasisCostModel::from_lowerer(Arc::clone(&lowerer))?);
+        Ok(Self {
+            instructions,
+            lowerer,
+            cost_model,
+        })
+    }
 }
 
 impl WorkflowState {
@@ -166,24 +188,32 @@ impl CompilerWorkflow {
     /// Runs the workflow over `circuit` and returns the rebuilt circuit plus
     /// execution metadata.
     pub fn run(&self, circuit: &Circuit) -> Result<CompileResult, CompilerError> {
-        let resolved_target = self.resolve_target_basis()?;
+        let prepared_target_basis = self.prepare_target_basis()?;
         let one_qubit_optimizer = match &self.config.target {
             CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
-            CompileTarget::Basis(target_basis)
-            | CompileTarget::TopologyBasis {
-                basis: target_basis,
-                ..
-            } => Some(OptimizeOneQubitRuns::basis(target_basis.clone())?),
+            CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. } => {
+                let prepared = prepared_target_basis.as_ref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "explicit target basis was not prepared".to_string(),
+                    )
+                })?;
+                Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
+                    &prepared.cost_model,
+                )))
+            }
             CompileTarget::Device(_) => None,
         };
-        let two_qubit_target =
-            TwoQubitSynthesisTarget::from_instructions(resolved_target.as_deref())?;
+        let two_qubit_target = prepared_target_basis
+            .as_ref()
+            .map_or_else(TwoQubitSynthesisTarget::unconstrained, |prepared| {
+                TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared.cost_model))
+            });
         let mut state = WorkflowState {
             current: circuit.clone(),
             analysis: CircuitAnalysis::analyze(circuit),
             changed: false,
             steps: Vec::new(),
-            target_basis: resolved_target,
+            prepared_target_basis,
             two_qubit_target,
             device_metadata: None,
             one_qubit_optimizer,
@@ -495,12 +525,12 @@ impl CompilerWorkflow {
         &self,
         state: &WorkflowState,
     ) -> Result<Option<RewriteConfig>, CompilerError> {
-        let Some(target_basis) = state.target_basis.as_deref() else {
+        let Some(prepared) = state.prepared_target_basis.as_ref() else {
             return Ok(None);
         };
 
         self.rewrite_config(RewritePhase::TargetCleanup)?
-            .with_target_instructions(target_basis.to_vec())
+            .with_target_instructions(prepared.instructions.to_vec())
             .map(Some)
     }
 
@@ -621,7 +651,10 @@ impl CompilerWorkflow {
             return Ok(());
         }
 
-        let preferred_basis = state.target_basis.clone();
+        let preferred_basis = state
+            .prepared_target_basis
+            .as_ref()
+            .map(|prepared| prepared.instructions.to_vec());
         state.apply_transform(
             "translation",
             "decompose.routing_basis",
@@ -876,12 +909,11 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
         name: &'static str,
     ) -> Result<(), CompilerError> {
-        let Some(target_basis) = state.target_basis.as_deref() else {
+        let Some(prepared) = state.prepared_target_basis.as_ref() else {
             state.record_skipped("translation", name, "no target basis configured");
             return Ok(());
         };
-        let target_basis = target_basis.to_vec();
-        let lowerer = TargetBasisLowerer::new(target_basis)?;
+        let lowerer = Arc::clone(&prepared.lowerer);
 
         state.apply_transform("translation", name, |circuit, analysis| {
             lowerer.transform(circuit, Some(analysis))
@@ -893,10 +925,11 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
-        let Some(target_basis) = state.target_basis.as_deref() else {
+        let Some(prepared) = state.prepared_target_basis.as_ref() else {
             return Ok(());
         };
-        let allowed = target_basis
+        let allowed = prepared
+            .instructions
             .iter()
             .filter_map(|instruction| match instruction {
                 Instruction::Standard(gate) => Some(*gate),
@@ -906,9 +939,11 @@ impl CompilerWorkflow {
         validate_operations_in_target_basis(state.current.operations(), &allowed)
     }
 
-    /// Resolves an explicit basis target. Device capabilities are local and
-    /// ordered, so they are handled by the exact device-lowering stage.
-    fn resolve_target_basis(&self) -> Result<Option<Vec<Instruction>>, CompilerError> {
+    /// Prepares one shared explicit-basis planning graph for this workflow run.
+    ///
+    /// Device capabilities are local and ordered, so they are handled by the
+    /// exact device-lowering stage.
+    fn prepare_target_basis(&self) -> Result<Option<PreparedTargetBasis>, CompilerError> {
         let target_basis = match &self.config.target {
             CompileTarget::Basis(target_basis)
             | CompileTarget::TopologyBasis {
@@ -921,21 +956,21 @@ impl CompilerWorkflow {
             return Ok(None);
         };
         validate_workflow_target_basis_config(target_basis)?;
-        Ok(Some(target_basis.to_vec()))
+        PreparedTargetBasis::new(target_basis.to_vec()).map(Some)
     }
 
     fn record_pre_init(&self, state: &mut WorkflowState) {
-        let reason = match (&self.config.target, &state.target_basis) {
-            (CompileTarget::Basis(_), Some(basis)) => Some(format!(
+        let reason = match (&self.config.target, &state.prepared_target_basis) {
+            (CompileTarget::Basis(_), Some(prepared)) => Some(format!(
                 "resolved explicit target basis with {} instructions",
-                basis.len()
+                prepared.instructions.len()
             )),
             (CompileTarget::Device(_), _) => {
                 Some("resolved device target with ordered native capabilities".to_string())
             }
-            (CompileTarget::TopologyBasis { .. }, Some(basis)) => Some(format!(
+            (CompileTarget::TopologyBasis { .. }, Some(prepared)) => Some(format!(
                 "resolved device topology with explicit target basis containing {} instructions",
-                basis.len()
+                prepared.instructions.len()
             )),
             (CompileTarget::Logical, _) => Some("no target constraints configured".to_string()),
             (CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. }, None) => None,

@@ -43,14 +43,15 @@ use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const MAX_PLANNING_ROUNDS: usize = 128;
 
 /// Lowers a circuit to an explicit gate-like target instruction basis.
 #[derive(Debug, Clone)]
 pub struct TargetBasisLowerer {
-    target_basis: Vec<Instruction>,
-    plans: LoweringPlans,
+    target_basis: Arc<[Instruction]>,
+    plans: Arc<LoweringPlans>,
 }
 
 /// Canonical identity of a standard-gate target basis.
@@ -77,13 +78,14 @@ pub struct TargetBasisCost {
 
 /// Reusable, exact target-basis cost evaluator.
 ///
-/// The evaluator owns the same lowering plans used by [`TargetBasisLowerer`].
-/// It therefore measures the concrete output of the active rule library rather
-/// than maintaining a separate heuristic approximation for synthesis choices.
+/// The evaluator shares the same lowerer and plans used by
+/// [`TargetBasisLowerer`]. It therefore measures the concrete output of the
+/// active rule library rather than maintaining a separate heuristic
+/// approximation for synthesis choices.
 #[derive(Debug, Clone)]
 pub struct TargetBasisCostModel {
     signature: TargetBasisSignature,
-    lowerer: TargetBasisLowerer,
+    lowerer: Arc<TargetBasisLowerer>,
 }
 
 impl PartialEq for TargetBasisCostModel {
@@ -135,6 +137,13 @@ struct CircuitLowerer<'a> {
 impl TargetBasisLowerer {
     /// Creates a target-basis lowerer from a non-empty gate-like basis.
     pub fn new(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
+        Self::from_shared_basis(target_basis.into())
+    }
+
+    /// Creates a lowerer while retaining a shared target-basis allocation.
+    pub(crate) fn from_shared_basis(
+        target_basis: Arc<[Instruction]>,
+    ) -> Result<Self, CompilerError> {
         if target_basis.is_empty() {
             return Err(CompilerError::InvalidInput(
                 "target-basis lowering requires a non-empty target basis".to_string(),
@@ -147,13 +156,13 @@ impl TargetBasisLowerer {
 
         Ok(Self {
             target_basis,
-            plans,
+            plans: Arc::new(plans),
         })
     }
 
     /// Returns the configured target instruction basis in insertion order.
     pub fn target_basis(&self) -> &[Instruction] {
-        &self.target_basis
+        self.target_basis.as_ref()
     }
 }
 
@@ -174,7 +183,14 @@ impl TargetBasisSignature {
 impl TargetBasisCostModel {
     /// Builds an exact cost model for a non-empty standard-gate target basis.
     pub fn new(target_basis: Vec<Instruction>) -> Result<Self, CompilerError> {
-        let gates = target_basis
+        let lowerer = Arc::new(TargetBasisLowerer::new(target_basis)?);
+        Self::from_lowerer(lowerer)
+    }
+
+    /// Builds an exact cost model from an existing target-basis lowerer.
+    pub fn from_lowerer(lowerer: Arc<TargetBasisLowerer>) -> Result<Self, CompilerError> {
+        let gates = lowerer
+            .target_basis()
             .iter()
             .map(|instruction| match instruction {
                 Instruction::Standard(gate) => Ok(*gate),
@@ -183,7 +199,6 @@ impl TargetBasisCostModel {
                 ))),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let lowerer = TargetBasisLowerer::new(target_basis)?;
         Ok(Self {
             signature: TargetBasisSignature::from_standard_gates(&gates),
             lowerer,
@@ -193,6 +208,10 @@ impl TargetBasisCostModel {
     /// Returns the canonical target identity used by synthesis caches.
     pub const fn signature(&self) -> &TargetBasisSignature {
         &self.signature
+    }
+
+    pub(crate) fn target_basis(&self) -> &[Instruction] {
+        self.lowerer.target_basis()
     }
 
     /// Lowers fixed standard-gate operations and returns the exact resulting
@@ -263,7 +282,7 @@ impl Transformer for TargetBasisLowerer {
     ) -> Result<TransformOutcome, CompilerError> {
         let library = RuleLibrary::builtin_rules()
             .map_err(|err| CompilerError::InvariantViolation(err.to_string()))?;
-        CircuitLowerer::run(circuit, &self.plans, library)
+        CircuitLowerer::run(circuit, self.plans.as_ref(), library)
     }
 }
 

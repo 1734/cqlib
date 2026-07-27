@@ -48,6 +48,7 @@ use ndarray::Array2;
 use ndarray::linalg::kron;
 use num_complex::Complex64;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
+use std::sync::Arc;
 
 const ANGLE_EPS: f64 = 1e-12;
 const TWO_QUBIT_EXACT_TOLERANCE: f64 = 1e-10;
@@ -73,7 +74,7 @@ pub struct TwoQubitSynthesisTarget {
     native_2q: Vec<StandardGate>,
     native_1q: Vec<StandardGate>,
     fallback_pauli: bool,
-    lowering_cost_model: Option<TargetBasisCostModel>,
+    lowering_cost_model: Option<Arc<TargetBasisCostModel>>,
 }
 
 impl TwoQubitSynthesisTarget {
@@ -101,7 +102,7 @@ impl TwoQubitSynthesisTarget {
                 _ => {}
             }
         }
-        let lowering_cost_model = TargetBasisCostModel::new(target_basis.to_vec())?;
+        let lowering_cost_model = Arc::new(TargetBasisCostModel::new(target_basis.to_vec())?);
         Ok(Self {
             native_2q,
             native_1q,
@@ -142,13 +143,34 @@ impl TwoQubitSynthesisTarget {
             .into_iter()
             .map(Instruction::Standard)
             .collect::<Vec<_>>();
-        let lowering_cost_model = TargetBasisCostModel::new(instructions)?;
+        let lowering_cost_model = Arc::new(TargetBasisCostModel::new(instructions)?);
         Ok(Self {
             native_2q,
             native_1q,
             fallback_pauli,
             lowering_cost_model: Some(lowering_cost_model),
         })
+    }
+
+    pub(crate) fn from_cost_model(lowering_cost_model: Arc<TargetBasisCostModel>) -> Self {
+        let mut native_1q = Vec::new();
+        let mut native_2q = Vec::new();
+        for instruction in lowering_cost_model.target_basis() {
+            let Instruction::Standard(gate) = instruction else {
+                unreachable!("target-basis cost models contain only standard instructions");
+            };
+            match gate.num_qubits() {
+                1 if !native_1q.contains(gate) => native_1q.push(*gate),
+                2 if !native_2q.contains(gate) => native_2q.push(*gate),
+                _ => {}
+            }
+        }
+        Self {
+            native_2q,
+            native_1q,
+            fallback_pauli: true,
+            lowering_cost_model: Some(lowering_cost_model),
+        }
     }
 
     /// Returns a target with no physical-basis constraints.
@@ -177,7 +199,7 @@ impl TwoQubitSynthesisTarget {
     }
 
     pub(crate) fn lowering_cost_model(&self) -> Option<&TargetBasisCostModel> {
-        self.lowering_cost_model.as_ref()
+        self.lowering_cost_model.as_deref()
     }
 
     pub(crate) fn cache_signature(&self) -> Option<TargetBasisSignature> {
@@ -1459,6 +1481,26 @@ mod tests {
             true,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn synthesis_target_reuses_supplied_cost_model() {
+        let cost_model = Arc::new(
+            TargetBasisCostModel::new(vec![
+                Instruction::Standard(StandardGate::U),
+                Instruction::Standard(StandardGate::CX),
+            ])
+            .unwrap(),
+        );
+
+        let target = TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&cost_model));
+
+        assert!(Arc::ptr_eq(
+            target.lowering_cost_model.as_ref().unwrap(),
+            &cost_model
+        ));
+        assert_eq!(target.native_1q(), &[StandardGate::U]);
+        assert_eq!(target.native_2q(), &[StandardGate::CX]);
     }
 
     #[test]
