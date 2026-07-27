@@ -164,6 +164,61 @@ impl TargetBasisLowerer {
     pub fn target_basis(&self) -> &[Instruction] {
         self.target_basis.as_ref()
     }
+
+    /// Returns whether translating `circuit` can change or reject its
+    /// gate-like operations.
+    ///
+    /// This is a conservative scheduling check. It recursively inspects
+    /// structured control-flow bodies but does not replace terminal
+    /// target-basis validation. Explicit `GPhase` operations require
+    /// translation because lowering folds them into the enclosing phase.
+    pub fn requires_lowering(&self, circuit: &Circuit) -> bool {
+        operations_require_lowering(circuit.operations(), self.plans.as_ref())
+    }
+}
+
+fn operations_require_lowering(operations: &[Operation], plans: &LoweringPlans) -> bool {
+    operations
+        .iter()
+        .any(|operation| instruction_requires_lowering(&operation.instruction, plans))
+}
+
+fn instruction_requires_lowering(instruction: &Instruction, plans: &LoweringPlans) -> bool {
+    match instruction {
+        Instruction::Standard(StandardGate::GPhase) => true,
+        Instruction::Standard(gate) => {
+            !plans.is_physical(&KnowledgeInstructionKey::Standard(*gate))
+        }
+        // Keep the check conservative for standalone lowerers that may accept
+        // multi-controlled target instructions. The workflow decomposes these
+        // before translation, and running the lowerer preserves its error and
+        // normalization behavior for every extended gate-like instruction.
+        Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => true,
+        Instruction::ClassicalControl(control) => control_flow_requires_lowering(control, plans),
+        Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => false,
+    }
+}
+
+fn control_flow_requires_lowering(control: &ClassicalControlOp, plans: &LoweringPlans) -> bool {
+    match control {
+        ClassicalControlOp::If(op) => {
+            operations_require_lowering(op.then_body().operations(), plans)
+                || op
+                    .else_body()
+                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
+        }
+        ClassicalControlOp::While(op) => operations_require_lowering(op.body().operations(), plans),
+        ClassicalControlOp::For(op) => operations_require_lowering(op.body().operations(), plans),
+        ClassicalControlOp::Switch(op) => {
+            op.cases()
+                .iter()
+                .any(|case| operations_require_lowering(case.body().operations(), plans))
+                || op
+                    .default()
+                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
+        }
+        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
+    }
 }
 
 impl TargetBasisSignature {

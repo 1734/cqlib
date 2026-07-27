@@ -915,6 +915,15 @@ impl CompilerWorkflow {
         };
         let lowerer = Arc::clone(&prepared.lowerer);
 
+        if !lowerer.requires_lowering(&state.current) {
+            state.record_skipped(
+                "translation",
+                name,
+                "circuit already satisfies the explicit target basis",
+            );
+            return Ok(());
+        }
+
         state.apply_transform("translation", name, |circuit, analysis| {
             lowerer.transform(circuit, Some(analysis))
         })?;

@@ -151,6 +151,90 @@ fn apply_transform_error_leaves_workflow_state_untouched() {
 }
 
 #[test]
+fn target_translation_skips_circuit_already_in_explicit_basis() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let q0 = Qubit::new(0);
+
+    for name in [
+        "translate.target_basis",
+        "translate.target_basis.after_one_qubit",
+    ] {
+        let mut state =
+            workflow_state_with_target_basis(vec![Instruction::Standard(StandardGate::X)]);
+        state.current.x(q0).unwrap();
+        state.analysis = CircuitAnalysis::analyze(&state.current);
+        let operations = state.current.operations().as_ptr();
+
+        workflow
+            .apply_target_translation_named(&mut state, name)
+            .unwrap();
+
+        assert_eq!(state.current.operations().as_ptr(), operations);
+        assert!(!state.changed);
+        let report = state.steps.last().unwrap();
+        assert_eq!(report.name, name);
+        assert!(report.skipped);
+        assert!(!report.changed);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("circuit already satisfies the explicit target basis")
+        );
+    }
+}
+
+#[test]
+fn target_translation_still_runs_for_gate_outside_explicit_basis() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut state = workflow_state_with_target_basis(vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CZ),
+    ]);
+    state.current = Circuit::new(2);
+    state.current.cx(q0, q1).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    workflow.apply_target_translation(&mut state).unwrap();
+
+    let report = state.steps.last().unwrap();
+    assert_eq!(report.name, "translate.target_basis");
+    assert!(!report.skipped);
+    assert!(report.changed);
+    assert_eq!(
+        standard_ops(&state.current),
+        vec![StandardGate::H, StandardGate::CZ, StandardGate::H]
+    );
+}
+
+#[test]
+fn target_translation_does_not_skip_explicit_gphase() {
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let mut state = workflow_state_with_target_basis(vec![
+        Instruction::Standard(StandardGate::X),
+        Instruction::Standard(StandardGate::GPhase),
+    ]);
+    state
+        .current
+        .append(
+            Instruction::Standard(StandardGate::GPhase),
+            Vec::<Qubit>::new(),
+            [ParameterValue::Fixed(0.25)],
+            None,
+        )
+        .unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    workflow.apply_target_translation(&mut state).unwrap();
+
+    let report = state.steps.last().unwrap();
+    assert!(!report.skipped);
+    assert!(report.changed);
+    assert!(state.current.operations().is_empty());
+    assert_eq!(state.current.global_phase(), Parameter::from(0.25));
+}
+
+#[test]
 fn two_qubit_resynthesis_returns_the_recorded_changed_status() {
     let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
     let q0 = Qubit::new(0);

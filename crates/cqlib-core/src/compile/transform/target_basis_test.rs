@@ -12,9 +12,10 @@
 // that they have been altered from the originals.
 
 use super::{TargetBasisCostModel, TargetBasisLowerer};
+use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
-    Circuit, ClassicalControlOp, ClassicalExpr, Instruction, MCGate, Operation, Parameter,
-    ParameterValue, Qubit, StandardGate, ValueOperation,
+    Circuit, CircuitGate, ClassicalControlOp, ClassicalExpr, ClassicalType, Instruction, MCGate,
+    Operation, Parameter, ParameterValue, Qubit, StandardGate, UnitaryGate, ValueOperation,
 };
 use crate::compile::CompilerError;
 use crate::compile::knowledge::KnowledgeInstructionKey;
@@ -111,6 +112,144 @@ fn cost_model_rejects_non_standard_shared_lowerer() {
             .to_string()
             .contains("target-basis cost model requires standard instructions")
     );
+}
+
+#[test]
+fn requires_lowering_skips_empty_physical_and_non_gate_operations() {
+    let lowerer =
+        TargetBasisLowerer::new(target_basis(&[StandardGate::X, StandardGate::CX])).unwrap();
+    assert!(!lowerer.requires_lowering(&Circuit::new(1)));
+
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.x(q0).unwrap();
+    circuit.barrier(vec![q0]).unwrap();
+    circuit.delay(q0, ParameterValue::Fixed(4.0)).unwrap();
+    circuit.measure(q0).unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| body.break_loop())
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.continue_loop()
+        })
+        .unwrap();
+
+    assert!(!lowerer.requires_lowering(&circuit));
+}
+
+#[test]
+fn requires_lowering_detects_nonphysical_and_extended_gate_like_operations() {
+    let lowerer = TargetBasisLowerer::new(target_basis(&[StandardGate::X])).unwrap();
+    let q0 = Qubit::new(0);
+
+    let mut nonphysical = Circuit::new(1);
+    nonphysical.h(q0).unwrap();
+    assert!(lowerer.requires_lowering(&nonphysical));
+
+    let mut multi_controlled = Circuit::new(3);
+    multi_controlled
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+            [Qubit::new(0), Qubit::new(1), Qubit::new(2)],
+            std::iter::empty(),
+            None,
+        )
+        .unwrap();
+    assert!(lowerer.requires_lowering(&multi_controlled));
+
+    let mut unitary = Circuit::new(1);
+    unitary
+        .unitary(UnitaryGate::new("opaque", 1, 0), vec![q0])
+        .unwrap();
+    assert!(lowerer.requires_lowering(&unitary));
+
+    let mut definition = Circuit::new(1);
+    definition.x(q0).unwrap();
+    let gate = CircuitGate::new("defined_x", FrozenCircuit::new(definition)).unwrap();
+    let mut circuit_gate = Circuit::new(1);
+    circuit_gate
+        .circuit_gate(gate, vec![q0], std::iter::empty())
+        .unwrap();
+    assert!(lowerer.requires_lowering(&circuit_gate));
+}
+
+#[test]
+fn requires_lowering_treats_explicit_gphase_as_translation_work() {
+    let lowerer =
+        TargetBasisLowerer::new(target_basis(&[StandardGate::X, StandardGate::GPhase])).unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::GPhase),
+            Vec::<Qubit>::new(),
+            [ParameterValue::Fixed(0.25)],
+            None,
+        )
+        .unwrap();
+
+    assert!(lowerer.requires_lowering(&circuit));
+}
+
+#[test]
+fn requires_lowering_recurses_through_every_control_flow_body() {
+    let lowerer = TargetBasisLowerer::new(target_basis(&[StandardGate::X])).unwrap();
+    let q0 = Qubit::new(0);
+
+    let mut if_then = Circuit::new(1);
+    if_then
+        .if_(ClassicalExpr::bool_literal(true), |body| body.h(q0))
+        .unwrap();
+    assert!(lowerer.requires_lowering(&if_then));
+
+    let mut if_else = Circuit::new(1);
+    if_else
+        .if_else(
+            ClassicalExpr::bool_literal(true),
+            |body| body.x(q0),
+            |body| body.h(q0),
+        )
+        .unwrap();
+    assert!(lowerer.requires_lowering(&if_else));
+
+    let mut while_loop = Circuit::new(1);
+    while_loop
+        .while_(ClassicalExpr::bool_literal(true), |body| body.h(q0))
+        .unwrap();
+    assert!(lowerer.requires_lowering(&while_loop));
+
+    let mut for_loop = Circuit::new(1);
+    let loop_var = for_loop.var(ClassicalType::uint(2).unwrap());
+    for_loop
+        .for_uint(
+            loop_var,
+            ClassicalExpr::uint_literal(2, 0).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            |body, _| body.h(q0),
+        )
+        .unwrap();
+    assert!(lowerer.requires_lowering(&for_loop));
+
+    let mut switch_case = Circuit::new(1);
+    switch_case
+        .switch(ClassicalExpr::uint_literal(2, 0).unwrap(), |switch| {
+            switch.value(0, |body| body.h(q0))?;
+            switch.default(|body| body.x(q0))?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(lowerer.requires_lowering(&switch_case));
+
+    let mut switch_default = Circuit::new(1);
+    switch_default
+        .switch(ClassicalExpr::uint_literal(2, 0).unwrap(), |switch| {
+            switch.value(0, |body| body.x(q0))?;
+            switch.default(|body| body.h(q0))?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(lowerer.requires_lowering(&switch_default));
 }
 
 fn u_circuit(theta: f64, phi: f64, lambda: f64) -> Circuit {
