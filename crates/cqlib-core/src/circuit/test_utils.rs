@@ -103,3 +103,50 @@ pub(crate) fn assert_circuits_equivalent_up_to_global_phase(
     let expected_matrix = circuit_to_matrix(expected, None).unwrap();
     assert_matrices_equal_up_to_global_phase(&actual_matrix, &expected_matrix, epsilon);
 }
+
+/// Returns whether two matrices are equal up to one global phase.
+///
+/// Non-panicking counterpart of [`assert_matrices_equal_up_to_global_phase`],
+/// for negative assertions that must not emit panic-hook output.
+pub(crate) fn matrices_equal_up_to_global_phase(
+    actual: &Array2<Complex64>,
+    expected: &Array2<Complex64>,
+    epsilon: f64,
+) -> bool {
+    if actual.shape() != expected.shape() {
+        return false;
+    }
+    let Some((reference_actual, reference_expected)) = actual
+        .iter()
+        .zip(expected.iter())
+        .find(|(_, expected)| expected.norm() > epsilon)
+    else {
+        return false;
+    };
+    if reference_actual.norm() <= epsilon {
+        return false;
+    }
+
+    let global_phase = reference_actual / reference_expected;
+    if (global_phase.norm() - 1.0).abs() >= epsilon {
+        return false;
+    }
+
+    actual
+        .iter()
+        .zip(expected.iter())
+        .all(|(a, e)| (a - global_phase * e).norm() < epsilon)
+}
+
+/// Returns whether two circuits have the same unitary matrix up to global phase.
+///
+/// Non-panicking counterpart of [`assert_circuits_equivalent_up_to_global_phase`].
+pub(crate) fn circuits_equal_up_to_global_phase(
+    actual: &Circuit,
+    expected: &Circuit,
+    epsilon: f64,
+) -> bool {
+    let actual_matrix = circuit_to_matrix(actual, None).unwrap();
+    let expected_matrix = circuit_to_matrix(expected, None).unwrap();
+    matrices_equal_up_to_global_phase(&actual_matrix, &expected_matrix, epsilon)
+}
