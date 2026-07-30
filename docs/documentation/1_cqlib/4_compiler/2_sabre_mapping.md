@@ -84,44 +84,26 @@ result = compile(
 
 | 字段 | 含义 |
 |------|------|
-| `layout_trials` | 随机初始布局试次数 |
+| `layout_trials` | 随机初始布局数量；interaction-aware、greedy、VF2 候选额外加入 |
+| `layout_assignment_budget` | 断连设备上的 movement component 分配搜索上限 |
+| `vf2_prepass` | 有希望精确嵌入时使用的有界 VF2 预检查 |
 | `refinement_iterations` | 每个候选的前向+后向精修轮数 |
-| `layout_scoring_trials` | 评分每个精修布局的路由试次数 |
-| `routing_trials` | 最终选路的并行试次数 |
-| `trial_objective` | `swap_then_depth` / `depth_then_swap` 等 |
+| `routing_trials` | 每个初始候选跨轻量 refinement checkpoints 分配的完整 route 总数 |
 | `seed` | 确定性种子 |
-| `heuristic` | `SabreHeuristicConfig`：lookahead、decay 等 |
+| `heuristic` | `SabreHeuristicConfig`：默认单层、按设备宽度缩放且对高度重复线路提前停止的 lookahead；使用乘法 congestion 抑制物理位的连续复用；精确同分候选由 trial seed 选择 |
 
 ```python
-from cqlib.compile.sabre import SabreConfig, SabreTrialObjective
+from cqlib.compile.sabre import SabreConfig
 
 config = SabreConfig(
     seed=42,
     layout_trials=24,
     refinement_iterations=2,
-    routing_trials=12,
-    trial_objective=SabreTrialObjective.swap_then_depth(),
+    routing_trials=2,
 )
 ```
 
 快捷构造：`SabreConfig.deterministic_seeded(42)`。
-
----
-
-## 示例：不同 trial_objective 对比
-
-```python
-from cqlib.compile.sabre import SabreTrialObjective
-
-for obj in (
-    SabreTrialObjective.swap_count(),
-    SabreTrialObjective.depth(),
-    SabreTrialObjective.swap_then_depth(),
-):
-    cfg = SabreConfig(routing_trials=4, seed=123, trial_objective=obj)
-    routed = route_sabre(circuit, device, objective, cfg)
-    print(obj, "swaps:", routed.swap_count)
-```
 
 ---
 
@@ -131,12 +113,17 @@ for obj in (
 compile_record = {
     "seed": 123,
     "layout_trials": 24,
-    "routing_trials": 12,
-    "trial_objective": "swap_then_depth",
+    "refinement_iterations": 2,
+    "routing_trials": 2,
 }
 ```
 
 路由含随机性，正式实验必须固定并记录 `seed`。
+
+自动 layout + routing 使用融合搜索：每个候选保存初始及前向/后向精修产生的
+轻量 checkpoint，并把 `routing_trials` 分配给成本较低且映射不同的 checkpoint；
+完整 route 直接参与全局流式归约，不再为 layout 评分后重复路由。最终固定按预测
+native 2Q 数量、native 2Q 深度、native 总深度和稳定候选索引排序。
 
 ---
 
@@ -144,6 +131,8 @@ compile_record = {
 
 - `result.circuit`：物理比特编号上的线路，含插入的 `SWAP`；
 - `swap_count`：应与线路中 SWAP 门数量一致；
+- `layout_score`：获胜 layout 在请求 objective 下的诊断分数，不是 SABRE 最终选择依据；
+- `diagnostics.native_two_qubit_count`、`native_two_qubit_depth`、`native_total_depth`：获胜 route 的结构性 native 质量估计；
 - 路由保证无向物理邻接。
 
 ---

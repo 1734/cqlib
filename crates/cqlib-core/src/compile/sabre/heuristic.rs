@@ -12,56 +12,32 @@
 
 //! SABRE trial and SWAP-selection configuration.
 //!
-//! The router evaluates candidate SWAPs with a weighted distance score:
+//! The router first evaluates candidate SWAPs with a structural distance score:
 //!
 //! ```text
 //! score = basic_weight * sum(front_layer_distance)
-//!       + sum_i lookahead_weights[i] * sum(lookahead_layer_i_distance) / device_width
-//!       + decay_penalty(swap)
+//!       + sum_i lookahead_weights[i] * mean(lookahead_layer_i_distance)
+//! score *= max(congestion[swap_left], congestion[swap_right])
 //! ```
 //!
-//! Lower scores are preferred. The front layer contains unary and two-qubit
-//! routing requirements that are blocked by their current physical placement.
-//! Lookahead layers bias the local decision toward requirements that become
-//! relevant soon after the current front layer is routed. Keeping the front as
-//! a sum preserves its weight relative to lookahead as the front grows;
-//! device-width normalization keeps lookahead comparable across targets.
+//! Lower scores are preferred. Active-layer scaling keeps a broad lookahead
+//! layer from overwhelming nearer routing requirements. Candidates in
+//! a narrow structural window are compared by exact-lowerability-aware
+//! predicted native two-qubit cost when the target provides native plans.
+//! Exact score ties are sampled from the seeded trial generator.
 //!
-//! Decay is optional. When enabled, physical qubits recently used in heuristic
-//! SWAPs receive a slightly larger additive penalty, discouraging repeated movement
-//! around the same area of the device and improving parallelism. The decay
-//! table is reset after [`SabreHeuristicConfig::decay_reset`] heuristic SWAPs.
+//! The front layer contains unary and two-qubit routing requirements blocked by
+//! their current placement. Lookahead layers bias decisions toward requirements
+//! that become relevant soon. Repeated interactions remain represented in their
+//! dependency layers because they express future placement locality. Keeping
+//! the front as a sum preserves its weight as the front grows.
 //!
-//! [`SabreTrialObjective`] controls how independent routing trials are compared
-//! after they produce complete routed circuits. It does not change the local
-//! SWAP score; it changes only final trial selection and layout refinement
-//! tie-breaking.
-
+//! Congestion control is optional. Reusing either endpoint of a candidate SWAP
+//! multiplies its entire structural score, discouraging serial movement through
+//! the same physical region and allowing independent movement to proceed in
+//! parallel.
+//!
 use crate::compile::CompilerError;
-
-/// Objective used to select the best result among independent SABRE trials.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SabreTrialObjective {
-    /// Minimize inserted SWAP count only.
-    SwapCount,
-    /// Minimize routed two-qubit depth only.
-    ///
-    /// Use this for depth-sensitive targets where a few extra SWAPs may be
-    /// acceptable if they shorten the two-qubit critical path.
-    Depth,
-    /// Select final native quality within a bounded abstract-SWAP regret.
-    ///
-    /// This objective filters complete trials by [`SabreConfig::swap_regret_ratio`],
-    /// then compares native two-qubit count/depth, robust error, duration, and
-    /// total native operations. Local greedy SWAP selection remains topology
-    /// constrained; broader budget exploration belongs to bounded search.
-    NativeQualityWithinSwapBudget,
-    /// Minimize routed two-qubit depth first, then SWAP count.
-    ///
-    /// Use this when depth is the primary objective but SWAP count should still
-    /// break ties deterministically.
-    DepthThenSwap,
-}
 
 /// Bounded VF2 prepass used to seed SABRE layout candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +51,8 @@ pub struct SabreVf2PrepassConfig {
 /// Configuration shared by SABRE layout refinement and routing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SabreConfig {
-    /// Number of starting-layout trials considered during layout refinement.
+    /// Number of randomized starting layouts added to deterministic and
+    /// interaction-aware layout candidates.
     pub layout_trials: usize,
     /// Maximum component-assignment states explored before layout reports
     /// budget exhaustion. Exhaustion is distinct from proven infeasibility.
@@ -85,16 +62,11 @@ pub struct SabreConfig {
     pub vf2_prepass: Option<SabreVf2PrepassConfig>,
     /// Number of forward/backward refinement iterations per layout trial.
     pub refinement_iterations: usize,
-    /// Number of routing trials used to score each refined layout candidate.
-    pub layout_scoring_trials: usize,
-    /// Number of random routing trials used to select a final routed circuit.
+    /// Number of complete routing trials run for each fully refined layout.
+    ///
+    /// The search directly returns the best route and does not route
+    /// intermediate refinement states or run a separate layout-scoring phase.
     pub routing_trials: usize,
-    /// Objective used to choose among equally valid routing trials.
-    pub trial_objective: SabreTrialObjective,
-    /// Maximum relative abstract-SWAP regret accepted by the native-quality
-    /// trial objective. `0.05` permits `ceil(best_swap_count * 0.05)` extra
-    /// SWAPs. Other objectives ignore this field.
-    pub swap_regret_ratio: f64,
     /// Optional deterministic seed.  Equal seeds produce equal cqlib results.
     pub seed: Option<u64>,
     /// Swap-selection heuristic configuration.
@@ -103,16 +75,17 @@ pub struct SabreConfig {
 
 /// Swap-selection heuristic used by SABRE.
 ///
-/// The score combines the current front-layer sum, device-width-normalized
-/// lookahead and an optional additive decay penalty. Lower scores are preferred.
+/// The primary score combines the current front-layer sum, active-layer-scaled
+/// lookahead, and multiplicative congestion. Exact native 2Q cost resolves
+/// candidates in a narrow structural window when native plans are available.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SabreHeuristicConfig {
     /// Weight of the current front-layer total distance.
     pub basic_weight: f64,
-    /// Weights of each device-width-normalized lookahead-layer total.
+    /// Weights of each active-layer-scaled lookahead-layer total.
     pub lookahead_weights: Vec<f64>,
-    /// Amount added to a physical qubit's decay value after using it in a
-    /// heuristic SWAP. `None` disables the additive decay penalty.
+    /// Amount added to a physical qubit's congestion multiplier after using it
+    /// in a heuristic SWAP. `None` disables congestion control.
     pub decay_increment: Option<f64>,
     /// Number of heuristic SWAP attempts before decay values reset.
     pub decay_reset: usize,
@@ -127,9 +100,9 @@ impl Default for SabreHeuristicConfig {
     fn default() -> Self {
         Self {
             basic_weight: 1.0,
-            lookahead_weights: vec![0.5],
-            decay_increment: Some(0.001),
-            decay_reset: 5,
+            lookahead_weights: vec![0.5, 0.25, 0.125, 0.0625, 0.03125],
+            decay_increment: Some(0.002),
+            decay_reset: 10,
             attempt_limit: 1000,
             best_epsilon: 1e-10,
         }
@@ -146,10 +119,7 @@ impl Default for SabreConfig {
                 call_limit: 1_000_000,
             }),
             refinement_iterations: 1,
-            layout_scoring_trials: 1,
-            routing_trials: 5,
-            trial_objective: SabreTrialObjective::NativeQualityWithinSwapBudget,
-            swap_regret_ratio: 0.05,
+            routing_trials: 1,
             seed: None,
             heuristic: SabreHeuristicConfig::default(),
         }
@@ -171,13 +141,10 @@ impl SabreConfig {
                 call_limit: 100_000,
             }),
             refinement_iterations: 1,
-            layout_scoring_trials: 1,
             routing_trials: 1,
-            trial_objective: SabreTrialObjective::NativeQualityWithinSwapBudget,
-            swap_regret_ratio: 0.05,
             seed: Some(seed),
             heuristic: SabreHeuristicConfig {
-                lookahead_weights: vec![0.5],
+                lookahead_weights: vec![0.5, 0.25, 0.125, 0.0625, 0.03125],
                 attempt_limit: 20,
                 ..SabreHeuristicConfig::default()
             },
@@ -187,18 +154,13 @@ impl SabreConfig {
     /// Validates the routing fields used by SABRE.
     ///
     /// This check intentionally ignores layout-refinement fields such as
-    /// [`SabreConfig::layout_trials`] and [`SabreConfig::layout_scoring_trials`].
+    /// [`SabreConfig::layout_trials`].
     /// Routing starts from a concrete initial layout and does not depend on
     /// those layout-only knobs.
     pub fn validate(&self) -> Result<(), CompilerError> {
         if self.routing_trials == 0 {
             return Err(CompilerError::InvalidInput(
                 "sabre routing_trials must be greater than zero".to_string(),
-            ));
-        }
-        if !(self.swap_regret_ratio.is_finite() && self.swap_regret_ratio >= 0.0) {
-            return Err(CompilerError::InvalidInput(
-                "sabre swap_regret_ratio must be finite and non-negative".to_string(),
             ));
         }
         self.heuristic.validate()

@@ -467,7 +467,7 @@ impl Circuit {
         circuit.classical_vars = classical_vars.unwrap_or_default();
         circuit.classical_values = classical_values.unwrap_or_default();
         for operation in operations {
-            circuit.append_value_operation(operation)?;
+            circuit.append_value_operation_deferred_validation(operation)?;
         }
         circuit.validate_operation_parameters(circuit.operations())?;
         circuit.validate()?;
@@ -483,12 +483,28 @@ impl Circuit {
         &mut self,
         operation: ValueOperation,
     ) -> Result<(), CircuitError> {
+        self.append_value_operation_with_validation(operation, true)
+    }
+
+    fn append_value_operation_deferred_validation(
+        &mut self,
+        operation: ValueOperation,
+    ) -> Result<(), CircuitError> {
+        self.append_value_operation_with_validation(operation, false)
+    }
+
+    fn append_value_operation_with_validation(
+        &mut self,
+        operation: ValueOperation,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError> {
         let instruction = self.lower_instruction(operation.instruction)?;
-        self.append(
+        self.append_with_validation(
             instruction,
             operation.qubits,
             operation.params,
             operation.label.as_deref(),
+            validate_builder_state,
         )
     }
 
@@ -1066,11 +1082,28 @@ impl Circuit {
         Q::Item: Into<Qubit>,
         P: IntoIterator<Item = ParameterValue>,
     {
-        let validate_classical = matches!(
-            instruction,
-            Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
-        );
-        let checkpoint = validate_classical.then(|| self.checkpoint());
+        self.append_with_validation(instruction, qubits, params, label, true)
+    }
+
+    fn append_with_validation<Q, P>(
+        &mut self,
+        instruction: Instruction,
+        qubits: Q,
+        params: P,
+        label: Option<&str>,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError>
+    where
+        Q: IntoIterator,
+        Q::Item: Into<Qubit>,
+        P: IntoIterator<Item = ParameterValue>,
+    {
+        let validate_classical_now = validate_builder_state
+            && matches!(
+                instruction,
+                Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
+            );
+        let checkpoint = validate_classical_now.then(|| self.checkpoint());
 
         if let Instruction::ClassicalControl(op) = &instruction {
             self.validate_control_op(op)?;
@@ -1138,7 +1171,7 @@ impl Circuit {
             label: label.map(Into::into),
         });
 
-        if validate_classical && let Err(error) = self.validate_builder_state() {
+        if validate_classical_now && let Err(error) = self.validate_builder_state() {
             self.rollback_to(checkpoint.expect("classical append must define a checkpoint"));
             return Err(error);
         }

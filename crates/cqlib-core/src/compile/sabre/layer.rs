@@ -61,17 +61,19 @@ struct LayerNode {
 pub(crate) struct Layer {
     nodes: Vec<Option<LayerNode>>,
     occupied_node_indices: Vec<usize>,
+    occupied_positions: Vec<usize>,
     active: Vec<Option<NodeIndex>>,
     total_score: f64,
 }
 
-type DistanceFn<'a> = dyn Fn(usize, RequirementPlacement) -> Result<f64, CompilerError> + 'a;
+const VACANT_POSITION: usize = usize::MAX;
 
 impl Layer {
     pub(crate) fn new(node_count: usize, physical_count: usize) -> Self {
         Self {
             nodes: vec![None; node_count],
             occupied_node_indices: Vec::new(),
+            occupied_positions: vec![VACANT_POSITION; node_count],
             active: vec![None; physical_count],
             total_score: 0.0,
         }
@@ -81,15 +83,24 @@ impl Layer {
         self.occupied_node_indices.is_empty()
     }
 
-    pub(crate) fn insert(
+    pub(crate) fn len(&self) -> usize {
+        self.occupied_node_indices.len()
+    }
+
+    pub(crate) fn insert<F>(
         &mut self,
         node: NodeIndex,
         requirement: usize,
         placement: RequirementPlacement,
-        distances: &DistanceFn<'_>,
-    ) -> Result<(), CompilerError> {
+        distances: &F,
+    ) -> Result<(), CompilerError>
+    where
+        F: Fn(usize, RequirementPlacement) -> Result<f64, CompilerError>,
+    {
         if node.index() >= self.nodes.len() {
             self.nodes.resize(node.index() + 1, None);
+            self.occupied_positions
+                .resize(node.index() + 1, VACANT_POSITION);
         }
         self.ensure_active_entries_available(node, placement)?;
         let replacement = LayerNode {
@@ -107,20 +118,17 @@ impl Layer {
         Ok(())
     }
 
-    pub(crate) fn remove(
-        &mut self,
-        node: NodeIndex,
-        distances: &DistanceFn<'_>,
-    ) -> Result<(), CompilerError> {
+    pub(crate) fn remove<F>(&mut self, node: NodeIndex, distances: &F) -> Result<(), CompilerError>
+    where
+        F: Fn(usize, RequirementPlacement) -> Result<f64, CompilerError>,
+    {
         if node.index() >= self.nodes.len() {
             return Ok(());
         }
         if let Some(entry) = self.nodes[node.index()].take() {
             self.total_score -= distances(entry.requirement, entry.placement)?;
             self.remove_active_entry(node, entry.placement);
-            if let Ok(position) = self.occupied_node_indices.binary_search(&node.index()) {
-                self.occupied_node_indices.remove(position);
-            }
+            self.remove_occupied_node_index(node.index());
         }
         Ok(())
     }
@@ -128,16 +136,20 @@ impl Layer {
     pub(crate) fn clear(&mut self) {
         for index in self.occupied_node_indices.drain(..) {
             self.nodes[index] = None;
+            self.occupied_positions[index] = VACANT_POSITION;
         }
         self.active.fill(None);
         self.total_score = 0.0;
     }
 
-    pub(crate) fn apply_swap(
+    pub(crate) fn apply_swap<F>(
         &mut self,
         swap: [usize; 2],
-        distances: &DistanceFn<'_>,
-    ) -> Result<(), CompilerError> {
+        distances: &F,
+    ) -> Result<(), CompilerError>
+    where
+        F: Fn(usize, RequirementPlacement) -> Result<f64, CompilerError>,
+    {
         let affected = self.swap_affected_nodes(swap);
         let mut updates = Vec::with_capacity(2);
         for node in affected.into_iter().flatten() {
@@ -155,6 +167,44 @@ impl Layer {
         }
 
         for (node, requirement, before, after, delta) in updates {
+            self.total_score += delta;
+            self.remove_active_entry(node, before);
+            self.nodes[node.index()] = Some(LayerNode {
+                requirement,
+                placement: after,
+            });
+            self.insert_active_entry(node, after);
+        }
+        Ok(())
+    }
+
+    /// Applies a SWAP using a dense row-major topology-distance matrix.
+    ///
+    /// This is the common topology-only path. Keeping the matrix lookup inside
+    /// the layer avoids an indirect distance callback for every affected node.
+    pub(crate) fn apply_topology_swap(
+        &mut self,
+        swap: [usize; 2],
+        distances: &[u32],
+        width: usize,
+    ) -> Result<(), CompilerError> {
+        let affected = self.swap_affected_nodes(swap);
+        let mut updates = [None, None];
+        for (slot, node) in affected.into_iter().flatten().enumerate() {
+            let entry = self.nodes[node.index()].ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "sabre layer active node {} has no node entry",
+                    node.index()
+                ))
+            })?;
+            let before = entry.placement;
+            let after = before.after_swap(swap);
+            let delta = topology_distance(distances, width, after)
+                - topology_distance(distances, width, before);
+            updates[slot] = Some((node, entry.requirement, before, after, delta));
+        }
+
+        for (node, requirement, before, after, delta) in updates.into_iter().flatten() {
             self.total_score += delta;
             self.remove_active_entry(node, before);
             self.nodes[node.index()] = Some(LayerNode {
@@ -216,11 +266,15 @@ impl Layer {
     }
 
     /// Returns the layer's total distance after applying a candidate SWAP.
-    pub(crate) fn total_score_after_swap(
+    #[inline]
+    pub(crate) fn total_score_after_swap<F>(
         &self,
         swap: [usize; 2],
-        distances: &DistanceFn<'_>,
-    ) -> Result<f64, CompilerError> {
+        distances: &F,
+    ) -> Result<f64, CompilerError>
+    where
+        F: Fn(usize, RequirementPlacement) -> Result<f64, CompilerError>,
+    {
         if self.occupied_node_indices.is_empty() {
             return Ok(0.0);
         }
@@ -239,10 +293,44 @@ impl Layer {
         Ok(self.total_score + delta)
     }
 
+    /// Returns the layer score after a candidate SWAP using the compact
+    /// topology-distance matrix directly.
+    #[inline(always)]
+    pub(crate) fn total_topology_score_after_swap(
+        &self,
+        swap: [usize; 2],
+        distances: &[u32],
+        width: usize,
+    ) -> f64 {
+        let mut delta = 0.0;
+        for node in self.swap_affected_nodes(swap).into_iter().flatten() {
+            let entry = self.nodes[node.index()]
+                .expect("sabre active topology node must have a layer entry");
+            let after = entry.placement.after_swap(swap);
+            delta += topology_distance(distances, width, after)
+                - topology_distance(distances, width, entry.placement);
+        }
+        self.total_score + delta
+    }
+
     fn insert_occupied_node_index(&mut self, index: usize) {
-        match self.occupied_node_indices.binary_search(&index) {
-            Ok(_) => {}
-            Err(position) => self.occupied_node_indices.insert(position, index),
+        if self.occupied_positions[index] == VACANT_POSITION {
+            self.occupied_positions[index] = self.occupied_node_indices.len();
+            self.occupied_node_indices.push(index);
+        }
+    }
+
+    fn remove_occupied_node_index(&mut self, index: usize) {
+        let position = self.occupied_positions[index];
+        if position == VACANT_POSITION {
+            return;
+        }
+        let removed = self.occupied_node_indices.swap_remove(position);
+        debug_assert_eq!(removed, index);
+        self.occupied_positions[index] = VACANT_POSITION;
+        if position < self.occupied_node_indices.len() {
+            let replacement = self.occupied_node_indices[position];
+            self.occupied_positions[replacement] = position;
         }
     }
 
@@ -284,6 +372,21 @@ impl Layer {
         let second = self.active[swap[1]].filter(|node| Some(*node) != first);
         [first, second]
     }
+}
+
+#[inline(always)]
+fn topology_distance(distances: &[u32], width: usize, placement: RequirementPlacement) -> f64 {
+    let RequirementPlacement::Pair([left, right]) = placement else {
+        return 1.0;
+    };
+    let index = left * width + right;
+    let distance = distances[index];
+    debug_assert_ne!(
+        distance,
+        u32::MAX,
+        "prepared topology route crossed disconnected components"
+    );
+    f64::from(distance)
 }
 
 #[cfg(test)]

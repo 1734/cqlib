@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, ClassicalType, Qubit};
-use crate::compile::sabre::cost::MetricAvailability;
+use crate::compile::sabre::cost::{MetricAvailability, RobustDurationKey, RobustErrorKey};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit, Topology};
 use rayon::ThreadPoolBuilder;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -28,9 +28,208 @@ fn route_trial_for_test(
     heuristic: &SabreHeuristicConfig,
     seed: u64,
 ) -> Result<TrialResult, CompilerError> {
-    let unscored = route_unscored_trial_unchecked(sabre, target, layout, heuristic, seed)?;
-    let abstract_quality = unscored.abstract_quality();
-    unscored.finalize(abstract_quality, target)
+    let metadata = PreparedRouteMetadata::new(sabre, target)?;
+    let unscored =
+        route_unscored_trial_with_metadata(sabre, target, &metadata, layout, heuristic, seed)?;
+    RankedTrial::from_unscored(unscored, target)?.finish(target)
+}
+
+#[test]
+fn prepared_metadata_distinguishes_high_pair_reuse() {
+    let device = Device::line("pair-reuse-metadata", 4).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+
+    let mut repeated = Circuit::new(4);
+    for _ in 0..HIGH_PAIR_REUSE_FACTOR {
+        repeated.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+        repeated.h(Qubit::new(0)).unwrap();
+        repeated.cx(Qubit::new(2), Qubit::new(3)).unwrap();
+        repeated.h(Qubit::new(2)).unwrap();
+    }
+    let repeated_dag = SabreDag::from_operations(repeated.operations()).unwrap();
+    let repeated_target = RoutingTarget::from_device(&device, &physical, &repeated_dag).unwrap();
+    let repeated_metadata = PreparedRouteMetadata::new(&repeated_dag, &repeated_target).unwrap();
+    assert!(repeated_metadata.high_pair_reuse);
+
+    let mut sparse = Circuit::new(4);
+    sparse.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    sparse.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    sparse.cx(Qubit::new(0), Qubit::new(3)).unwrap();
+    let sparse_dag = SabreDag::from_operations(sparse.operations()).unwrap();
+    let sparse_target = RoutingTarget::from_device(&device, &physical, &sparse_dag).unwrap();
+    let sparse_metadata = PreparedRouteMetadata::new(&sparse_dag, &sparse_target).unwrap();
+    assert!(!sparse_metadata.high_pair_reuse);
+}
+
+#[test]
+fn layout_only_refinement_matches_full_output_final_layout() {
+    let device = Device::line("refinement-parity", 4).unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    let sabre = SabreDag::refinement_workload(circuit.operations()).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
+    let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 3)], 4).unwrap();
+    let heuristic = SabreConfig::deterministic_seeded(17).heuristic;
+
+    let full =
+        route_unscored_trial_with_metadata(&sabre, &target, &metadata, &initial, &heuristic, 29)
+            .unwrap();
+    let layout_only =
+        refine_layout_with_metadata(&sabre, &target, &metadata, &initial, &heuristic, 29).unwrap();
+
+    assert_eq!(layout_only, full.final_layout);
+}
+
+#[test]
+fn layout_only_control_flow_routing_matches_full_output_restoration() {
+    let device = Device::line("control-flow-refinement-parity", 3).unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.cx(Qubit::new(0), Qubit::new(2))
+        })
+        .unwrap();
+    let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
+    let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2)], 3).unwrap();
+    let heuristic = SabreConfig::deterministic_seeded(31).heuristic;
+
+    let full =
+        route_unscored_trial_with_metadata(&sabre, &target, &metadata, &initial, &heuristic, 37)
+            .unwrap();
+    let layout_only =
+        refine_layout_with_metadata(&sabre, &target, &metadata, &initial, &heuristic, 37).unwrap();
+
+    assert_eq!(layout_only, full.final_layout);
+    assert_eq!(layout_only, initial);
+    assert!(!full.materialize_operations(&target).unwrap().is_empty());
+}
+
+#[test]
+fn compact_route_plan_matches_materialized_incremental_quality() {
+    let device = Device::line("compact-route-quality", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
+    let initial = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
+    let heuristic = SabreConfig::deterministic_seeded(41).heuristic;
+
+    let trial =
+        route_unscored_trial_with_metadata(&sabre, &target, &metadata, &initial, &heuristic, 43)
+            .unwrap();
+    let operations = trial.materialize_operations(&target).unwrap();
+    let rescanned = native_plan_cost_for_operations(&operations, &target).unwrap();
+
+    assert!(trial.swap_count > 0);
+    assert_eq!(trial.operation_count, operation_count(&operations));
+    assert_eq!(
+        trial.two_qubit_operation_count,
+        two_qubit_operation_count(&operations)
+    );
+    assert_eq!(trial.native_cost.static_native, rescanned.static_native);
+    assert_eq!(trial.native_cost.path, rescanned.path);
+}
+
+#[test]
+fn topology_lookahead_skips_unary_work_but_keeps_future_two_qubit_requirements() {
+    let device = Device::line("lookahead-routing-horizon", 4).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let mut circuit = Circuit::new(4);
+    circuit.cx(Qubit::new(0), Qubit::new(3)).unwrap();
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
+    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    assert!(!target.native_cost_enabled);
+    let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
+    let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2), (3, 3)], 4).unwrap();
+    let heuristic = SabreHeuristicConfig {
+        lookahead_weights: vec![0.5],
+        ..SabreHeuristicConfig::default()
+    };
+    let mut state =
+        RoutingState::new(&sabre, &target, &metadata, &initial, &heuristic, 47).unwrap();
+    let mut output = TrialOutput::new(47, false);
+
+    state
+        .update_route(
+            &sabre,
+            &target,
+            &heuristic,
+            &mut output,
+            &sabre.first_layer,
+            None,
+        )
+        .unwrap();
+    state.populate_extended_set(&sabre, &target).unwrap();
+
+    let future = state.lookahead_layers[0].iter_nodes().collect::<Vec<_>>();
+    assert_eq!(future.len(), 1);
+    assert!(matches!(
+        sabre.graph[future[0]].kind,
+        SabreNodeKind::TwoQ(_)
+    ));
+}
+
+#[test]
+fn device_lookahead_keeps_placement_sensitive_unary_requirements() {
+    let device = Device::line("device-lookahead-unary", 4)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let mut circuit = Circuit::new(4);
+    circuit.cx(Qubit::new(0), Qubit::new(3)).unwrap();
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
+    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    assert!(target.native_cost_enabled);
+    let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
+    let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2), (3, 3)], 4).unwrap();
+    let heuristic = SabreHeuristicConfig {
+        lookahead_weights: vec![0.5],
+        ..SabreHeuristicConfig::default()
+    };
+    let mut state =
+        RoutingState::new(&sabre, &target, &metadata, &initial, &heuristic, 53).unwrap();
+    let mut output = TrialOutput::new(53, false);
+
+    state
+        .update_route(
+            &sabre,
+            &target,
+            &heuristic,
+            &mut output,
+            &sabre.first_layer,
+            None,
+        )
+        .unwrap();
+    state.populate_extended_set(&sabre, &target).unwrap();
+
+    let future = state.lookahead_layers[0].iter_nodes().collect::<Vec<_>>();
+    assert_eq!(future.len(), 1);
+    assert!(matches!(
+        sabre.graph[future[0]].kind,
+        SabreNodeKind::Unary(_)
+    ));
 }
 
 fn movement_edge(left: usize, right: usize, cost: NativePlanCost) -> MovementEdge {
@@ -63,7 +262,7 @@ fn line_distance(
 }
 
 #[test]
-fn heuristic_keeps_front_sum_and_normalizes_lookahead_by_device_width() {
+fn heuristic_keeps_front_sum_and_scales_lookahead_by_active_layer() {
     let mut front = Layer::new(2, 5);
     front
         .insert(
@@ -103,17 +302,15 @@ fn heuristic_keeps_front_sum_and_normalizes_lookahead_by_device_width() {
         &heuristic,
         [0, 1],
         &line_distance,
-        1.2,
-        5,
     )
     .unwrap();
 
-    // front sum = 6; lookahead = 0.5 * 1 / 5; additive decay = 0.2.
-    assert!((score - 6.3).abs() < 1e-12);
+    // The front remains a sum, while the one-node lookahead contributes 0.5.
+    assert!((score - 6.5).abs() < 1e-12);
 }
 
 #[test]
-fn decay_is_additive_instead_of_scaling_the_layer_cost() {
+fn topology_score_is_independent_of_congestion_decay() {
     let mut front = Layer::new(1, 4);
     front
         .insert(
@@ -129,15 +326,10 @@ fn decay_is_additive_instead_of_scaling_the_layer_cost() {
         ..SabreHeuristicConfig::default()
     };
 
-    let undecayed =
-        heuristic_score_after_swap(&front, &[], &heuristic, [0, 1], &line_distance, 1.0, 4)
-            .unwrap();
-    let decayed =
-        heuristic_score_after_swap(&front, &[], &heuristic, [0, 1], &line_distance, 1.5, 4)
-            .unwrap();
+    let score =
+        heuristic_score_after_swap(&front, &[], &heuristic, [0, 1], &line_distance).unwrap();
 
-    assert_eq!(undecayed, 4.0);
-    assert_eq!(decayed - undecayed, 0.5);
+    assert_eq!(score, 4.0);
 }
 
 #[test]
@@ -149,16 +341,9 @@ fn zero_width_and_empty_layers_have_a_finite_zero_score() {
         ..SabreHeuristicConfig::default()
     };
 
-    let score = heuristic_score_after_swap(
-        &front,
-        &[lookahead],
-        &heuristic,
-        [0, 0],
-        &line_distance,
-        1.0,
-        0,
-    )
-    .unwrap();
+    let score =
+        heuristic_score_after_swap(&front, &[lookahead], &heuristic, [0, 0], &line_distance)
+            .unwrap();
 
     assert_eq!(score, 0.0);
     assert!(score.is_finite());
@@ -173,7 +358,7 @@ fn scored_candidate_caches_unreachable_native_route_cost() {
             indices: [0, 1],
             cost: NativePlanCost::default(),
         },
-        topology_score: 1.0,
+        adjusted_score: 1.0,
         route_cost: None,
     };
     let mut calls = 0usize;
@@ -391,7 +576,7 @@ fn movement_cost_storage_tracks_sparse_edges() {
 }
 
 #[test]
-fn zero_eager_budget_routes_with_exact_lazy_pair_states() {
+fn topology_only_routing_uses_compact_distances_without_pair_caches() {
     let device = Device::line("lazy-pair-line", 4).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let mut circuit = Circuit::new(2);
@@ -428,9 +613,9 @@ fn zero_eager_budget_routes_with_exact_lazy_pair_states() {
     .unwrap();
     assert_eq!(target.eager_pair_state_count, 0);
     assert!(routed.swap_count > 0);
-    assert!(routed.lazy_pair_l1_lookup_count > 0);
-    assert!(routed.lazy_pair_l1_cached_count > 0);
-    assert!(shared_lazy_cache_len(&target) > 0);
+    assert_eq!(routed.lazy_pair_l1_lookup_count, 0);
+    assert_eq!(routed.lazy_pair_l1_cached_count, 0);
+    assert_eq!(shared_lazy_cache_len(&target), 0);
 }
 
 #[test]
@@ -440,8 +625,9 @@ fn trial_pair_cache_avoids_repeating_shared_lazy_searches() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
-    let target =
+    let mut target =
         RoutingTarget::from_device_with_pair_state_budget(&device, &physical, &sabre, 0).unwrap();
+    target.native_cost_enabled = true;
     let requirement = target
         .interaction_id_for_node(&sabre, sabre.first_layer[0])
         .unwrap();
@@ -679,7 +865,7 @@ fn component_relations_come_from_terminals_without_lazy_pair_search() {
 }
 
 #[test]
-fn structural_native_validation_descends_into_control_flow() {
+fn structural_native_scoring_descends_into_control_flow() {
     let p0 = PhysicalQubit::new(0);
     let mut device = Device::line("nested-native-validation", 2)
         .unwrap()
@@ -706,10 +892,10 @@ fn structural_native_validation_descends_into_control_flow() {
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let mut target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
     target
-        .native_costs
+        .native_plans
         .remove(&DeviceGateState::standard(StandardGate::H, smallvec![p0]));
 
-    let error = validate_native_trial_operations(circuit.operations(), &target).unwrap_err();
+    let error = native_plan_cost_for_operations(circuit.operations(), &target).unwrap_err();
 
     assert!(
         matches!(error, CompilerError::InvariantViolation(message) if message.contains("was not prepared"))
@@ -721,17 +907,14 @@ fn mapping_cycle_detection_verifies_a_repeated_layout() {
     let device = Device::line("mapping-cycle", 3).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let target = RoutingTarget::from_physical(&physical).unwrap();
-    let mut layout = Layout::from_pairs(&[(0, 0), (1, 1)], 3).unwrap();
-    let mut detector = MappingCycleDetector::new(&layout, &target);
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 3).unwrap();
+    let mut dense = DenseRoutingLayout::from_layout(&layout, &target.physical_qubits).unwrap();
+    let mut detector = MappingCycleDetector::new(&dense);
 
-    layout
-        .swap_physical(PhysicalQubit::new(0), PhysicalQubit::new(1))
-        .unwrap();
-    assert!(!detector.record_swap(&layout, &target, [0, 1]).unwrap());
-    layout
-        .swap_physical(PhysicalQubit::new(0), PhysicalQubit::new(1))
-        .unwrap();
-    assert!(detector.record_swap(&layout, &target, [0, 1]).unwrap());
+    dense.swap_physical_indices(0, 1);
+    assert!(!detector.record_swap(&dense, [0, 1]));
+    dense.swap_physical_indices(0, 1);
+    assert!(detector.record_swap(&dense, [0, 1]));
 }
 
 #[test]
@@ -799,7 +982,7 @@ fn default_movement_adjacency(
 }
 
 #[test]
-fn native_cost_comparison_prioritizes_gate_count_then_robust_error() {
+fn native_cost_comparison_uses_only_structural_two_qubit_count() {
     let fewer_gates_with_unknown_error = NativePlanCost {
         native_two_qubit_ops: 2,
         native_total_ops: 8,
@@ -837,7 +1020,7 @@ fn native_cost_comparison_prioritizes_gate_count_then_robust_error() {
             Some(equal_gates_with_known_error),
             Some(fewer_gates_with_unknown_error)
         ),
-        Ordering::Less
+        Ordering::Equal
     );
     assert_eq!(
         compare_optional_native_cost(Some(equal_gates_with_known_error), None),
@@ -846,33 +1029,19 @@ fn native_cost_comparison_prioritizes_gate_count_then_robust_error() {
 }
 
 #[test]
-fn exclusive_control_flow_chooses_one_coherent_worst_path() {
-    let low = RobustErrorKey {
-        unavailable_count: 0,
-        imputed_count: 0,
-        log_error: 0.1,
-    };
-    let high = RobustErrorKey {
-        unavailable_count: 0,
-        imputed_count: 0,
-        log_error: 0.3,
-    };
-
+fn exclusive_control_flow_chooses_one_coherent_worst_structural_path() {
     let low_path = ExecutionPathCost {
         native_two_qubit_ops: 2,
         native_total_ops: 8,
-        error: Some(low),
         ..ExecutionPathCost::default()
     };
     let high_path = ExecutionPathCost {
         native_two_qubit_ops: 3,
         native_total_ops: 5,
-        error: Some(high),
         ..ExecutionPathCost::default()
     };
 
     assert_eq!(low_path.worse(high_path), high_path);
-    assert_ne!(low_path.worse(high_path).error, Some(low.combine(high)));
 }
 
 #[test]
@@ -929,131 +1098,107 @@ fn fixed_for_loop_multiplies_execution_path_two_qubit_depth() {
 }
 
 #[test]
-fn full_quality_reuses_the_precomputed_abstract_quality() {
-    let device = Device::line("abstract-quality", 2).unwrap();
+fn abstract_swap_depth_uses_its_two_qubit_decomposition_weight() {
+    let mut circuit = Circuit::new(3);
+    circuit.swap(Qubit::new(0), Qubit::new(1)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+
+    assert_eq!(two_qubit_depth(circuit.operations()), 4);
+}
+
+fn ranked_trial_for_test(
+    native_two_qubit_ops: usize,
+    native_two_qubit_depth: usize,
+    native_total_depth: usize,
+) -> RankedTrial {
+    RankedTrial {
+        trial: UnscoredTrial {
+            plan: CompactRoutePlan::default(),
+            final_layout: Layout::default(),
+            swap_count: 0,
+            fallback_count: 0,
+            control_flow_blocks_routed: 0,
+            lazy_pair_l1_lookup_count: 0,
+            lazy_pair_l1_hit_count: 0,
+            lazy_pair_l1_cached_count: 0,
+            native_cost: NativeCircuitCost::default(),
+            two_qubit_operation_count: 0,
+            operation_count: 0,
+        },
+        abstract_quality: AbstractTrialQuality::default(),
+        native_two_qubit_ops,
+        native_total_ops: 0,
+        unknown_loop_count: 0,
+        native_two_qubit_depth: Some(native_two_qubit_depth),
+        native_total_depth: Some(native_total_depth),
+        materialized_operations: None,
+    }
+}
+
+#[test]
+fn trial_quality_uses_native_count_depth_and_total_depth_in_declared_order() {
+    let device = Device::line("ranked-trial-comparison", 2).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let target = RoutingTarget::from_physical(&physical).unwrap();
-    let abstract_quality = AbstractTrialQuality {
-        swap_count: 7,
-        two_qubit_depth: 11,
-        operation_count: 13,
-        two_qubit_operation_count: 17,
-    };
-
-    let quality = trial_quality(&[], abstract_quality, &target).unwrap();
-
-    assert_eq!(quality.abstract_quality, abstract_quality);
-    assert_eq!(quality.native_two_qubit_ops, 17);
-    assert_eq!(quality.native_two_qubit_depth, 11);
-    assert_eq!(quality.native_total_ops, 13);
-}
-
-#[test]
-fn constrained_trial_objective_uses_native_quality_in_declared_order() {
-    let baseline = TrialQuality {
-        abstract_quality: AbstractTrialQuality {
-            swap_count: 4,
-            two_qubit_depth: 2,
-            operation_count: 8,
-            two_qubit_operation_count: 2,
-        },
-        native_two_qubit_ops: 10,
-        native_two_qubit_depth: 5,
-        native_total_ops: 30,
-        error: Some(RobustErrorKey {
-            unavailable_count: 0,
-            imputed_count: 0,
-            log_error: 0.2,
-        }),
-        duration: Some(RobustDurationKey {
-            unavailable_count: 0,
-            imputed_count: 0,
-            duration_work: 20.0,
-        }),
-        makespan: Some(20.0),
-        unknown_loop_count: 0,
-    };
-    let fewer_native_gates = TrialQuality {
-        native_two_qubit_ops: 9,
-        native_two_qubit_depth: 100,
-        ..baseline
-    };
-    let shallower_native_depth = TrialQuality {
-        native_two_qubit_depth: 4,
-        error: Some(RobustErrorKey {
-            log_error: 100.0,
-            ..baseline.error.unwrap()
-        }),
-        ..baseline
-    };
-    let better_coverage = TrialQuality {
-        error: Some(RobustErrorKey {
-            unavailable_count: 0,
-            imputed_count: 0,
-            log_error: 10.0,
-        }),
-        ..baseline
-    };
-    let worse_coverage = TrialQuality {
-        error: Some(RobustErrorKey {
-            unavailable_count: 1,
-            imputed_count: 0,
-            log_error: 0.0,
-        }),
-        ..baseline
-    };
+    let mut baseline = ranked_trial_for_test(10, 5, 12);
+    let mut fewer_native_gates = ranked_trial_for_test(9, 100, 100);
+    let mut shallower_native_depth = ranked_trial_for_test(10, 4, 100);
+    let mut shallower_total_depth = ranked_trial_for_test(10, 5, 11);
+    let mut tied = ranked_trial_for_test(10, 5, 12);
 
     assert!(
-        SabreTrialObjective::NativeQualityWithinSwapBudget
-            .compare(fewer_native_gates, 1, baseline, 0)
-            .is_lt()
+        compare_ranked_trials(
+            &mut fewer_native_gates,
+            (0, 1),
+            &mut baseline,
+            (0, 0),
+            &target,
+        )
+        .unwrap()
+        .is_lt()
     );
     assert!(
-        SabreTrialObjective::NativeQualityWithinSwapBudget
-            .compare(shallower_native_depth, 1, baseline, 0)
-            .is_lt()
+        compare_ranked_trials(
+            &mut shallower_native_depth,
+            (0, 1),
+            &mut baseline,
+            (0, 0),
+            &target,
+        )
+        .unwrap()
+        .is_lt()
     );
     assert!(
-        SabreTrialObjective::NativeQualityWithinSwapBudget
-            .compare(better_coverage, 1, worse_coverage, 0)
-            .is_lt()
+        compare_ranked_trials(
+            &mut shallower_total_depth,
+            (0, 1),
+            &mut baseline,
+            (0, 0),
+            &target,
+        )
+        .unwrap()
+        .is_lt()
+    );
+    assert_eq!(
+        compare_ranked_trials(&mut baseline, (0, 0), &mut tied, (0, 1), &target).unwrap(),
+        Ordering::Less
     );
 }
 
 #[test]
-fn trial_swap_budget_is_five_percent_with_integer_ceiling() {
-    assert_eq!(
-        SabreTrialObjective::NativeQualityWithinSwapBudget.swap_limit(0.05, [20, 25].into_iter()),
-        21
-    );
-    assert_eq!(
-        SabreTrialObjective::NativeQualityWithinSwapBudget.swap_limit(0.05, [19, 25].into_iter()),
-        20
-    );
-    assert_eq!(
-        SabreTrialObjective::Depth.swap_limit(0.05, [2].into_iter()),
-        usize::MAX
-    );
-}
-
-#[test]
-fn trial_profiles_are_deterministic_and_do_not_mutate_the_base() {
+fn routing_trials_share_one_fixed_heuristic_configuration() {
     let base = SabreHeuristicConfig {
         lookahead_weights: vec![0.5, 0.25],
         decay_increment: Some(0.01),
         ..SabreHeuristicConfig::default()
     };
+    let config = SabreConfig {
+        routing_trials: 4,
+        heuristic: base.clone(),
+        ..SabreConfig::default()
+    };
 
-    let profiles = (0..4)
-        .map(|index| trial_heuristic_profile(&base, index))
-        .collect::<Vec<_>>();
-
-    assert_eq!(profiles[0], base);
-    assert_eq!(profiles[1].decay_increment, None);
-    assert_eq!(profiles[2].lookahead_weights, vec![0.25, 0.125]);
-    assert_eq!(profiles[3].lookahead_weights, vec![0.75, 0.375]);
-    assert_eq!(profiles[3].decay_increment, Some(0.02));
-    assert_eq!(trial_heuristic_profile(&base, 7), profiles[3]);
+    assert_eq!(config.heuristic, base);
     assert_eq!(base.lookahead_weights, vec![0.5, 0.25]);
     assert_eq!(base.decay_increment, Some(0.01));
 }

@@ -19,13 +19,14 @@
 //! plus exact native-plan lower bounds, and selects the best routed circuit
 //! from deterministic or seeded routing trials.
 //!
-//! This implementation follows the original SABRE structure and incorporates
-//! selected LightSABRE/Qiskit-style production enhancements: deterministic
-//! multi-trial selection, relative/delta layer scoring, exact movement
-//! feasibility, release-valve fallback, trial-level parallelism, control-flow
-//! body restoration, and native-quality trial selection. It is not a complete
-//! implementation of every LightSABRE heuristic; adaptive Beam, critical-path
-//! scoring, and local exact search remain gated on external quality benchmarks.
+//! This implementation follows the published SABRE structure and extends it
+//! with cqlib-specific mechanisms: interaction-graph layout seeds, dense routing
+//! state, incremental novelty-aware lookahead scoring, exact
+//! movement/lowerability feasibility, native-2Q-aware local decisions,
+//! multiplicative congestion control, release-valve fallback, compact trial
+//! plans, parallel streaming selection, and control-flow layout restoration.
+//! These mechanisms are implemented independently around cqlib's device planner
+//! and routing contracts.
 //!
 //! This module is intentionally independent from compiler workflow selection.
 //! It exposes reusable SABRE building blocks, but it does not decide whether a
@@ -102,21 +103,20 @@
 
 mod cost;
 mod dag;
+mod dense_layout;
 mod heuristic;
 mod layer;
 mod routing;
 
 pub(crate) use cost::MetricAvailability;
 pub(crate) use dag::SabreDag;
-pub use heuristic::{
-    SabreConfig, SabreHeuristicConfig, SabreTrialObjective, SabreVf2PrepassConfig,
-};
+pub use heuristic::{SabreConfig, SabreHeuristicConfig, SabreVf2PrepassConfig};
 pub(crate) use routing::{
-    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata,
-    RequirementReachabilityFailure, RoutingTarget, TrialQuality,
-    interaction_reachability_for_target, movement_component_assignment,
-    normalize_initial_layout_for_target, route_unscored_trial_with_metadata, sabre_route_prepared,
-    trial_heuristic_profile, trial_seeds, validate_native_trial_operations,
+    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata, RankedTrial,
+    RequirementReachabilityFailure, RoutingTarget, TrialResult, compare_ranked_trials,
+    finish_sabre_route, interaction_reachability_for_target, movement_component_assignment,
+    normalize_initial_layout_for_target, refine_layout_with_metadata,
+    route_ranked_trial_with_metadata,
 };
 pub use routing::{SabreRoutingDiagnostics, SabreRoutingResult, sabre_route};
 pub use routing::{normalize_initial_layout, validate_reachable_interactions};

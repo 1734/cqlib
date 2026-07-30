@@ -45,9 +45,8 @@
 
 use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
 use crate::compile::CompilerError;
-use crate::compile::physical_target::PhysicalLayoutGraph;
 use crate::compile::resource::ResourceLimits;
-use crate::compile::sabre::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
+use crate::compile::sabre::SabreConfig;
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
 };
@@ -714,7 +713,7 @@ impl CompilerWorkflow {
     ///
     /// A caller-supplied initial layout bypasses layout search but still uses
     /// the same SABRE router and trial settings. Without a supplied layout, the
-    /// workflow derives a layout objective from the configured target device.
+    /// workflow uses the topology/direction-only compiler SABRE objective.
     fn apply_layout_and_routing(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let Some(target) = self.routing_device_target() else {
             state.record_skipped("routing", "route.sabre", "no target device configured");
@@ -737,17 +736,7 @@ impl CompilerWorkflow {
                 state.current = routed.into_circuit();
                 (route_changed, swap_count, trials_evaluated, true)
             } else {
-                let physical = PhysicalLayoutGraph::from_device(device)?;
-                let objective = match self.config.mode {
-                    CompileMode::Normal => LayoutObjective::auto_from_physical(&physical),
-                    CompileMode::Enhanced => {
-                        if physical.has_fidelity_data() {
-                            LayoutObjective::fidelity_required(&physical)?
-                        } else {
-                            LayoutObjective::topology_only()
-                        }
-                    }
-                };
+                let objective = LayoutObjective::topology_only();
                 let routed = route_sabre(&state.current, device, &objective, &config)?;
                 let route_changed = routed.changed(&state.current);
                 let swap_count = routed.swap_count();
@@ -1089,13 +1078,7 @@ fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {
             vf2.call_limit = 5_000_000;
         }
         config.refinement_iterations = 2;
-        config.layout_scoring_trials = 3;
-        config.routing_trials = 12;
-        config.trial_objective = SabreTrialObjective::NativeQualityWithinSwapBudget;
-        config.heuristic = SabreHeuristicConfig {
-            lookahead_weights: vec![0.5, 0.25],
-            ..SabreHeuristicConfig::default()
-        };
+        config.routing_trials = 2;
     }
 
     config

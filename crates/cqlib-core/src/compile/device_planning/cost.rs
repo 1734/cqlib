@@ -195,17 +195,6 @@ pub(crate) enum MetricAvailability<T> {
 }
 
 impl<T: Copy> MetricAvailability<T> {
-    pub(crate) fn value(self) -> Option<T> {
-        match self {
-            Self::Available(value) => Some(value),
-            Self::Disabled | Self::Inconsistent => None,
-        }
-    }
-
-    pub(crate) fn is_inconsistent(self) -> bool {
-        matches!(self, Self::Inconsistent)
-    }
-
     fn combine(self, other: Self, combine: impl FnOnce(T, T) -> T) -> Self {
         match (self, other) {
             (Self::Disabled, Self::Disabled) => Self::Disabled,

@@ -28,11 +28,11 @@
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
 use crate::compile::sabre::{
-    SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult, sabre_route, sabre_route_prepared,
+    SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult, finish_sabre_route, sabre_route,
 };
 use crate::compile::transform::layout::{
     LayoutDiagnostics, LayoutObjective, LayoutScore, prepare_sabre_circuit,
-    prepare_sabre_device_target, sabre_layout_prepared,
+    prepare_sabre_device_target, sabre_route_selection_prepared,
 };
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 
@@ -111,7 +111,7 @@ impl RoutedCircuit {
 /// Full SABRE pipeline result: layout selection + routing.
 ///
 /// Returned by [`route_sabre`]. Wraps a [`RoutedCircuit`] and adds the layout
-/// score so callers can inspect layout quality.
+/// observed objective score so callers can inspect the winning layout.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SabreRouteResult {
     routed: RoutedCircuit,
@@ -130,7 +130,10 @@ impl SabreRouteResult {
         self.routed
     }
 
-    /// Score of the selected initial layout, when available.
+    /// Observed score of the selected initial layout, when available.
+    ///
+    /// SABRE selects the winner by predicted native route quality; this score
+    /// is diagnostic and is not the route-selection key.
     pub fn layout_score(&self) -> Option<&LayoutScore> {
         self.layout_score.as_ref()
     }
@@ -187,19 +190,19 @@ fn sabre_layout_and_route(
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
     let prepared_target = prepare_sabre_device_target(&prepared, device)?;
-    let layout_result = sabre_layout_prepared(&prepared, &prepared_target, objective, config)?;
-    let routed = sabre_route_prepared(
+    let selection = sabre_route_selection_prepared(&prepared, &prepared_target, objective, config)?;
+    let routed = finish_sabre_route(
         circuit,
-        prepared.routing_dag(),
         prepared_target.routing_target(),
-        prepared_target.routing_metadata(),
-        &layout_result.layout,
-        config,
+        selection.initial_layout,
+        selection.trial,
+        selection.selected_trial_index,
+        selection.trials_evaluated,
     )?;
     Ok(SabreRoutingResultWithScore {
         routing: routed,
-        layout_score: layout_result.score,
-        layout_diagnostics: layout_result.diagnostics,
+        layout_score: Some(selection.score),
+        layout_diagnostics: selection.diagnostics,
     })
 }
 

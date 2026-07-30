@@ -43,7 +43,6 @@ from ..._native import compile as _compile_module
 
 _sabre_module = _compile_module.sabre
 
-SabreTrialObjective = _sabre_module.SabreTrialObjective
 SabreHeuristicConfig = _sabre_module.SabreHeuristicConfig
 SabreVf2PrepassConfig = _sabre_module.SabreVf2PrepassConfig
 SabreConfig = _sabre_module.SabreConfig
@@ -54,7 +53,6 @@ normalize_initial_layout = _sabre_module.normalize_initial_layout
 validate_reachable_interactions = _sabre_module.validate_reachable_interactions
 
 __all__ = [
-    "SabreTrialObjective",
     "SabreHeuristicConfig",
     "SabreVf2PrepassConfig",
     "SabreConfig",

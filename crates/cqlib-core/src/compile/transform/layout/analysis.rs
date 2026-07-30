@@ -70,6 +70,7 @@ pub struct Interaction {
 pub struct InteractionGraph {
     interactions: Vec<Interaction>,
     gate_contributions: Vec<Vec<GateInteraction>>,
+    temporal_weights: Vec<[f64; 3]>,
 }
 
 /// Gate-specific weights for one unordered logical-qubit interaction.
@@ -101,6 +102,14 @@ impl InteractionGraph {
             .get(index)
             .expect("interaction and gate-contribution slots must remain aligned")
             .as_slice()
+    }
+
+    pub(super) fn temporal_weights(&self, index: usize) -> [f64; 3] {
+        debug_assert_eq!(self.interactions.len(), self.temporal_weights.len());
+        self.temporal_weights
+            .get(index)
+            .copied()
+            .unwrap_or([0.0; 3])
     }
 
     #[cfg(test)]
@@ -142,6 +151,7 @@ impl InteractionGraph {
         gate: Option<StandardGate>,
         weight: f64,
         order: usize,
+        temporal_bucket: usize,
     ) {
         let (left, right, left_to_right) = if first <= second {
             (first, second, true)
@@ -170,6 +180,7 @@ impl InteractionGraph {
                         weight,
                     );
                 }
+                self.temporal_weights[index][temporal_bucket] += weight;
             }
             Err(index) => {
                 self.interactions.insert(
@@ -188,9 +199,13 @@ impl InteractionGraph {
                     add_gate_contribution(&mut contributions, gate, left_to_right, weight);
                 }
                 self.gate_contributions.insert(index, contributions);
+                let mut temporal = [0.0; 3];
+                temporal[temporal_bucket] = weight;
+                self.temporal_weights.insert(index, temporal);
             }
         }
         debug_assert_eq!(self.interactions.len(), self.gate_contributions.len());
+        debug_assert_eq!(self.interactions.len(), self.temporal_weights.len());
     }
 }
 
@@ -230,9 +245,42 @@ fn add_gate_contribution(
 pub fn analyze_circuit_for_layout(
     circuit: &Circuit,
 ) -> Result<CircuitLayoutAnalysis, CompilerError> {
-    let mut analyzer = InteractionAnalyzer::new(circuit.qubits());
+    let operation_count = count_layout_order_operations(circuit.operations());
+    let mut analyzer = InteractionAnalyzer::new(circuit.qubits(), operation_count);
     analyzer.scan_operations(circuit.operations())?;
     Ok(analyzer.finish())
+}
+
+fn count_layout_order_operations(operations: &[Operation]) -> usize {
+    operations
+        .iter()
+        .map(|operation| match &operation.instruction {
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    count_layout_order_operations(op.then_body().operations())
+                        + op.else_body()
+                            .map_or(0, |body| count_layout_order_operations(body.operations()))
+                }
+                ClassicalControlOp::While(op) => {
+                    count_layout_order_operations(op.body().operations())
+                }
+                ClassicalControlOp::For(op) => {
+                    count_layout_order_operations(op.body().operations())
+                }
+                ClassicalControlOp::Switch(op) => {
+                    op.cases()
+                        .iter()
+                        .map(|case| count_layout_order_operations(case.body().operations()))
+                        .sum::<usize>()
+                        + op.default()
+                            .map_or(0, |body| count_layout_order_operations(body.operations()))
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => 0,
+            },
+            Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => 0,
+            _ => 1,
+        })
+        .sum()
 }
 
 struct InteractionAnalyzer {
@@ -240,15 +288,17 @@ struct InteractionAnalyzer {
     interactions: InteractionGraph,
     /// Monotonic order for quantum operations that affect layout tie-breaks.
     operation_order: usize,
+    total_operation_count: usize,
 }
 
 impl InteractionAnalyzer {
     /// Creates an analyzer seeded with the circuit's logical qubit order.
-    fn new(qubits: Vec<Qubit>) -> Self {
+    fn new(qubits: Vec<Qubit>, total_operation_count: usize) -> Self {
         Self {
             logical_qubits: qubits.into_iter().map(LogicalQubit::from_qubit).collect(),
             interactions: InteractionGraph::new(),
             operation_order: 0,
+            total_operation_count,
         }
     }
 
@@ -284,6 +334,9 @@ impl InteractionAnalyzer {
                             },
                             1.0,
                             self.operation_order,
+                            (self.operation_order.saturating_mul(3)
+                                / self.total_operation_count.max(1))
+                            .min(2),
                         );
                     }
                     arity => {

@@ -176,7 +176,7 @@ class LayoutDiagnostics:
     def __deepcopy__(self, memo: dict[int, object]) -> LayoutDiagnostics: ...
 
 class LayoutResult:
-    """Selected initial layout, optional score, and diagnostics."""
+    """Selected initial layout, observed score, and diagnostics."""
 
     @property
     def layout(self) -> Layout:
@@ -184,7 +184,12 @@ class LayoutResult:
         ...
     @property
     def score(self) -> LayoutScore | None:
-        """Score used to rank this layout, when available."""
+        """Observed score of this layout under the requested objective.
+
+        Individual algorithms may use a different selection key. In
+        particular, SABRE selects its winner by predicted native route
+        quality and reports this score for diagnostics.
+        """
         ...
     @property
     def diagnostics(self) -> LayoutDiagnostics:
@@ -386,6 +391,12 @@ def sabre_layout_prepared(
 ) -> LayoutResult:
     """Run SABRE layout selection from precomputed circuit and device data.
 
+    Like :func:`sabre_layout`, this performs fused refinement and routing
+    search. Complete route trials are distributed across distinct lightweight
+    refinement checkpoints and ranked by predicted native route quality.
+    ``objective`` contributes candidate generation and the diagnostic score in
+    the result, but is not the route-selection key.
+
     Raises:
         CompilerConfigError: If the configuration or prepared inputs are
             incompatible.
@@ -485,10 +496,14 @@ def sabre_layout(
     objective: LayoutObjective | None = None,
     config: SabreConfig | None = None,
 ) -> LayoutResult:
-    """Select an initial layout with SABRE forward/backward refinement.
+    """Select an initial layout with fused SABRE refinement and routing search.
 
-    This function does not insert SWAPs or return a routed circuit. ``None``
-    selects topology-only scoring and the default SABRE configuration.
+    Complete route trials are distributed across distinct lightweight
+    refinement checkpoints and ranked by predicted native route quality. This
+    layout-only API returns the winning route's initial layout; it does not
+    insert SWAPs or return a routed circuit. ``None`` selects topology-only
+    scoring and the default SABRE configuration. ``objective`` contributes
+    candidate generation and diagnostics, but is not the route-selection key.
 
     Raises:
         CompilerConfigError: If configuration, capacity, topology, circuit, or

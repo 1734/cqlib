@@ -23,7 +23,7 @@ from cqlib.compile.sabre import (
     SabreHeuristicConfig,
     SabreRoutingDiagnostics,
     SabreRoutingResult,
-    SabreTrialObjective,
+    SabreVf2PrepassConfig,
     sabre_route,
 )
 from cqlib.device import Device, Layout, Topology
@@ -46,8 +46,8 @@ def layout_signature(layout: Layout, logical_qubits: range) -> tuple[int, ...]:
 def test_sabre_module_and_public_exports_are_registered():
     assert sabre.sabre_route is sabre_route
     assert "cqlib._native.compile.sabre" in sys.modules
-    assert SabreTrialObjective.__module__ == "cqlib.compile.sabre"
     assert SabreHeuristicConfig.__module__ == "cqlib.compile.sabre"
+    assert SabreVf2PrepassConfig.__module__ == "cqlib.compile.sabre"
     assert SabreConfig.__module__ == "cqlib.compile.sabre"
     assert SabreRoutingDiagnostics.__module__ == "cqlib.compile.sabre"
     assert SabreRoutingResult.__module__ == "cqlib.compile.sabre"
@@ -56,9 +56,9 @@ def test_sabre_module_and_public_exports_are_registered():
 def test_sabre_configuration_defaults_and_copy_protocols():
     heuristic = SabreHeuristicConfig()
     assert heuristic.basic_weight == 1.0
-    assert heuristic.lookahead_weights == [0.5]
-    assert heuristic.decay_increment == 0.001
-    assert heuristic.decay_reset == 5
+    assert heuristic.lookahead_weights == [0.5, 0.25, 0.125, 0.0625, 0.03125]
+    assert heuristic.decay_increment == 0.002
+    assert heuristic.decay_reset == 10
     assert heuristic.attempt_limit == 1000
     assert heuristic.best_epsilon == 1e-10
     assert copy.copy(heuristic) == heuristic
@@ -66,10 +66,10 @@ def test_sabre_configuration_defaults_and_copy_protocols():
 
     config = SabreConfig()
     assert config.layout_trials == 10
+    assert config.layout_assignment_budget == 1_000_000
+    assert config.vf2_prepass == SabreVf2PrepassConfig()
     assert config.refinement_iterations == 1
-    assert config.layout_scoring_trials == 1
-    assert config.routing_trials == 5
-    assert config.trial_objective == SabreTrialObjective.swap_then_depth()
+    assert config.routing_trials == 1
     assert config.seed is None
     assert config.heuristic == heuristic
     assert config.heuristic is not heuristic
@@ -81,17 +81,12 @@ def test_sabre_configuration_defaults_and_copy_protocols():
     assert deterministic.seed == 7
 
 
-def test_trial_objective_values_are_distinct_and_copyable():
-    objectives = [
-        SabreTrialObjective.swap_count(),
-        SabreTrialObjective.depth(),
-        SabreTrialObjective.swap_then_depth(),
-        SabreTrialObjective.depth_then_swap(),
-    ]
-
-    assert len(set(objectives)) == 4
-    assert all(copy.copy(objective) == objective for objective in objectives)
-    assert all(copy.deepcopy(objective) == objective for objective in objectives)
+def test_vf2_prepass_configuration_is_copyable():
+    config = SabreVf2PrepassConfig(candidate_limit=4, call_limit=20_000)
+    assert config.candidate_limit == 4
+    assert config.call_limit == 20_000
+    assert copy.copy(config) == config
+    assert copy.deepcopy(config) == config
 
 
 def test_sabre_route_inserts_swap_and_returns_diagnostics():

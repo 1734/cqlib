@@ -52,7 +52,10 @@ fn sabre_routing_keeps_adjacent_two_qubit_circuit_without_swap() {
 
     assert!(!result.changed(&circuit));
     assert_eq!(result.swap_count(), 0);
-    assert_eq!(result.diagnostics().trials_evaluated, config.routing_trials);
+    assert_eq!(
+        result.diagnostics().trials_evaluated,
+        result.layout_diagnostics().candidates_evaluated * config.routing_trials
+    );
     assert_eq!(result.circuit().operations().len(), 1);
 }
 

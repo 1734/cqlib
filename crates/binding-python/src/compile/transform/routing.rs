@@ -155,6 +155,10 @@ impl PyRoutedCircuit {
 }
 
 /// Full SABRE layout-selection and routing result.
+///
+/// Wraps the routed circuit and adds the observed objective score of the
+/// winning layout. SABRE selects the winner by predicted native route
+/// quality; the score is diagnostic and is not the route-selection key.
 #[pyclass(
     name = "SabreRouteResult",
     module = "cqlib.compile.transform.routing",
@@ -178,6 +182,10 @@ impl PySabreRouteResult {
         self.inner.routed().clone().into()
     }
 
+    /// Observed score of the selected initial layout, when available.
+    ///
+    /// SABRE selects the winner by predicted native route quality; this score
+    /// is diagnostic and is not the route-selection key.
     #[getter]
     fn layout_score(&self) -> Option<PyLayoutScore> {
         self.inner.layout_score().cloned().map(Into::into)

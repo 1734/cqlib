@@ -21,6 +21,7 @@
 //! score candidate initial layouts, but the standalone SABRE routing module must
 //! not depend on layout algorithms or layout result types.
 
+use super::interaction_seed::{interaction_aware_layouts, interaction_layout_cost};
 use super::{
     CircuitLayoutAnalysis, GreedyCandidateOutcome, LayoutDiagnostics, LayoutObjective,
     LayoutResult, LayoutScore, PhysicalLayoutGraph, Vf2EdgeRequirement, Vf2LayoutConfig,
@@ -29,17 +30,17 @@ use super::{
 };
 use crate::circuit::Circuit;
 use crate::compile::sabre::{
-    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata,
-    RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialQuality,
-    interaction_reachability_for_target, movement_component_assignment,
-    normalize_initial_layout_for_target, route_unscored_trial_with_metadata,
-    trial_heuristic_profile, trial_seeds, validate_native_trial_operations,
+    ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata, RankedTrial,
+    RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialResult,
+    compare_ranked_trials, interaction_reachability_for_target, movement_component_assignment,
+    normalize_initial_layout_for_target, refine_layout_with_metadata,
+    route_ranked_trial_with_metadata,
 };
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,7 +63,8 @@ pub struct PreparedSabreCircuit {
 /// The physical graph remains the layout/scoring view. The routing target owns
 /// exact native-plan summaries, SWAP-feasible connectivity, and terminal costs.
 /// Route metadata for the original and bidirectional refinement DAGs is stored
-/// alongside it so layout scoring and final routing reuse the same preparation.
+/// alongside it so fused candidate refinement and routing reuse the same
+/// preparation.
 #[derive(Debug, Clone)]
 pub struct PreparedSabreDeviceTarget {
     physical: PhysicalLayoutGraph,
@@ -81,10 +83,6 @@ impl PreparedSabreDeviceTarget {
     pub(crate) fn routing_target(&self) -> &RoutingTarget {
         &self.routing
     }
-
-    pub(crate) fn routing_metadata(&self) -> &PreparedRouteMetadata {
-        &self.routing_metadata
-    }
 }
 
 impl PreparedSabreCircuit {
@@ -96,10 +94,6 @@ impl PreparedSabreCircuit {
     /// Returns logical qubits in source-circuit order.
     pub fn logical_qubits(&self) -> &[LogicalQubit] {
         &self.analysis.logical_qubits
-    }
-
-    pub(crate) fn routing_dag(&self) -> &SabreDag {
-        &self.routing_dag
     }
 }
 
@@ -147,17 +141,22 @@ pub fn prepare_sabre_device_target(
     })
 }
 
-/// Selects an initial layout with SABRE forward/backward refinement.
+/// Selects an initial layout with fused SABRE refinement and routing search.
 ///
-/// This function only returns the refined initial layout. It does not insert
-/// SWAP operations or rebuild a physical circuit; callers that need routing
-/// should run the SABRE routing core after selecting a layout.
+/// The search completes every configured refinement iteration before routing
+/// the resulting layout. Complete routes are never created for intermediate
+/// refinement states.
+/// This layout-only API returns the winning route's initial layout;
+/// [`crate::compile::transform::route_sabre`] consumes the same fused result
+/// directly and does not route the winner a second time.
 ///
 /// Candidate layouts include deterministic component-feasible anchors,
-/// reachable greedy/VF2 layouts when available, and randomized feasible trials
-/// controlled by [`SabreConfig::layout_trials`]. Each candidate is refined
-/// through SABRE forward/backward passes and ranked by final-route quality,
-/// then by [`LayoutObjective`] as a tie-breaker.
+/// reachable greedy/VF2 and interaction-aware layouts, plus the full randomized
+/// budget controlled by [`SabreConfig::layout_trials`]. Each candidate is
+/// refined through SABRE forward/backward passes; complete trials are ranked by
+/// predicted native two-qubit count, native two-qubit depth, native total
+/// depth, and stable candidate/trial order. [`LayoutObjective`] contributes
+/// candidate generation and diagnostics, but is not the final selection key.
 ///
 /// # Errors
 ///
@@ -244,6 +243,29 @@ pub fn sabre_layout_prepared(
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
+    let selection = sabre_route_selection_prepared(prepared, prepared_target, objective, config)?;
+    Ok(LayoutResult {
+        layout: selection.initial_layout,
+        score: Some(selection.score),
+        diagnostics: selection.diagnostics,
+    })
+}
+
+pub(crate) struct PreparedSabreRouteSelection {
+    pub(crate) initial_layout: Layout,
+    pub(crate) trial: TrialResult,
+    pub(crate) selected_trial_index: usize,
+    pub(crate) trials_evaluated: usize,
+    pub(crate) score: LayoutScore,
+    pub(crate) diagnostics: LayoutDiagnostics,
+}
+
+pub(crate) fn sabre_route_selection_prepared(
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreDeviceTarget,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+) -> Result<PreparedSabreRouteSelection, CompilerError> {
     validate_layout_config(config)?;
     let physical = &prepared_target.physical;
     let target = &prepared_target.routing;
@@ -261,7 +283,8 @@ pub fn sabre_layout_prepared(
         )));
     }
 
-    let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or_else(rand::random));
+    let base_seed = config.seed.unwrap_or_else(rand::random);
+    let mut rng = StdRng::seed_from_u64(base_seed);
     let initial_candidates =
         initial_layout_candidates(prepared, prepared_target, objective, config, &mut rng)?;
     let candidates = initial_candidates.layouts;
@@ -270,166 +293,289 @@ pub fn sabre_layout_prepared(
     let trials = candidates
         .into_iter()
         .enumerate()
-        .map(|(index, layout)| {
-            let refinement_seeds = (0..config.refinement_iterations)
-                .map(|_| (rng.random(), rng.random()))
-                .collect();
-            CandidateTrial {
-                index,
-                layout,
-                refinement_seeds,
-                scoring_seed: rng.random(),
-            }
+        .map(|(index, layout)| CandidateTrial {
+            index,
+            layout,
+            base_seed,
         })
         .collect::<Vec<_>>();
 
-    let outcomes = trials
+    let search = trials
         .into_par_iter()
-        .map(|trial| {
-            match interaction_reachability_for_target(sabre, target, &trial.layout)? {
-                InteractionReachability::Reachable => {}
-                InteractionReachability::UnreachableUnary {
-                    cause: RequirementReachabilityFailure::NoExecutableTerminal,
-                    ..
-                }
-                | InteractionReachability::UnreachablePair {
-                    cause: RequirementReachabilityFailure::NoExecutableTerminal,
-                    ..
-                } => {
-                    return Ok(CandidateOutcome::Infeasible(
-                        CandidateInfeasibleReason::MissingTerminal,
-                    ));
-                }
-                InteractionReachability::UnreachableUnary {
-                    cause: RequirementReachabilityFailure::MovementDisconnected,
-                    ..
-                }
-                | InteractionReachability::UnreachablePair {
-                    cause: RequirementReachabilityFailure::MovementDisconnected,
-                    ..
-                } => {
-                    return Ok(CandidateOutcome::Infeasible(
-                        CandidateInfeasibleReason::MovementUnreachable,
-                    ));
-                }
-            }
-            let mut refined = trial.layout;
-            for (iteration, (forward_seed, backward_seed)) in
-                trial.refinement_seeds.into_iter().enumerate()
-            {
-                // One refinement iteration routes forward, keeps the final
-                // layout, then routes the reversed interaction DAG. This is
-                // the SABRE layout-refinement loop, not final circuit routing.
-                refined = match route_unscored_trial_with_metadata(
-                    forwards,
-                    target,
-                    &prepared_target.refinement_metadata,
-                    &refined,
-                    &trial_heuristic_profile(&config.heuristic, iteration * 2),
-                    forward_seed,
-                ) {
-                    Ok(result) => result.final_layout,
-                    Err(error) => return classify_candidate_error(error),
-                };
-
-                refined = match route_unscored_trial_with_metadata(
-                    backwards,
-                    target,
-                    &prepared_target.backward_refinement_metadata,
-                    &refined,
-                    &trial_heuristic_profile(&config.heuristic, iteration * 2 + 1),
-                    backward_seed,
-                ) {
-                    Ok(result) => result.final_layout,
-                    Err(error) => return classify_candidate_error(error),
-                };
-            }
-
-            // Rank refined layouts by how well they route the original DAG.
-            // Multiple scoring trials reduce seed sensitivity without exposing
-            // final SWAP insertion through this layout API.
-            let route_quality = match best_route_quality(
+        .try_fold(CandidateSearch::default, |search, trial| {
+            let outcome = evaluate_candidate(
                 sabre,
+                forwards,
+                backwards,
                 target,
-                &prepared_target.routing_metadata,
-                &refined,
+                prepared_target,
+                analysis,
+                physical,
+                objective,
                 config,
-                trial.scoring_seed,
-            ) {
-                Ok(quality) => quality,
-                Err(error) => return classify_candidate_error(error),
-            };
-            let score = objective.score_layout(analysis, physical, &refined)?;
-            Ok(CandidateOutcome::Success(CandidateEvaluation {
-                index: trial.index,
-                route_quality,
-                layout: refined,
-                score,
-            }))
+                trial,
+            )?;
+            search.merge(CandidateSearch::from_outcome(outcome), target)
         })
-        .collect::<Result<Vec<_>, CompilerError>>()?;
-    let mut evaluations = Vec::new();
-    let mut missing_terminal = 0usize;
-    let mut movement_unreachable = 0usize;
-    let mut unsupported_native = 0usize;
-    for outcome in outcomes {
-        match outcome {
-            CandidateOutcome::Success(evaluation) => evaluations.push(evaluation),
-            CandidateOutcome::Infeasible(CandidateInfeasibleReason::MissingTerminal) => {
-                missing_terminal = missing_terminal.saturating_add(1);
-            }
-            CandidateOutcome::Infeasible(CandidateInfeasibleReason::MovementUnreachable) => {
-                movement_unreachable = movement_unreachable.saturating_add(1);
-            }
-            CandidateOutcome::Infeasible(CandidateInfeasibleReason::UnsupportedNative) => {
-                unsupported_native = unsupported_native.saturating_add(1);
-            }
-        }
-    }
-
-    let swap_limit = config.trial_objective.swap_limit(
-        config.swap_regret_ratio,
-        evaluations
-            .iter()
-            .map(|evaluation| evaluation.route_quality.abstract_quality.swap_count),
-    );
-    let best = evaluations
-        .into_iter()
-        .filter(|evaluation| evaluation.route_quality.abstract_quality.swap_count <= swap_limit)
-        .min_by(|left, right| {
-            config
-                .trial_objective
-                .compare(left.route_quality, 0, right.route_quality, 0)
-                .then_with(|| left.score.total.total_cmp(&right.score.total))
-                .then_with(|| left.index.cmp(&right.index))
-        })
-        .ok_or_else(|| {
-            CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoFeasibleLayoutCandidate {
-                evaluated: candidates_evaluated,
-                missing_terminal,
-                movement_unreachable,
-                unsupported_native,
-            })
+        .try_reduce(CandidateSearch::default, |left, right| {
+            left.merge(right, target)
         })?;
-    let swap_count = best.route_quality.abstract_quality.swap_count;
-    let layout = best.layout;
-    let score = best.score;
-    let is_perfect = is_perfect_layout(analysis, physical, &layout);
+
+    let best = search.best.ok_or_else(|| {
+        CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoFeasibleLayoutCandidate {
+            evaluated: candidates_evaluated,
+            missing_terminal: search.missing_terminal,
+            movement_unreachable: search.movement_unreachable,
+            unsupported_native: search.unsupported_native,
+        })
+    })?;
+    let swap_count = best.trial.swap_count();
+    let is_perfect = is_perfect_layout(analysis, physical, &best.layout);
 
     let mut notes = candidate_notes;
     notes.push(format!(
         "selected SABRE refined layout with {swap_count} final-route swaps"
     ));
-    Ok(LayoutResult {
-        layout,
-        score: Some(score.clone()),
+    notes.push(
+        "winner selected by predicted native 2Q count/depth and total depth; layout score is diagnostic"
+            .to_string(),
+    );
+    let trial = best.trial.finish(target)?;
+    Ok(PreparedSabreRouteSelection {
+        initial_layout: best.layout,
+        trial,
+        selected_trial_index: best.route_index,
+        trials_evaluated: search.trials_evaluated,
+        score: best.score.clone(),
         diagnostics: LayoutDiagnostics {
             is_perfect,
             candidates_evaluated,
-            used_fidelity: score.used_fidelity,
+            used_fidelity: best.score.used_fidelity,
             notes,
         },
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_candidate(
+    sabre: &SabreDag,
+    forwards: &SabreDag,
+    backwards: &SabreDag,
+    target: &RoutingTarget,
+    prepared_target: &PreparedSabreDeviceTarget,
+    analysis: &CircuitLayoutAnalysis,
+    physical: &PhysicalLayoutGraph,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    trial: CandidateTrial,
+) -> Result<CandidateOutcome<CandidateEvaluation>, CompilerError> {
+    match interaction_reachability_for_target(sabre, target, &trial.layout)? {
+        InteractionReachability::Reachable => {}
+        InteractionReachability::UnreachableUnary {
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        }
+        | InteractionReachability::UnreachablePair {
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        } => {
+            return Ok(CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::MissingTerminal,
+                0,
+            ));
+        }
+        InteractionReachability::UnreachableUnary {
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+            ..
+        }
+        | InteractionReachability::UnreachablePair {
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+            ..
+        } => {
+            return Ok(CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::MovementUnreachable,
+                0,
+            ));
+        }
+    }
+    let initial_signature = layout_mapping_signature(&trial.layout, &analysis.logical_qubits)?;
+    let mut seen_signatures = BTreeSet::from([initial_signature]);
+    let mut refined = trial.layout;
+    for iteration in 0..config.refinement_iterations {
+        let forward_seed = derive_semantic_seed(
+            trial.base_seed,
+            1,
+            trial.index,
+            iteration,
+            layout_signature(&refined),
+        );
+        let forward = match refine_layout_with_metadata(
+            forwards,
+            target,
+            &prepared_target.refinement_metadata,
+            &refined,
+            &config.heuristic,
+            forward_seed,
+        ) {
+            Ok(layout) => layout,
+            Err(error) => return classify_candidate_error(error, 0),
+        };
+        let backward_seed = derive_semantic_seed(
+            trial.base_seed,
+            2,
+            trial.index,
+            iteration,
+            layout_signature(&forward),
+        );
+        let next_refined = match refine_layout_with_metadata(
+            backwards,
+            target,
+            &prepared_target.backward_refinement_metadata,
+            &forward,
+            &config.heuristic,
+            backward_seed,
+        ) {
+            Ok(layout) => layout,
+            Err(error) => return classify_candidate_error(error, 0),
+        };
+        let mapping_signature = layout_mapping_signature(&next_refined, &analysis.logical_qubits)?;
+        if !seen_signatures.insert(mapping_signature) {
+            break;
+        }
+        refined = next_refined;
+    }
+
+    let mut best = None::<(usize, RankedTrial)>;
+    for route_index in 0..config.routing_trials {
+        let seed = derive_semantic_seed(
+            trial.base_seed,
+            3,
+            trial.index,
+            route_index,
+            layout_signature(&refined),
+        );
+        let mut routed = match route_ranked_trial_with_metadata(
+            sabre,
+            target,
+            &prepared_target.routing_metadata,
+            &refined,
+            &config.heuristic,
+            seed,
+        ) {
+            Ok(routed) => routed,
+            Err(error) => return classify_candidate_error(error, route_index + 1),
+        };
+        let replace = if let Some((best_index, current)) = best.as_mut() {
+            compare_ranked_trials(
+                &mut routed,
+                (trial.index, route_index),
+                current,
+                (trial.index, *best_index),
+                target,
+            )?
+            .is_lt()
+        } else {
+            true
+        };
+        if replace {
+            best = Some((route_index, routed));
+        }
+    }
+    let (route_index, routed) = best.expect("routing_trials is validated to be greater than zero");
+    let score = objective.score_layout(analysis, physical, &refined)?;
+    Ok(CandidateOutcome::Success(CandidateEvaluation {
+        index: trial.index,
+        route_index,
+        trial: routed,
+        layout: refined,
+        score,
+        trials_evaluated: config.routing_trials,
+    }))
+}
+
+#[derive(Default)]
+struct CandidateSearch {
+    best: Option<CandidateEvaluation>,
+    missing_terminal: usize,
+    movement_unreachable: usize,
+    unsupported_native: usize,
+    trials_evaluated: usize,
+}
+
+impl CandidateSearch {
+    fn from_outcome(outcome: CandidateOutcome<CandidateEvaluation>) -> Self {
+        let mut search = Self::default();
+        match outcome {
+            CandidateOutcome::Success(evaluation) => {
+                search.trials_evaluated = evaluation.trials_evaluated();
+                search.best = Some(evaluation);
+            }
+            CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::MissingTerminal,
+                trials_evaluated,
+            ) => {
+                search.trials_evaluated = trials_evaluated;
+                search.missing_terminal = 1;
+            }
+            CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::MovementUnreachable,
+                trials_evaluated,
+            ) => {
+                search.trials_evaluated = trials_evaluated;
+                search.movement_unreachable = 1;
+            }
+            CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::UnsupportedNative,
+                trials_evaluated,
+            ) => {
+                search.trials_evaluated = trials_evaluated;
+                search.unsupported_native = 1;
+            }
+        }
+        search
+    }
+
+    fn merge(mut self, mut other: Self, target: &RoutingTarget) -> Result<Self, CompilerError> {
+        self.missing_terminal = self.missing_terminal.saturating_add(other.missing_terminal);
+        self.movement_unreachable = self
+            .movement_unreachable
+            .saturating_add(other.movement_unreachable);
+        self.unsupported_native = self
+            .unsupported_native
+            .saturating_add(other.unsupported_native);
+        self.trials_evaluated = self.trials_evaluated.saturating_add(other.trials_evaluated);
+        if let Some(mut candidate) = other.best.take() {
+            let replace = if let Some(current) = self.best.as_mut() {
+                candidate.compare(current, target)?.is_lt()
+            } else {
+                true
+            };
+            if replace {
+                self.best = Some(candidate);
+            }
+        }
+        Ok(self)
+    }
+}
+
+impl CandidateEvaluation {
+    fn compare(
+        &mut self,
+        other: &mut Self,
+        target: &RoutingTarget,
+    ) -> Result<std::cmp::Ordering, CompilerError> {
+        compare_ranked_trials(
+            &mut self.trial,
+            (self.index, self.route_index),
+            &mut other.trial,
+            (other.index, other.route_index),
+            target,
+        )
+    }
+
+    fn trials_evaluated(&self) -> usize {
+        self.trials_evaluated
+    }
 }
 
 struct CandidateTrial {
@@ -437,15 +583,63 @@ struct CandidateTrial {
     index: usize,
     /// Candidate layout before forward/backward refinement.
     layout: Layout,
-    /// Seed pairs for forward and backward refinement route trials.
-    refinement_seeds: Vec<(u64, u64)>,
-    /// Seed used to derive final-route scoring trials.
-    scoring_seed: u64,
+    /// Base seed used for semantic refinement and final-route seed derivation.
+    base_seed: u64,
+}
+
+fn layout_mapping_signature(
+    layout: &Layout,
+    logical_qubits: &[LogicalQubit],
+) -> Result<Vec<u32>, CompilerError> {
+    logical_qubits
+        .iter()
+        .map(|logical| {
+            layout
+                .get_physical(*logical)
+                .map(PhysicalQubit::id)
+                .ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "sabre layout does not map logical qubit {logical}"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn layout_signature(layout: &Layout) -> u64 {
+    layout
+        .l2p_map()
+        .iter()
+        .fold(0x6a09_e667_f3bc_c909, |hash, (logical, physical)| {
+            splitmix64(hash ^ (u64::from(logical.id()) << 32) ^ u64::from(physical.id()))
+        })
+}
+
+fn derive_semantic_seed(
+    base: u64,
+    domain: u64,
+    candidate_index: usize,
+    step_index: usize,
+    layout_signature: u64,
+) -> u64 {
+    splitmix64(
+        base ^ domain.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (candidate_index as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+            ^ (step_index as u64).wrapping_mul(0x94d0_49bb_1331_11eb)
+            ^ layout_signature,
+    )
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 enum CandidateOutcome<T> {
     Success(T),
-    Infeasible(CandidateInfeasibleReason),
+    Infeasible(CandidateInfeasibleReason, usize),
 }
 
 enum CandidateInfeasibleReason {
@@ -454,22 +648,28 @@ enum CandidateInfeasibleReason {
     UnsupportedNative,
 }
 
-fn classify_candidate_error<T>(error: CompilerError) -> Result<CandidateOutcome<T>, CompilerError> {
+fn classify_candidate_error<T>(
+    error: CompilerError,
+    trials_evaluated: usize,
+) -> Result<CandidateOutcome<T>, CompilerError> {
     match error {
         CompilerError::SabreRoutingFailed(
             SabreRoutingFailure::NoExecutableUnaryTerminal { .. }
             | SabreRoutingFailure::NoExecutablePairTerminal { .. },
         ) => Ok(CandidateOutcome::Infeasible(
             CandidateInfeasibleReason::MissingTerminal,
+            trials_evaluated,
         )),
         CompilerError::SabreRoutingFailed(
             SabreRoutingFailure::UnreachableUnaryPlacement { .. }
             | SabreRoutingFailure::UnreachablePairPlacement { .. },
         ) => Ok(CandidateOutcome::Infeasible(
             CandidateInfeasibleReason::MovementUnreachable,
+            trials_evaluated,
         )),
         CompilerError::DeviceLoweringFailed(_) => Ok(CandidateOutcome::Infeasible(
             CandidateInfeasibleReason::UnsupportedNative,
+            trials_evaluated,
         )),
         fatal => Err(fatal),
     }
@@ -478,12 +678,16 @@ fn classify_candidate_error<T>(error: CompilerError) -> Result<CandidateOutcome<
 struct CandidateEvaluation {
     /// Original candidate index, retained after parallel evaluation.
     index: usize,
-    /// Best final-route quality observed for the refined layout.
-    route_quality: TrialQuality,
+    /// Stable route-trial index within this layout candidate.
+    route_index: usize,
+    /// Best complete final route observed for the refined layout.
+    trial: RankedTrial,
     /// Refined initial layout.
     layout: Layout,
     /// Objective score for the refined initial layout.
     score: LayoutScore,
+    /// Number of complete original-DAG routes evaluated for this candidate.
+    trials_evaluated: usize,
 }
 
 /// Validates SABRE settings that are specific to layout selection.
@@ -500,11 +704,6 @@ fn validate_layout_config(config: &SabreConfig) -> Result<(), CompilerError> {
     if config.layout_assignment_budget == 0 {
         return Err(CompilerError::InvalidInput(
             "sabre layout_assignment_budget must be greater than zero".to_string(),
-        ));
-    }
-    if config.layout_scoring_trials == 0 {
-        return Err(CompilerError::InvalidInput(
-            "sabre layout_scoring_trials must be greater than zero".to_string(),
         ));
     }
     if let Some(vf2) = config.vf2_prepass {
@@ -529,9 +728,11 @@ struct InitialLayoutCandidates {
 
 /// Generates the candidate set refined by SABRE layout.
 ///
-/// Candidates include deterministic anchors, opportunistic greedy/VF2 results,
-/// and random physical orders. The result is deduplicated in logical-qubit
-/// order so duplicate layouts from different sources are evaluated once.
+/// Candidates include deterministic movement anchors, interaction-graph
+/// embeddings, opportunistic greedy/VF2 results, and seeded random physical
+/// orders. Cheap graph bounds skip VF2 when exact embedding is oversized or
+/// impossible. The result is deduplicated in logical-qubit order so duplicate
+/// layouts from different sources are evaluated once.
 fn initial_layout_candidates(
     prepared: &PreparedSabreCircuit,
     prepared_target: &PreparedSabreDeviceTarget,
@@ -587,6 +788,16 @@ fn initial_layout_candidates(
         None,
     )?);
 
+    let structured_budget = config.layout_trials.min(6);
+    let structured = interaction_aware_layouts(analysis, physical, structured_budget)?;
+    for candidate in structured {
+        if interaction_reachability_for_target(sabre, target, &candidate)?
+            == InteractionReachability::Reachable
+        {
+            candidates.push(candidate);
+        }
+    }
+
     match greedy_layout_candidate_prepared(analysis, physical, objective)? {
         GreedyCandidateOutcome::Found(greedy) => {
             let greedy =
@@ -602,7 +813,9 @@ fn initial_layout_candidates(
         )),
     }
 
-    if let Some(vf2_prepass) = config.vf2_prepass {
+    if let Some(vf2_prepass) = config.vf2_prepass
+        && vf2_is_promising(analysis, physical)
+    {
         let vf2_config = Vf2LayoutConfig {
             candidate_limit: vf2_prepass.candidate_limit,
             call_limit: Some(vf2_prepass.call_limit),
@@ -625,8 +838,15 @@ fn initial_layout_candidates(
                 vf2_prepass.call_limit
             )),
         }
+    } else if config.vf2_prepass.is_some() {
+        notes.push(
+            "SABRE skipped VF2 because cheap graph bounds indicate an oversized or impossible exact embedding"
+                .to_string(),
+        );
     }
 
+    // Randomized candidates complete the pool after deterministic and
+    // interaction-aware seeds have supplied stable anchors.
     for _ in 0..config.layout_trials {
         candidates.push(movement_component_layout(
             logical_qubits,
@@ -638,10 +858,46 @@ fn initial_layout_candidates(
         )?);
     }
 
+    let candidates = deduplicate_layouts(candidates, logical_qubits)?;
     Ok(InitialLayoutCandidates {
-        layouts: deduplicate_layouts(candidates, logical_qubits)?,
+        layouts: prune_layout_candidates(
+            candidates,
+            analysis,
+            physical,
+            logical_qubits,
+            config.layout_trials,
+        )?,
         notes,
     })
+}
+
+fn vf2_is_promising(analysis: &CircuitLayoutAnalysis, physical: &PhysicalLayoutGraph) -> bool {
+    let interactions = analysis
+        .interactions
+        .interactions()
+        .iter()
+        .filter(|interaction| interaction.weight > 0.0)
+        .collect::<Vec<_>>();
+    if interactions.is_empty() {
+        return false;
+    }
+    let mut logical_degree = BTreeMap::<LogicalQubit, usize>::new();
+    for interaction in &interactions {
+        *logical_degree.entry(interaction.left).or_default() += 1;
+        *logical_degree.entry(interaction.right).or_default() += 1;
+    }
+    let mut physical_degree = vec![0usize; physical.physical_qubits().len()];
+    let physical_edges = physical
+        .undirected_edges_by_index()
+        .inspect(|(left, right)| {
+            physical_degree[*left] += 1;
+            physical_degree[*right] += 1;
+        })
+        .count();
+    logical_degree.len() <= 40
+        && interactions.len() <= physical_edges
+        && logical_degree.values().copied().max().unwrap_or(0)
+            <= physical_degree.into_iter().max().unwrap_or(0)
 }
 
 fn movement_component_layout(
@@ -738,79 +994,61 @@ fn deduplicate_layouts(
     Ok(unique)
 }
 
-/// Returns the best observed route quality for one refined initial layout.
-///
-/// The candidate is first checked for reachable interactions. Then several
-/// seeded unchecked route trials are run and ranked with the same SABRE trial
-/// objective used by the routing core.
-fn best_route_quality(
-    sabre: &SabreDag,
-    target: &RoutingTarget,
-    metadata: &PreparedRouteMetadata,
-    initial_layout: &Layout,
-    config: &SabreConfig,
-    seed: u64,
-) -> Result<TrialQuality, CompilerError> {
-    let unscored = trial_seeds(Some(seed), config.layout_scoring_trials)
+fn prune_layout_candidates(
+    candidates: Vec<Layout>,
+    analysis: &CircuitLayoutAnalysis,
+    physical: &PhysicalLayoutGraph,
+    logical_qubits: &[LogicalQubit],
+    limit: usize,
+) -> Result<Vec<Layout>, CompilerError> {
+    if candidates.len() <= limit {
+        return Ok(candidates);
+    }
+    let mut scored = candidates
         .into_iter()
-        .enumerate()
-        .map(|(index, seed)| {
-            let heuristic = trial_heuristic_profile(&config.heuristic, index);
-            route_unscored_trial_with_metadata(
-                sabre,
-                target,
-                metadata,
-                initial_layout,
-                &heuristic,
-                seed,
-            )
-            .map(|result| (index, result))
+        .map(|layout| {
+            let cost = interaction_layout_cost(analysis, physical, &layout)?;
+            let mapping = logical_qubits
+                .iter()
+                .map(|logical| {
+                    layout
+                        .get_physical(*logical)
+                        .map(PhysicalQubit::id)
+                        .ok_or_else(|| {
+                            CompilerError::InvariantViolation(format!(
+                                "sabre layout candidate does not map logical qubit {logical}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut subset = mapping.clone();
+            subset.sort_unstable();
+            Ok((cost, subset, mapping, layout))
         })
         .collect::<Result<Vec<_>, CompilerError>>()?;
-    unscored
-        .iter()
-        .try_for_each(|(_, trial)| validate_native_trial_operations(&trial.operations, target))?;
-    let swap_limit = config.trial_objective.swap_limit(
-        config.swap_regret_ratio,
-        unscored.iter().map(|(_, trial)| trial.swap_count),
-    );
-    if config.trial_objective
-        == crate::compile::sabre::SabreTrialObjective::NativeQualityWithinSwapBudget
-    {
-        Ok(unscored
-            .into_iter()
-            .filter(|(_, trial)| trial.swap_count <= swap_limit)
-            .map(|(index, trial)| {
-                let abstract_quality = trial.abstract_quality();
-                trial
-                    .finalize(abstract_quality, target)
-                    .map(|trial| (index, trial.quality))
-            })
-            .collect::<Result<Vec<_>, CompilerError>>()?
-            .into_iter()
-            .min_by(|(left_index, left), (right_index, right)| {
-                config
-                    .trial_objective
-                    .compare(*left, *left_index, *right, *right_index)
-            })
-            .expect("layout_scoring_trials is validated to be non-zero")
-            .1)
-    } else {
-        let (_, trial, abstract_quality) = unscored
-            .into_iter()
-            .map(|(index, trial)| {
-                let abstract_quality = trial.abstract_quality();
-                (index, trial, abstract_quality)
-            })
-            .min_by(|(left_index, _, left), (right_index, _, right)| {
-                config.trial_objective.compare(
-                    TrialQuality::from_abstract(*left),
-                    *left_index,
-                    TrialQuality::from_abstract(*right),
-                    *right_index,
-                )
-            })
-            .expect("layout_scoring_trials is validated to be non-zero");
-        Ok(trial.finalize(abstract_quality, target)?.quality)
+    scored.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    let mut subset_counts = BTreeMap::<Vec<u32>, usize>::new();
+    let mut selected = Vec::with_capacity(limit);
+    let mut deferred = Vec::new();
+    for candidate in scored {
+        let count = subset_counts.entry(candidate.1.clone()).or_default();
+        if *count < 3 && selected.len() < limit {
+            *count += 1;
+            selected.push(candidate.3);
+        } else {
+            deferred.push(candidate.3);
+        }
     }
+    selected.extend(
+        deferred
+            .into_iter()
+            .take(limit.saturating_sub(selected.len())),
+    );
+    Ok(selected)
 }

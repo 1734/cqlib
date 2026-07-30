@@ -21,15 +21,14 @@ fn deterministic_seeded_config_uses_compact_reproducible_settings() {
     assert_eq!(config.layout_assignment_budget, 100_000);
     assert_eq!(config.vf2_prepass.unwrap().call_limit, 100_000);
     assert_eq!(config.refinement_iterations, 1);
-    assert_eq!(config.layout_scoring_trials, 1);
     assert_eq!(config.routing_trials, 1);
-    assert_eq!(
-        config.trial_objective,
-        SabreTrialObjective::NativeQualityWithinSwapBudget
-    );
-    assert_eq!(config.swap_regret_ratio, 0.05);
     assert_eq!(config.seed, Some(7));
-    assert_eq!(config.heuristic.lookahead_weights, vec![0.5]);
+    assert_eq!(
+        config.heuristic.lookahead_weights,
+        vec![0.5, 0.25, 0.125, 0.0625, 0.03125]
+    );
+    assert_eq!(config.heuristic.decay_increment, Some(0.002));
+    assert_eq!(config.heuristic.decay_reset, 10);
     assert_eq!(config.heuristic.attempt_limit, 20);
 }
 

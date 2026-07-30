@@ -204,9 +204,11 @@ impl SabreDag {
                     });
                     created_node = Some(node);
                     for parent in parents {
-                        if graph.find_edge(parent, node).is_none() {
-                            graph.add_edge(parent, node, ());
-                        }
+                        // `parents` is deduplicated while it is assembled and
+                        // `node` was just created, so no edge to it can exist.
+                        // Adding directly avoids scanning a high-outdegree
+                        // parent's adjacency list for every new dependency.
+                        graph.add_edge(parent, node, ());
                     }
                     for logical in qubits {
                         wire_pos.insert(logical, node);
@@ -330,10 +332,12 @@ impl WorkloadBuilder {
             operations: Vec::new(),
             kind: SabreNodeKind::TwoQ(pair),
         });
+        // `node` was just created and `parents` is a deduplicated
+        // `BTreeSet`. No edge to `node` can exist yet, so adding
+        // directly avoids scanning each parent's adjacency list for
+        // every new dependency edge.
         for parent in parents {
-            if parent != node && self.graph.find_edge(parent, node).is_none() {
-                self.graph.add_edge(parent, node, ());
-            }
+            self.graph.add_edge(parent, node, ());
         }
         state.wire_frontier.insert(pair[0], node);
         state.wire_frontier.insert(pair[1], node);
@@ -443,10 +447,10 @@ impl WorkloadBuilder {
             operations: Vec::new(),
             kind,
         });
+        // `node` was just created and `parents` is a deduplicated
+        // `BTreeSet`. No edge to `node` can exist yet.
         for parent in parents {
-            if parent != node && self.graph.find_edge(parent, node).is_none() {
-                self.graph.add_edge(parent, node, ());
-            }
+            self.graph.add_edge(parent, node, ());
         }
         node
     }

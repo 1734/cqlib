@@ -426,7 +426,12 @@ impl PyLayoutDiagnostics {
     }
 }
 
-/// Selected initial layout, score, and diagnostics.
+/// Selected initial layout, observed score, and diagnostics.
+///
+/// The score is the observed objective value of the selected layout.
+/// Individual algorithms may use a different selection key; in particular,
+/// SABRE selects its winner by predicted native route quality and reports
+/// this score for diagnostics.
 #[pyclass(
     name = "LayoutResult",
     module = "cqlib.compile.transform.layout",
@@ -450,6 +455,9 @@ impl PyLayoutResult {
         self.inner.layout.clone().into()
     }
 
+    /// Observed score of this layout under the requested objective, when
+    /// available. This score is diagnostic and is not necessarily the
+    /// algorithm's selection key.
     #[getter]
     fn score(&self) -> Option<PyLayoutScore> {
         self.inner.score.clone().map(Into::into)

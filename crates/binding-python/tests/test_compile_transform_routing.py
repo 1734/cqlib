@@ -20,7 +20,6 @@ from cqlib.compile import CompilerConfigError, transform
 from cqlib.compile.sabre import (
     SabreConfig,
     SabreRoutingDiagnostics,
-    SabreTrialObjective,
     SabreVf2PrepassConfig,
     normalize_initial_layout,
     validate_reachable_interactions,
@@ -132,9 +131,7 @@ def test_sabre_new_configuration_and_layout_helpers_are_public() -> None:
 
     assert config.vf2_prepass == prepass
     assert config.layout_assignment_budget == 1_000_000
-    assert config.trial_objective == (
-        SabreTrialObjective.native_quality_within_swap_budget()
-    )
+    assert config.routing_trials == 1
     assert normalized.num_vacant_physical == 1
 
 

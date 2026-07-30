@@ -19,34 +19,21 @@ from cqlib.device import Device, Layout, LogicalQubit
 
 _LogicalQubitLike = int | Qubit | LogicalQubit
 
-class SabreTrialObjective:
-    """Objective used to select the best completed SABRE trial."""
-
-    @staticmethod
-    def swap_count() -> SabreTrialObjective: ...
-    @staticmethod
-    def depth() -> SabreTrialObjective: ...
-    @staticmethod
-    def native_quality_within_swap_budget() -> SabreTrialObjective:
-        """Select native quality within ``swap_regret_ratio`` of minimum SWAPs."""
-        ...
-    @staticmethod
-    def depth_then_swap() -> SabreTrialObjective: ...
-    def __copy__(self) -> SabreTrialObjective: ...
-    def __deepcopy__(self, memo: dict[int, object]) -> SabreTrialObjective: ...
-    def __eq__(self, other: object) -> bool: ...
-    def __hash__(self) -> int: ...
-
 class SabreHeuristicConfig:
-    """Local SWAP-selection weights and release-valve limits."""
+    """Local SWAP-selection weights and release-valve limits.
+
+    Structural distance uses active-layer-normalized lookahead and
+    multiplicative congestion control. Exact native 2Q cost resolves
+    candidates within a narrow structural window.
+    """
 
     def __init__(
         self,
         *,
         basic_weight: float = 1.0,
         lookahead_weights: Sequence[float] | None = None,
-        decay_increment: float | None = 0.001,
-        decay_reset: int = 5,
+        decay_increment: float | None = 0.002,
+        decay_reset: int = 10,
         attempt_limit: int = 1000,
         best_epsilon: float = 1e-10,
     ) -> None: ...
@@ -90,10 +77,7 @@ class SabreConfig:
         layout_assignment_budget: int = 1_000_000,
         vf2_prepass: SabreVf2PrepassConfig | None = ...,
         refinement_iterations: int = 1,
-        layout_scoring_trials: int = 1,
-        routing_trials: int = 5,
-        trial_objective: SabreTrialObjective | None = None,
-        swap_regret_ratio: float = 0.05,
+        routing_trials: int = 1,
         seed: int | None = None,
         heuristic: SabreHeuristicConfig | None = None,
     ) -> None: ...
@@ -108,13 +92,13 @@ class SabreConfig:
     @property
     def refinement_iterations(self) -> int: ...
     @property
-    def layout_scoring_trials(self) -> int: ...
-    @property
-    def routing_trials(self) -> int: ...
-    @property
-    def trial_objective(self) -> SabreTrialObjective: ...
-    @property
-    def swap_regret_ratio(self) -> float: ...
+    def routing_trials(self) -> int:
+        """Complete routing trials run for each initial candidate.
+
+        Trials are distributed across distinct lightweight refinement
+        checkpoints. The search returns the best route directly.
+        """
+        ...
     @property
     def seed(self) -> int | None: ...
     @property
@@ -131,7 +115,7 @@ class SabreConfig:
     def __eq__(self, other: object) -> bool: ...
 
 class SabreRoutingDiagnostics:
-    """Read-only topology, native-cost, calibration and cache diagnostics."""
+    """Read-only topology, native-cost, and cache diagnostics."""
 
     @property
     def trials_evaluated(self) -> int: ...
@@ -150,17 +134,9 @@ class SabreRoutingDiagnostics:
     @property
     def native_two_qubit_depth(self) -> int: ...
     @property
+    def native_total_depth(self) -> int: ...
+    @property
     def native_operation_count(self) -> int: ...
-    @property
-    def predicted_log_error(self) -> float | None: ...
-    @property
-    def unavailable_error_count(self) -> int: ...
-    @property
-    def imputed_error_count(self) -> int: ...
-    @property
-    def duration_work(self) -> float | None: ...
-    @property
-    def predicted_makespan(self) -> float | None: ...
     @property
     def unknown_loop_count(self) -> int: ...
     @property

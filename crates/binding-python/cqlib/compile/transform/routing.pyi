@@ -59,7 +59,11 @@ class SabreRouteResult:
         ...
     @property
     def layout_score(self) -> LayoutScore | None:
-        """Score of the selected initial layout, when available."""
+        """Observed score of the selected initial layout, when available.
+
+        SABRE selects the winning layout by predicted native route quality;
+        this score is diagnostic and is not the route-selection key.
+        """
         ...
     @property
     def layout_diagnostics(self) -> LayoutDiagnostics:

@@ -382,6 +382,25 @@ fn disconnected_target_control_flow_routing_restores_body_layout() {
 }
 
 #[test]
+fn layout_and_route_entry_points_select_the_same_seeded_initial_layout() {
+    let device = Device::line("fused-entry-parity", 4).unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    let objective = LayoutObjective::topology_only();
+    let config = SabreConfig::deterministic_seeded(41);
+
+    let layout = sabre_layout(&circuit, &device, &objective, &config).unwrap();
+    let routed = route_sabre(&circuit, &device, &objective, &config).unwrap();
+
+    assert_eq!(layout.layout, *routed.initial_layout());
+    assert_eq!(
+        routed.diagnostics().trials_evaluated,
+        routed.layout_diagnostics().candidates_evaluated * config.routing_trials
+    );
+}
+
+#[test]
 fn sabre_layout_returns_perfect_layout_when_candidate_can_match_interactions() {
     let device = Device::line("line", 3).unwrap();
     let objective = LayoutObjective::topology_only();
@@ -438,18 +457,18 @@ fn sabre_layout_distinguishes_assignment_budget_exhaustion() {
 }
 
 #[test]
-fn sabre_layout_rejects_zero_layout_scoring_trials() {
+fn sabre_layout_rejects_zero_routing_trials() {
     let device = Device::line("line", 2).unwrap();
     let objective = LayoutObjective::topology_only();
     let mut config = SabreConfig::deterministic_seeded(7);
-    config.layout_scoring_trials = 0;
+    config.routing_trials = 0;
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
     let error = sabre_layout(&circuit, &device, &objective, &config).unwrap_err();
 
     assert!(
-        matches!(error, CompilerError::InvalidInput(message) if message.contains("layout_scoring_trials"))
+        matches!(error, CompilerError::InvalidInput(message) if message.contains("routing_trials"))
     );
 }
 

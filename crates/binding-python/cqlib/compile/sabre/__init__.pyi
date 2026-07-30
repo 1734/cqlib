@@ -33,7 +33,6 @@ from .routing import SabreHeuristicConfig as SabreHeuristicConfig
 from .routing import SabreVf2PrepassConfig as SabreVf2PrepassConfig
 from .routing import SabreRoutingDiagnostics as SabreRoutingDiagnostics
 from .routing import SabreRoutingResult as SabreRoutingResult
-from .routing import SabreTrialObjective as SabreTrialObjective
 from .routing import sabre_route as sabre_route
 from .routing import normalize_initial_layout as normalize_initial_layout
 from .routing import validate_reachable_interactions as validate_reachable_interactions

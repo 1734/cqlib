@@ -17,6 +17,13 @@ use crate::compile::device_planning::{DeviceGateState, NativePlanCatalog};
 use crate::device::{Device, InstructionProp, PhysicalQubit, QubitProp};
 use smallvec::smallvec;
 
+fn available_metric<T: Copy>(metric: MetricAvailability<T>) -> Option<T> {
+    match metric {
+        MetricAvailability::Available(value) => Some(value),
+        MetricAvailability::Disabled | MetricAvailability::Inconsistent => None,
+    }
+}
+
 #[test]
 fn robust_error_key_orders_coverage_before_numeric_loss() {
     let known = RobustErrorKey {
@@ -135,14 +142,9 @@ fn estimator_imputes_missing_calibration_from_the_same_gate() {
     let estimator = CalibrationEstimator::from_device(&device, &[p0, p1]);
 
     let cost = estimator.cost(catalog.summary(&missing).unwrap());
-    let error = cost
-        .error
-        .value()
-        .expect("observed H error enables error scoring");
-    let duration = cost
-        .duration
-        .value()
-        .expect("observed H duration enables duration scoring");
+    let error = available_metric(cost.error).expect("observed H error enables error scoring");
+    let duration =
+        available_metric(cost.duration).expect("observed H duration enables duration scoring");
 
     assert_eq!(error.unavailable_count, 0);
     assert_eq!(error.imputed_count, 1);
@@ -176,8 +178,8 @@ fn device_estimator_uses_calibration_outside_the_prepared_catalog_roots() {
     let summary = catalog.summary(&missing).unwrap();
 
     let cost = device_estimator.cost(summary);
-    assert_eq!(cost.error.value().unwrap().imputed_count, 1);
-    assert_eq!(cost.duration.value().unwrap().duration_work, 18.0);
+    assert_eq!(available_metric(cost.error).unwrap().imputed_count, 1);
+    assert_eq!(available_metric(cost.duration).unwrap().duration_work, 18.0);
 }
 
 #[test]
