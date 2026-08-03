@@ -104,7 +104,10 @@ impl RoutedCircuit {
             return true;
         }
 
-        format!("{:?}", original.operations()) != format!("{:?}", self.circuit.operations())
+        // Structural comparison of the operation streams. Short-circuits on
+        // the first difference and avoids the O(circuit size) temporary
+        // strings a `Debug`-format comparison would allocate.
+        original.operations() != self.circuit.operations()
     }
 }
 

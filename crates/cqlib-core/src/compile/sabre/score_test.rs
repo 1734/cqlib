@@ -145,6 +145,39 @@ fn compact_route_plan_matches_materialized_incremental_quality() {
 }
 
 #[test]
+fn topology_route_plan_defers_ordinary_operation_materialization() {
+    let device = Device::line("deferred-route-operations", 2).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
+    let initial = Layout::from_pairs(&[(0, 1), (1, 0)], 2).unwrap();
+    let heuristic = SabreConfig::deterministic_seeded(45).heuristic;
+
+    let trial =
+        route_unscored_trial_with_metadata(&sabre, &target, &metadata, &initial, &heuristic, 47)
+            .unwrap();
+    assert!(
+        trial
+            .plan
+            .steps
+            .iter()
+            .all(|step| matches!(step, CompactRouteStep::Mapped { .. }))
+    );
+
+    let dense_layout = DenseRoutingLayout::from_layout(&initial, &target.physical_qubits).unwrap();
+    let expected = circuit
+        .operations()
+        .iter()
+        .map(|operation| map_operation_dense(operation, &dense_layout, &target).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(trial.materialize_operations(&target).unwrap(), expected);
+}
+
+#[test]
 fn topology_lookahead_skips_unary_work_but_keeps_future_two_qubit_requirements() {
     let device = Device::line("lookahead-routing-horizon", 4).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();

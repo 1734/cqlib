@@ -119,10 +119,9 @@ pub(crate) struct TrialResult {
 
 /// Compact per-trial route representation.
 ///
-/// Ordinary routed operations are retained as-is, while inserted SWAPs remain
-/// two-qubit endpoint pairs until a trial participates in a depth tie or wins
-/// the search. This avoids constructing full `Operation` values for the large
-/// number of losing SWAP-heavy trials.
+/// Topology-only trials retain ordinary operations by shared source plus mapped
+/// qargs, and inserted SWAPs as physical endpoint pairs. Full operations are
+/// built only when a trial participates in a depth tie or wins the search.
 #[derive(Debug, Clone, Default)]
 struct CompactRoutePlan {
     steps: Vec<CompactRouteStep>,
@@ -130,13 +129,22 @@ struct CompactRoutePlan {
 
 #[derive(Debug, Clone)]
 enum CompactRouteStep {
-    Operation(Operation),
+    Owned(Box<Operation>),
+    Mapped {
+        source: Arc<Operation>,
+        qubits: SmallVec<[Qubit; 3]>,
+    },
     Swap([PhysicalQubit; 2]),
 }
 
 impl CompactRoutePlan {
     fn push_operation(&mut self, operation: Operation) {
-        self.steps.push(CompactRouteStep::Operation(operation));
+        self.steps
+            .push(CompactRouteStep::Owned(Box::new(operation)));
+    }
+
+    fn push_mapped_operation(&mut self, source: Arc<Operation>, qubits: SmallVec<[Qubit; 3]>) {
+        self.steps.push(CompactRouteStep::Mapped { source, qubits });
     }
 
     fn push_swap(&mut self, swap: [PhysicalQubit; 2]) {
@@ -145,17 +153,26 @@ impl CompactRoutePlan {
 
     fn last_operation(&self) -> Option<&Operation> {
         match self.steps.last() {
-            Some(CompactRouteStep::Operation(operation)) => Some(operation),
+            Some(CompactRouteStep::Owned(operation)) => Some(operation),
+            Some(CompactRouteStep::Mapped { source, .. }) => Some(source),
             Some(CompactRouteStep::Swap(_)) | None => None,
         }
     }
 
     fn pop_last_operation(&mut self) -> Option<Operation> {
         match self.steps.last() {
-            Some(CompactRouteStep::Operation(_)) => match self.steps.pop() {
-                Some(CompactRouteStep::Operation(operation)) => Some(operation),
-                _ => unreachable!("the last route-plan step was checked as an operation"),
-            },
+            Some(CompactRouteStep::Owned(_) | CompactRouteStep::Mapped { .. }) => {
+                match self.steps.pop() {
+                    Some(CompactRouteStep::Owned(operation)) => Some(*operation),
+                    Some(CompactRouteStep::Mapped { source, qubits }) => Some(Operation {
+                        instruction: source.instruction.clone(),
+                        qubits,
+                        params: source.params.clone(),
+                        label: source.label.clone(),
+                    }),
+                    _ => unreachable!("the last route-plan step was checked as an operation"),
+                }
+            }
             Some(CompactRouteStep::Swap(_)) | None => None,
         }
     }
@@ -164,7 +181,13 @@ impl CompactRoutePlan {
         let mut operations = Vec::with_capacity(self.steps.len());
         for step in &self.steps {
             match step {
-                CompactRouteStep::Operation(operation) => operations.push(operation.clone()),
+                CompactRouteStep::Owned(operation) => operations.push((**operation).clone()),
+                CompactRouteStep::Mapped { source, qubits } => operations.push(Operation {
+                    instruction: source.instruction.clone(),
+                    qubits: qubits.clone(),
+                    params: source.params.clone(),
+                    label: source.label.clone(),
+                }),
                 CompactRouteStep::Swap(swap) => operations.push(target.swap_operation(*swap)?),
             }
         }
@@ -661,8 +684,7 @@ fn route_trial_with_metadata(
     // They can be emitted immediately under the starting layout.
     if output.emit_operations {
         for operation in &sabre.initial {
-            let mapped = map_operation_dense(operation, &state.layout, target)?;
-            output.push_operation(mapped, target)?;
+            output.push_mapped_operation(operation, &state.layout, target)?;
         }
     }
 
@@ -1164,6 +1186,10 @@ struct PreparedRoutingParts {
 }
 
 impl RoutingTarget {
+    pub(crate) fn uses_native_costs(&self) -> bool {
+        self.native_cost_enabled
+    }
+
     /// Builds the indexed routing view used by SABRE scoring.
     ///
     /// The target keeps both semantic physical-qubit ids and dense indices.
@@ -2515,8 +2541,7 @@ impl RoutingState {
                     output.apply_pending_swaps(target, pending_swaps.take())?;
                     if output.emit_operations {
                         for operation in &node.operations {
-                            let mapped = map_operation_dense(operation, &self.layout, target)?;
-                            output.push_operation(mapped, target)?;
+                            output.push_mapped_operation(operation, &self.layout, target)?;
                         }
                     }
                 }
@@ -2559,8 +2584,7 @@ impl RoutingState {
                     output.apply_pending_swaps(target, pending_swaps.take())?;
                     if output.emit_operations {
                         for operation in &node.operations {
-                            let mapped = map_operation_dense(operation, &self.layout, target)?;
-                            output.push_operation(mapped, target)?;
+                            output.push_mapped_operation(operation, &self.layout, target)?;
                         }
                     }
                 }
@@ -2571,8 +2595,7 @@ impl RoutingState {
                     output.apply_pending_swaps(target, pending_swaps.take())?;
                     if output.emit_operations {
                         for operation in &node.operations {
-                            let mapped = map_operation_dense(operation, &self.layout, target)?;
-                            output.push_operation(mapped, target)?;
+                            output.push_mapped_operation(operation, &self.layout, target)?;
                         }
                     }
                 }
@@ -2611,7 +2634,7 @@ impl RoutingState {
     fn route_control_flow_node(
         &mut self,
         flow: &SabreControlFlow,
-        operations: &[Operation],
+        operations: &[Arc<Operation>],
         target: &RoutingTarget,
         heuristic: &SabreHeuristicConfig,
         output: &mut TrialOutput,
@@ -2787,8 +2810,7 @@ impl RoutingState {
         if output.emit_operations {
             output.push_operation(routed, target)?;
             for operation in rest {
-                let mapped = map_operation_dense(operation, &self.layout, target)?;
-                output.push_operation(mapped, target)?;
+                output.push_mapped_operation(operation, &self.layout, target)?;
             }
         }
         Ok(())
@@ -3384,6 +3406,28 @@ impl TrialOutput {
         Ok(())
     }
 
+    fn push_mapped_operation(
+        &mut self,
+        operation: &Arc<Operation>,
+        layout: &DenseRoutingLayout,
+        target: &RoutingTarget,
+    ) -> Result<(), CompilerError> {
+        debug_assert!(self.emit_operations);
+        if target.native_cost_enabled {
+            let mapped = map_operation_dense(operation, layout, target)?;
+            return self.push_operation(mapped, target);
+        }
+
+        let qubits = map_operation_qubits_dense(operation, layout, target)?;
+        self.operation_count = self.operation_count.saturating_add(1);
+        if qubits.len() == 2 {
+            self.two_qubit_operation_count = self.two_qubit_operation_count.saturating_add(1);
+        }
+        self.plan
+            .push_mapped_operation(Arc::clone(operation), qubits);
+        Ok(())
+    }
+
     fn apply_pending_swaps(
         &mut self,
         target: &RoutingTarget,
@@ -3560,18 +3604,27 @@ fn map_operation_dense(
 ) -> Result<Operation, CompilerError> {
     Ok(Operation {
         instruction: operation.instruction.clone(),
-        qubits: operation
-            .qubits
-            .iter()
-            .copied()
-            .map(|qubit| {
-                let physical_index = layout.physical_index(LogicalQubit::from_qubit(qubit))?;
-                target.physical_at(physical_index).map(PhysicalQubit::qubit)
-            })
-            .collect::<Result<SmallVec<[Qubit; 3]>, _>>()?,
+        qubits: map_operation_qubits_dense(operation, layout, target)?,
         params: operation.params.clone(),
         label: operation.label.clone(),
     })
+}
+
+#[inline]
+fn map_operation_qubits_dense(
+    operation: &Operation,
+    layout: &DenseRoutingLayout,
+    target: &RoutingTarget,
+) -> Result<SmallVec<[Qubit; 3]>, CompilerError> {
+    operation
+        .qubits
+        .iter()
+        .copied()
+        .map(|qubit| {
+            let physical_index = layout.physical_index(LogicalQubit::from_qubit(qubit))?;
+            target.physical_at(physical_index).map(PhysicalQubit::qubit)
+        })
+        .collect()
 }
 
 /// Remaps operation parameter indices into the routed circuit's parameter table.

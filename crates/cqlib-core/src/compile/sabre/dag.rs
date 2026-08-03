@@ -49,6 +49,7 @@ use rustworkx_core::petgraph::Direction;
 use rustworkx_core::petgraph::graph::DiGraph;
 use rustworkx_core::petgraph::prelude::NodeIndex;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(crate) enum SabreNodeKind {
@@ -83,6 +84,35 @@ pub(crate) enum SabreControlFlow {
     },
 }
 
+impl SabreControlFlow {
+    /// Lists body DAGs in a canonical traversal order: then/else for `if`,
+    /// the single body for loops, and cases followed by default for `switch`.
+    ///
+    /// Metadata preparation and recursive routing passes must agree on one
+    /// order so per-body prepared data stays aligned with its body.
+    pub(crate) fn bodies(&self) -> Vec<&SabreDag> {
+        match self {
+            SabreControlFlow::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let mut bodies = vec![then_body];
+                bodies.extend(else_body.iter());
+                bodies
+            }
+            SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. } => {
+                vec![body]
+            }
+            SabreControlFlow::Switch { cases, default, .. } => {
+                let mut bodies = cases.iter().map(|case| &case.body).collect::<Vec<_>>();
+                bodies.extend(default.iter());
+                bodies
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SabreSwitchCase {
     pub(crate) value: u128,
@@ -91,13 +121,13 @@ pub(crate) struct SabreSwitchCase {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SabreNode {
-    pub(crate) operations: Vec<Operation>,
+    pub(crate) operations: Vec<Arc<Operation>>,
     pub(crate) kind: SabreNodeKind,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SabreDag {
-    pub(crate) initial: Vec<Operation>,
+    pub(crate) initial: Vec<Arc<Operation>>,
     pub(crate) graph: DiGraph<SabreNode, ()>,
     pub(crate) first_layer: Vec<NodeIndex>,
 }
@@ -152,11 +182,11 @@ impl SabreDag {
             match predecessors {
                 Predecessors::AllUnmapped => match kind {
                     SabreNodeKind::Synchronize if !ordering_barrier => {
-                        initial.push(operation.clone())
+                        initial.push(Arc::new(operation.clone()))
                     }
                     kind => {
                         let node = graph.add_node(SabreNode {
-                            operations: vec![operation.clone()],
+                            operations: vec![Arc::new(operation.clone())],
                             kind,
                         });
                         first_layer.push(node);
@@ -181,13 +211,13 @@ impl SabreDag {
                             _ => false,
                         };
                     if fold_into_previous {
-                        graph[previous].operations.push(operation.clone());
+                        graph[previous].operations.push(Arc::new(operation.clone()));
                         for logical in qubits {
                             wire_pos.insert(logical, previous);
                         }
                     } else {
                         let node = graph.add_node(SabreNode {
-                            operations: vec![operation.clone()],
+                            operations: vec![Arc::new(operation.clone())],
                             kind,
                         });
                         graph.add_edge(previous, node, ());
@@ -199,7 +229,7 @@ impl SabreDag {
                 }
                 Predecessors::Multiple(parents) => {
                     let node = graph.add_node(SabreNode {
-                        operations: vec![operation.clone()],
+                        operations: vec![Arc::new(operation.clone())],
                         kind,
                     });
                     created_node = Some(node);

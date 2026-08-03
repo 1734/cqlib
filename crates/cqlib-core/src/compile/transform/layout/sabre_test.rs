@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::sabre::dense_interaction_path_skips_refinement;
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::sabre::{SabreConfig, sabre_route};
@@ -39,6 +40,41 @@ fn disconnected_device(name: &str, component_ids: &[&[u32]]) -> Device {
         .collect::<Vec<_>>();
     let topology = Topology::new(qubits.clone(), edges).unwrap();
     Device::new(name, qubits.into_iter().collect(), topology).unwrap()
+}
+
+#[test]
+fn dense_interaction_refinement_skip_requires_a_path_topology() {
+    let mut complete = Circuit::new(4);
+    for left in 0..4 {
+        for right in (left + 1)..4 {
+            complete.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+        }
+    }
+    let complete = analyze_circuit_for_layout(&complete).unwrap();
+    let line = PhysicalLayoutGraph::from_device(&Device::line("line", 4).unwrap()).unwrap();
+    let grid = PhysicalLayoutGraph::from_device(&Device::grid("grid", 2, 2).unwrap()).unwrap();
+
+    assert!(dense_interaction_path_skips_refinement(&complete, &line));
+    assert!(!dense_interaction_path_skips_refinement(&complete, &grid));
+
+    let mut nonuniform = Circuit::new(4);
+    for left in 0..4 {
+        for right in (left + 1)..4 {
+            nonuniform.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+        }
+    }
+    for _ in 0..4 {
+        nonuniform.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    }
+    let nonuniform = analyze_circuit_for_layout(&nonuniform).unwrap();
+    assert!(!dense_interaction_path_skips_refinement(&nonuniform, &line));
+
+    let mut sparse = Circuit::new(4);
+    sparse.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    sparse.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    sparse.cx(Qubit::new(2), Qubit::new(3)).unwrap();
+    let sparse = analyze_circuit_for_layout(&sparse).unwrap();
+    assert!(!dense_interaction_path_skips_refinement(&sparse, &line));
 }
 
 #[test]
