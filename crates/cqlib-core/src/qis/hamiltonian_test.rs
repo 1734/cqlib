@@ -70,3 +70,24 @@ fn hamiltonian_to_matrix_rejects_mismatched_terms() {
         })
     ));
 }
+
+#[test]
+fn hamiltonian_standard_conversions_preserve_validation() {
+    let pauli: PauliString = "XZ".parse().unwrap();
+    let single = Hamiltonian::from(pauli.clone());
+    assert_eq!(single.num_qubits, 2);
+    assert_eq!(
+        single.terms,
+        vec![(pauli.clone(), Complex64::new(1.0, 0.0))]
+    );
+
+    let terms = vec![(pauli, Complex64::new(0.5, 0.0))];
+    assert_eq!(Hamiltonian::try_from(terms.clone()).unwrap().terms, terms);
+    assert!(matches!(
+        Hamiltonian::try_from(vec![
+            (PauliString::new(1), Complex64::new(1.0, 0.0)),
+            (PauliString::new(2), Complex64::new(1.0, 0.0)),
+        ]),
+        Err(QisError::QubitMismatch { .. })
+    ));
+}

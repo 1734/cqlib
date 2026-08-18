@@ -847,3 +847,14 @@ fn zero_qubit_pauli_string_to_matrix_is_its_phase() {
 
     assert_eq!(pauli.to_matrix(), arr2(&[[Complex64::new(0.0, -1.0)]]));
 }
+
+#[test]
+fn pauli_iterator_follows_ascending_qubit_indices() {
+    let pauli: PauliString = "XYZI".parse().unwrap();
+    let expected = (0..pauli.num_qubits)
+        .map(|index| pauli.get_pauli(index))
+        .collect::<Vec<_>>();
+
+    assert_eq!(pauli.iter().collect::<Vec<_>>(), expected);
+    assert_eq!((&pauli).into_iter().collect::<Vec<_>>(), expected);
+}

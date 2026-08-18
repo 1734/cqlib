@@ -17,7 +17,7 @@ use crate::compile::error::CompilerError;
 use crate::compile::knowledge::library::RuleKind;
 
 /// High-level rule application mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RewriteMode {
     /// Conservative optimization. Accepted rewrites must strictly improve local cost.
     Optimize,

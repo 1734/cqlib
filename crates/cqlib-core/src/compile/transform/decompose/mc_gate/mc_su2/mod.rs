@@ -96,7 +96,7 @@ pub use no_auxiliary::decompose_mc_su2_no_aux;
 pub(super) const DECOMPOSE_MC_SU2_NAME: &str = "decompose.mc_su2";
 
 /// Axis of a single-qubit special-unitary rotation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Su2RotationAxis {
     /// Rotation around the Pauli-X axis.
     X,

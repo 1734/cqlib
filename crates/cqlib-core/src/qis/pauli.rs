@@ -439,6 +439,36 @@ pub struct PauliString {
     pub x: BitVec,
 }
 
+/// Iterator over a Pauli string in ascending qubit-index order.
+pub struct PauliIter<'a> {
+    pauli: &'a PauliString,
+    indices: std::ops::Range<usize>,
+}
+
+impl Iterator for PauliIter<'_> {
+    type Item = Pauli;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().map(|index| self.pauli.get_pauli(index))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.indices.size_hint()
+    }
+}
+
+impl ExactSizeIterator for PauliIter<'_> {}
+impl std::iter::FusedIterator for PauliIter<'_> {}
+
+impl<'a> IntoIterator for &'a PauliString {
+    type Item = Pauli;
+    type IntoIter = PauliIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl fmt::Display for PauliString {
     /// Formats the Pauli string as “+XYZ” or “-iZIX”.
     ///
@@ -469,6 +499,14 @@ impl fmt::Display for PauliString {
 }
 
 impl PauliString {
+    /// Iterates over operators from qubit index 0 upward.
+    pub fn iter(&self) -> PauliIter<'_> {
+        PauliIter {
+            pauli: self,
+            indices: 0..self.num_qubits,
+        }
+    }
+
     /// Creates a new identity Pauli string.
     ///
     /// # Examples

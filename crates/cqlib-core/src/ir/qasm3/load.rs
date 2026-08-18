@@ -15,6 +15,7 @@ use crate::circuit::{
     Circuit, ClassicalExpr, ClassicalType, ClassicalVar, Instruction, Parameter, ParameterValue,
     Qubit, StandardGate, UnitaryGate,
 };
+use crate::ir::io_errors_equivalent;
 use oq3_semantics::asg::{
     self, ArithOp, BinaryOp, CmpOp, Expr, ForIterable, GateModifier, GateOperand, IndexOperator,
     LValue, Literal, Stmt, TExpr, UnaryOp,
@@ -574,9 +575,7 @@ pub enum Qasm3ParseError {
 impl PartialEq for Qasm3ParseError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::IoError(lhs), Self::IoError(rhs)) => {
-                lhs.kind() == rhs.kind() && lhs.to_string() == rhs.to_string()
-            }
+            (Self::IoError(lhs), Self::IoError(rhs)) => io_errors_equivalent(lhs, rhs),
             (Self::ParseError(lhs), Self::ParseError(rhs)) => lhs == rhs,
             (Self::SemanticError(lhs), Self::SemanticError(rhs)) => lhs == rhs,
             (Self::ConversionError(lhs), Self::ConversionError(rhs)) => lhs == rhs,

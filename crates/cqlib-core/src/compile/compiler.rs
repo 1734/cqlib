@@ -37,7 +37,7 @@ use crate::compile::{CompilerError, WorkflowStepReport};
 use crate::device::{Device, Layout};
 
 /// Optimization effort selected for the compiler workflow.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum CompileMode {
     /// Conservative logical optimization using production pass defaults.
     #[default]
