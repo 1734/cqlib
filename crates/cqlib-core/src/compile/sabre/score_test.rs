@@ -202,6 +202,7 @@ fn topology_lookahead_skips_unary_work_but_keeps_future_two_qubit_requirements()
         .update_route(
             &sabre,
             &target,
+            &metadata,
             &heuristic,
             &mut output,
             &sabre.first_layer,
@@ -249,6 +250,7 @@ fn device_lookahead_keeps_placement_sensitive_unary_requirements() {
         .update_route(
             &sabre,
             &target,
+            &metadata,
             &heuristic,
             &mut output,
             &sabre.first_layer,
@@ -523,6 +525,35 @@ fn eager_and_lazy_pair_costs_match_with_binary_exact_native_costs() {
             );
         }
     }
+}
+
+#[test]
+fn eager_and_lazy_pair_costs_match_when_a_longer_route_has_lower_native_cost() {
+    let swap_cost = |native_two_qubit_ops| NativePlanCost {
+        native_two_qubit_ops,
+        native_total_ops: native_two_qubit_ops,
+        ..NativePlanCost::default()
+    };
+    let neighbors = movement_adjacency(
+        3,
+        &[
+            movement_edge(0, 1, swap_cost(1)),
+            movement_edge(0, 2, swap_cost(1)),
+            movement_edge(1, 2, swap_cost(3)),
+        ],
+    );
+    let terminals = BTreeMap::from([
+        ([0, 1], NativePlanCost::default()),
+        ([1, 0], NativePlanCost::default()),
+    ]);
+    let eager = pair_route_lower_bounds(&neighbors, &terminals);
+    let eager_start = eager.get(0, 2).expect("the pair can reach a terminal");
+    let lazy_start = pair_route_lower_bound_from_state(&neighbors, &terminals, [0, 2])
+        .expect("the pair can reach a terminal");
+
+    assert_eq!(eager_start.native.native_two_qubit_ops, 2);
+    assert_eq!(eager_start.remaining_swaps, 2);
+    assert_eq!(lazy_start, eager_start);
 }
 
 #[test]
@@ -942,12 +973,25 @@ fn mapping_cycle_detection_verifies_a_repeated_layout() {
     let target = RoutingTarget::from_physical(&physical).unwrap();
     let layout = Layout::from_pairs(&[(0, 0), (1, 1)], 3).unwrap();
     let mut dense = DenseRoutingLayout::from_layout(&layout, &target.physical_qubits).unwrap();
-    let mut detector = MappingCycleDetector::new(&dense);
+    let initial_hash = MappingCycleDetector::mapping_hash(dense.signature());
+    let mut detector = MappingCycleDetector::new(initial_hash);
 
+    let before = [dense.signature()[0], dense.signature()[1]];
     dense.swap_physical_indices(0, 1);
-    assert!(!detector.record_swap(&dense, [0, 1]));
+    let swapped_hash =
+        MappingCycleDetector::hash_after_swap(initial_hash, [0, 1], before[0], before[1]);
+    assert_eq!(
+        swapped_hash,
+        MappingCycleDetector::mapping_hash(dense.signature())
+    );
+    assert!(!detector.record_hash(swapped_hash));
+
+    let before = [dense.signature()[0], dense.signature()[1]];
     dense.swap_physical_indices(0, 1);
-    assert!(detector.record_swap(&dense, [0, 1]));
+    let restored_hash =
+        MappingCycleDetector::hash_after_swap(swapped_hash, [0, 1], before[0], before[1]);
+    assert_eq!(restored_hash, initial_hash);
+    assert!(detector.record_hash(restored_hash));
 }
 
 #[test]

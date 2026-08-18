@@ -132,19 +132,39 @@ impl DeviceScheduleProfile {
 }
 
 /// Conservative error comparison key. Lower is better.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RobustErrorKey {
     pub(crate) unavailable_count: u32,
     pub(crate) imputed_count: u32,
     pub(crate) log_error: f64,
 }
 
-impl RobustErrorKey {
-    pub(crate) fn compare(self, other: Self) -> Ordering {
+impl PartialEq for RobustErrorKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for RobustErrorKey {}
+
+impl PartialOrd for RobustErrorKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RobustErrorKey {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.unavailable_count
             .cmp(&other.unavailable_count)
             .then_with(|| self.imputed_count.cmp(&other.imputed_count))
             .then_with(|| self.log_error.total_cmp(&other.log_error))
+    }
+}
+
+impl RobustErrorKey {
+    pub(crate) fn compare(self, other: Self) -> Ordering {
+        self.cmp(&other)
     }
 
     pub(crate) fn combine(self, other: Self) -> Self {
@@ -159,19 +179,39 @@ impl RobustErrorKey {
 }
 
 /// Conservative duration-work comparison key. Lower is better.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RobustDurationKey {
     pub(crate) unavailable_count: u32,
     pub(crate) imputed_count: u32,
     pub(crate) duration_work: f64,
 }
 
-impl RobustDurationKey {
-    pub(crate) fn compare(self, other: Self) -> Ordering {
+impl PartialEq for RobustDurationKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for RobustDurationKey {}
+
+impl PartialOrd for RobustDurationKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RobustDurationKey {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.unavailable_count
             .cmp(&other.unavailable_count)
             .then_with(|| self.imputed_count.cmp(&other.imputed_count))
             .then_with(|| self.duration_work.total_cmp(&other.duration_work))
+    }
+}
+
+impl RobustDurationKey {
+    pub(crate) fn compare(self, other: Self) -> Ordering {
+        self.cmp(&other)
     }
 
     pub(crate) fn combine(self, other: Self) -> Self {

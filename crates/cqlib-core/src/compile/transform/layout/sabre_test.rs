@@ -54,8 +54,35 @@ fn dense_interaction_refinement_skip_requires_a_path_topology() {
     let line = PhysicalLayoutGraph::from_device(&Device::line("line", 4).unwrap()).unwrap();
     let grid = PhysicalLayoutGraph::from_device(&Device::grid("grid", 2, 2).unwrap()).unwrap();
 
+    let disconnected_qubits = (0..6).map(PhysicalQubit::new).collect::<Vec<_>>();
+    let disconnected_edges = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5)]
+        .into_iter()
+        .map(|(left, right)| {
+            (
+                PhysicalQubit::new(left),
+                PhysicalQubit::new(right),
+                "cx".to_string(),
+            )
+        })
+        .collect();
+    let disconnected_topology =
+        Topology::new(disconnected_qubits.clone(), disconnected_edges).unwrap();
+    let disconnected = PhysicalLayoutGraph::from_device(
+        &Device::new(
+            "cycle-plus-path",
+            disconnected_qubits.into_iter().collect(),
+            disconnected_topology,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
     assert!(dense_interaction_path_skips_refinement(&complete, &line));
     assert!(!dense_interaction_path_skips_refinement(&complete, &grid));
+    assert!(!dense_interaction_path_skips_refinement(
+        &complete,
+        &disconnected
+    ));
 
     let mut nonuniform = Circuit::new(4);
     for left in 0..4 {

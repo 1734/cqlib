@@ -135,10 +135,13 @@ impl Layer {
 
     pub(crate) fn clear(&mut self) {
         for index in self.occupied_node_indices.drain(..) {
-            self.nodes[index] = None;
+            if let Some(entry) = self.nodes[index].take() {
+                for physical in entry.placement.endpoints() {
+                    self.active[physical] = None;
+                }
+            }
             self.occupied_positions[index] = VACANT_POSITION;
         }
-        self.active.fill(None);
         self.total_score = 0.0;
     }
 

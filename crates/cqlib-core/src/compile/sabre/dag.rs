@@ -138,7 +138,9 @@ impl SabreDag {
         let mut graph = DiGraph::new();
         let mut wire_pos: BTreeMap<LogicalQubit, NodeIndex> = BTreeMap::new();
         let mut first_layer = Vec::new();
-        let mut global_barrier = None;
+        let mut global_barrier: Option<NodeIndex> = None;
+        let mut parent_marks = Vec::<u32>::new();
+        let mut parent_generation = 0_u32;
 
         for operation in operations {
             let kind = kind_from_operation(operation)?;
@@ -157,18 +159,30 @@ impl SabreDag {
                 .map(LogicalQubit::from_qubit)
                 .collect::<Vec<_>>();
 
-            let mut parents = global_barrier.into_iter().collect::<Vec<_>>();
+            parent_generation = parent_generation.wrapping_add(1);
+            if parent_generation == 0 {
+                parent_marks.fill(0);
+                parent_generation = 1;
+            }
+            parent_marks.resize(graph.node_count(), 0);
+            let mut parents = Vec::new();
+            if let Some(parent) = global_barrier {
+                parent_marks[parent.index()] = parent_generation;
+                parents.push(parent);
+            }
             if ordering_barrier {
                 for parent in wire_pos.values().copied() {
-                    if !parents.contains(&parent) {
+                    if parent_marks[parent.index()] != parent_generation {
+                        parent_marks[parent.index()] = parent_generation;
                         parents.push(parent);
                     }
                 }
             } else {
                 for logical in &qubits {
                     if let Some(parent) = wire_pos.get(logical).copied()
-                        && !parents.contains(&parent)
+                        && parent_marks[parent.index()] != parent_generation
                     {
+                        parent_marks[parent.index()] = parent_generation;
                         parents.push(parent);
                     }
                 }

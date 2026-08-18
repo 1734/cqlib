@@ -32,9 +32,9 @@ use crate::circuit::Circuit;
 use crate::compile::sabre::{
     ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata, RankedTrial,
     RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialResult,
-    compare_ranked_trials, interaction_reachability_for_target, movement_component_assignment,
-    normalize_initial_layout_for_target, refine_layout_with_metadata,
-    route_ranked_trial_with_metadata,
+    compare_ranked_trials, interaction_reachability_for_target_with_metadata,
+    movement_component_assignment, normalize_initial_layout_for_target,
+    refine_layout_with_metadata, route_ranked_trial_with_metadata,
 };
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
@@ -288,38 +288,97 @@ pub(crate) fn sabre_route_selection_prepared(
     let initial_candidates =
         initial_layout_candidates(prepared, prepared_target, objective, config, &mut rng)?;
     let candidates = initial_candidates.layouts;
-    let candidate_notes = initial_candidates.notes;
-    let candidates_evaluated = candidates.len();
-    let trials = candidates
-        .into_iter()
-        .enumerate()
-        .map(|(index, layout)| CandidateTrial {
-            index,
-            layout,
-            base_seed,
+    let mut candidate_notes = initial_candidates.notes;
+    let generated_candidates = candidates.len();
+    let refinement_iterations = if dense_interaction_path_skips_refinement(analysis, physical) {
+        candidate_notes.push(
+            "skipped bidirectional refinement because dense logical interactions already span a path topology"
+                .to_string(),
+        );
+        0
+    } else {
+        config.refinement_iterations
+    };
+    let perfect_candidate = (!target.uses_native_costs())
+        .then(|| {
+            candidates
+                .iter()
+                .position(|layout| is_perfect_layout(analysis, physical, layout))
         })
-        .collect::<Vec<_>>();
+        .flatten();
+    let early_search = if let Some(index) = perfect_candidate {
+        let mut optimal_config = config.clone();
+        optimal_config.refinement_iterations = 0;
+        optimal_config.routing_trials = 1;
+        match evaluate_candidate(
+            sabre,
+            forwards,
+            backwards,
+            target,
+            prepared_target,
+            analysis,
+            physical,
+            objective,
+            &optimal_config,
+            0,
+            CandidateTrial {
+                index,
+                layout: candidates[index].clone(),
+                base_seed,
+            },
+            1,
+        )? {
+            CandidateOutcome::Success(evaluation) if evaluation.trial.swap_count() == 0 => {
+                candidate_notes.push(format!(
+                    "selected a zero-SWAP topology-optimal candidate without evaluating the remaining {} candidates",
+                    generated_candidates.saturating_sub(1)
+                ));
+                Some(CandidateSearch::from_outcome(CandidateOutcome::Success(
+                    evaluation,
+                )))
+            }
+            CandidateOutcome::Success(_) | CandidateOutcome::Infeasible(_, _) => None,
+        }
+    } else {
+        None
+    };
 
-    let search = trials
-        .into_par_iter()
-        .try_fold(CandidateSearch::default, |search, trial| {
-            let outcome = evaluate_candidate(
-                sabre,
-                forwards,
-                backwards,
-                target,
-                prepared_target,
-                analysis,
-                physical,
-                objective,
-                config,
-                trial,
-            )?;
-            search.merge(CandidateSearch::from_outcome(outcome), target)
-        })
-        .try_reduce(CandidateSearch::default, |left, right| {
-            left.merge(right, target)
-        })?;
+    let (search, candidates_evaluated) = if let Some(search) = early_search {
+        (search, 1)
+    } else {
+        let trials = candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, layout)| CandidateTrial {
+                index,
+                layout,
+                base_seed,
+            })
+            .collect::<Vec<_>>();
+        let search = trials
+            .into_par_iter()
+            .try_fold(CandidateSearch::default, |search, trial| {
+                let outcome = evaluate_candidate(
+                    sabre,
+                    forwards,
+                    backwards,
+                    target,
+                    prepared_target,
+                    analysis,
+                    physical,
+                    objective,
+                    config,
+                    refinement_iterations,
+                    trial,
+                    config.routing_trials,
+                )?;
+                search.merge(CandidateSearch::from_outcome(outcome), target)
+            })
+            .try_reduce(CandidateSearch::default, |left, right| {
+                left.merge(right, target)
+            })?;
+        (search, generated_candidates)
+    };
 
     let best = search.best.ok_or_else(|| {
         CompilerError::SabreRoutingFailed(SabreRoutingFailure::NoFeasibleLayoutCandidate {
@@ -367,9 +426,16 @@ fn evaluate_candidate(
     physical: &PhysicalLayoutGraph,
     objective: &LayoutObjective,
     config: &SabreConfig,
+    refinement_iterations: usize,
     trial: CandidateTrial,
+    route_trials: usize,
 ) -> Result<CandidateOutcome<CandidateEvaluation>, CompilerError> {
-    match interaction_reachability_for_target(sabre, target, &trial.layout)? {
+    match interaction_reachability_for_target_with_metadata(
+        sabre,
+        target,
+        &prepared_target.routing_metadata,
+        &trial.layout,
+    )? {
         InteractionReachability::Reachable => {}
         InteractionReachability::UnreachableUnary {
             cause: RequirementReachabilityFailure::NoExecutableTerminal,
@@ -401,7 +467,7 @@ fn evaluate_candidate(
     let initial_signature = layout_mapping_signature(&trial.layout, &analysis.logical_qubits)?;
     let mut seen_signatures = BTreeSet::from([initial_signature]);
     let mut refined = trial.layout;
-    for iteration in 0..config.refinement_iterations {
+    for iteration in 0..refinement_iterations {
         let forward_seed = derive_semantic_seed(
             trial.base_seed,
             1,
@@ -446,7 +512,7 @@ fn evaluate_candidate(
     }
 
     let mut best = None::<(usize, RankedTrial)>;
-    for route_index in 0..config.routing_trials {
+    for route_index in 0..route_trials {
         let seed = derive_semantic_seed(
             trial.base_seed,
             3,
@@ -481,7 +547,7 @@ fn evaluate_candidate(
             best = Some((route_index, routed));
         }
     }
-    let (route_index, routed) = best.expect("routing_trials is validated to be greater than zero");
+    let (route_index, routed) = best.expect("route_trials is greater than zero");
     let score = objective.score_layout(analysis, physical, &refined)?;
     Ok(CandidateOutcome::Success(CandidateEvaluation {
         index: trial.index,
@@ -489,8 +555,50 @@ fn evaluate_candidate(
         trial: routed,
         layout: refined,
         score,
-        trials_evaluated: config.routing_trials,
+        trials_evaluated: route_trials,
     }))
+}
+
+pub(crate) fn dense_interaction_path_skips_refinement(
+    analysis: &CircuitLayoutAnalysis,
+    physical: &PhysicalLayoutGraph,
+) -> bool {
+    let logical_count = analysis.logical_qubits.len();
+    if logical_count < 4 {
+        return false;
+    }
+    let possible_interactions = logical_count.saturating_mul(logical_count.saturating_sub(1)) / 2;
+    if analysis.interactions.len() != possible_interactions {
+        return false;
+    }
+    let (min_weight, max_weight) = analysis
+        .interactions
+        .interactions()
+        .iter()
+        .fold((f64::INFINITY, 0.0_f64), |(min, max), interaction| {
+            (min.min(interaction.weight), max.max(interaction.weight))
+        });
+    if !min_weight.is_finite() || min_weight <= 0.0 || max_weight > min_weight * 4.0 {
+        return false;
+    }
+
+    let physical_count = physical.physical_qubits().len();
+    if physical_count < 2 {
+        return false;
+    }
+    let mut degree = vec![0usize; physical_count];
+    let mut edge_count = 0usize;
+    for (left, right) in physical.undirected_edges_by_index() {
+        degree[left] += 1;
+        degree[right] += 1;
+        edge_count += 1;
+    }
+    let is_connected =
+        (1..physical_count).all(|index| physical.distance_by_index(0, index).is_some());
+    is_connected
+        && edge_count + 1 == physical_count
+        && degree.iter().filter(|value| **value == 1).count() == 2
+        && degree.iter().all(|value| matches!(*value, 1 | 2))
 }
 
 #[derive(Default)]
@@ -791,8 +899,12 @@ fn initial_layout_candidates(
     let structured_budget = config.layout_trials.min(6);
     let structured = interaction_aware_layouts(analysis, physical, structured_budget)?;
     for candidate in structured {
-        if interaction_reachability_for_target(sabre, target, &candidate)?
-            == InteractionReachability::Reachable
+        if interaction_reachability_for_target_with_metadata(
+            sabre,
+            target,
+            &prepared_target.routing_metadata,
+            &candidate,
+        )? == InteractionReachability::Reachable
         {
             candidates.push(candidate);
         }
@@ -802,7 +914,12 @@ fn initial_layout_candidates(
         GreedyCandidateOutcome::Found(greedy) => {
             let greedy =
                 normalize_initial_layout_for_target(logical_qubits, target, &greedy.layout)?;
-            if interaction_reachability_for_target(sabre, target, &greedy)?
+            if interaction_reachability_for_target_with_metadata(
+                sabre,
+                target,
+                &prepared_target.routing_metadata,
+                &greedy,
+            )?
                 == InteractionReachability::Reachable
             {
                 candidates.push(greedy);
@@ -824,8 +941,12 @@ fn initial_layout_candidates(
         match try_vf2_perfect_layout_prepared(analysis, physical, objective, &vf2_config)? {
             Vf2PreparedOutcome::Found(vf2) => {
                 let vf2 = normalize_initial_layout_for_target(logical_qubits, target, &vf2.layout)?;
-                if interaction_reachability_for_target(sabre, target, &vf2)?
-                    == InteractionReachability::Reachable
+                if interaction_reachability_for_target_with_metadata(
+                    sabre,
+                    target,
+                    &prepared_target.routing_metadata,
+                    &vf2,
+                )? == InteractionReachability::Reachable
                 {
                     candidates.push(vf2);
                 }

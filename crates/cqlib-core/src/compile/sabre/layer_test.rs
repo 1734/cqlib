@@ -203,6 +203,20 @@ fn remove_and_clear_restore_empty_layer_invariants() {
     assert!(layer.is_empty());
     assert!(layer.iter().next().is_none());
     assert!(layer.active_indices().next().is_none());
+    assert_eq!(layer.routable_node_on_index(2, &|_, _| true), None);
+    assert_eq!(layer.routable_node_on_index(3, &|_, _| true), None);
+    layer
+        .insert(
+            NodeIndex::new(0),
+            0,
+            RequirementPlacement::Pair([2, 3]),
+            &line_distance,
+        )
+        .unwrap();
+    assert_eq!(
+        layer.routable_node_on_index(2, &|_, _| true),
+        Some(NodeIndex::new(0))
+    );
 }
 
 #[test]

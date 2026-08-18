@@ -26,7 +26,7 @@ use crate::compile::device_planning::{
 use crate::compile::error::DeviceLoweringFailure;
 use crate::compile::knowledge::KnowledgeInstructionKey;
 use crate::compile::physical_target::PhysicalLayoutGraph;
-use crate::compile::{CompilerError, SabreRoutingFailure};
+use crate::compile::{CompilerError, SabreRoutingFailure, compare_some_first_by};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use indexmap::IndexSet;
 use rand::SeedableRng;
@@ -39,8 +39,8 @@ use rustworkx_core::petgraph::visit::EdgeRef;
 use rustworkx_core::token_swapper::token_swapper;
 use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
 const CONTROL_FLOW_EPILOGUE_TRIALS: usize = 4;
@@ -456,7 +456,12 @@ pub(crate) fn sabre_route_prepared(
         .collect::<Vec<_>>();
     let initial_layout =
         normalize_initial_layout_for_target(&logical_qubits, target, initial_layout)?;
-    validate_reachable_interactions_for_target(sabre, target, &initial_layout)?;
+    validate_reachable_interactions_for_target_with_metadata(
+        sabre,
+        target,
+        metadata,
+        &initial_layout,
+    )?;
     // Trials share the normalized layout and DAG but use independent seeds for
     // tie-breaking. Selection stays deterministic for a configured seed because
     // result comparison falls back to the trial index.
@@ -537,7 +542,7 @@ pub(crate) fn finish_sabre_route(
     circuit: &Circuit,
     target: &RoutingTarget,
     initial_layout: Layout,
-    best: TrialResult,
+    mut best: TrialResult,
     best_index: usize,
     trials_evaluated: usize,
 ) -> Result<SabreRoutingResult, CompilerError> {
@@ -570,15 +575,11 @@ pub(crate) fn finish_sabre_route(
                 as u32
         })
         .collect::<Vec<_>>();
-    let mapped_operations = best
-        .operations
-        .iter()
-        .map(|operation| remap_parameter_indices(operation, &parameter_indices))
-        .collect::<Result<Vec<_>, _>>()?;
-    let routed_operations = mapped_operations
-        .iter()
+    let routed_operations = std::mem::take(&mut best.operations)
+        .into_iter()
         .map(|operation| {
-            storage_operation_to_value(operation.clone(), &|param| match param {
+            let operation = remap_parameter_indices(operation, &parameter_indices)?;
+            storage_operation_to_value(operation, &|param| match param {
                 CircuitParam::Fixed(value) => Ok((*value).into()),
                 CircuitParam::Index(index) => parameter_order
                     .get_index(*index as usize)
@@ -586,8 +587,9 @@ pub(crate) fn finish_sabre_route(
                     .map(Into::into)
                     .ok_or(crate::circuit::CircuitError::InvalidParameterIndex(*index)),
             })
+            .map_err(CompilerError::Circuit)
         })
-        .collect::<Result<Vec<_>, crate::circuit::CircuitError>>()?;
+        .collect::<Result<Vec<_>, CompilerError>>()?;
     let mut routed = Circuit::from_operations(
         target
             .physical_qubits
@@ -691,6 +693,7 @@ fn route_trial_with_metadata(
     state.update_route(
         sabre,
         target,
+        metadata,
         heuristic,
         &mut output,
         &sabre.first_layer,
@@ -699,10 +702,12 @@ fn route_trial_with_metadata(
     state.populate_extended_set(sabre, target)?;
 
     let mut routable_nodes = Vec::with_capacity(2);
+    let mut current_swaps = Vec::new();
+    let mut mapping_cycles = MappingCycleDetector::new(state.layout_hash);
     let mut search_steps_since_decay_reset = 0usize;
     while !state.front_layer.is_empty() {
-        let mut current_swaps = Vec::new();
-        let mut mapping_cycles = MappingCycleDetector::new(&state.layout);
+        current_swaps.clear();
+        mapping_cycles.reset(state.layout_hash);
         let mut repeated_mapping = false;
         // Search accumulates speculative SWAPs until at least one front-layer
         // node becomes adjacent. Those SWAPs are emitted only when the routed
@@ -715,7 +720,7 @@ fn route_trial_with_metadata(
                 state.choose_best_swap(target, heuristic, current_swaps.last().copied())?;
             state.apply_swap(best_swap.physical, target)?;
             current_swaps.push(best_swap.emitted);
-            repeated_mapping = mapping_cycles.record_swap(&state.layout, best_swap.indices);
+            repeated_mapping = mapping_cycles.record_hash(state.layout_hash);
             let executable =
                 |requirement, placement| target.terminal_cost_for(requirement, placement).is_some();
             for candidate in best_swap
@@ -763,10 +768,11 @@ fn route_trial_with_metadata(
         state.update_route(
             sabre,
             target,
+            metadata,
             heuristic,
             &mut output,
             &routable_nodes,
-            Some(current_swaps),
+            Some(&mut current_swaps),
         )?;
         state.populate_extended_set(sabre, target)?;
         if metadata.high_pair_reuse
@@ -887,13 +893,13 @@ pub fn validate_reachable_interactions(
     validate_reachable_interactions_for_target(&sabre, &target, &initial_layout)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct InteractionOperation {
     instruction: KnowledgeInstructionKey,
     qarg_roles: SmallVec<[u8; 2]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum InteractionSignature {
     /// Layout refinement DAGs deliberately omit concrete operations.
     GenericPair,
@@ -1872,7 +1878,7 @@ impl SabreDag {
         let mut signatures = HashSet::from([InteractionSignature::GenericPair]);
         self.collect_interaction_signatures(&mut signatures)?;
         let mut signatures = signatures.into_iter().collect::<Vec<_>>();
-        signatures.sort_by_key(|signature| format!("{signature:?}"));
+        signatures.sort();
         if let Some(position) = signatures
             .iter()
             .position(|signature| matches!(signature, InteractionSignature::GenericPair))
@@ -2246,77 +2252,58 @@ fn pair_route_lower_bound_from_state(
 ) -> Option<RouteLowerBound> {
     let count = swap_neighbors.len();
     PairStateTable::<RouteLowerBound>::index(count, start[0], start[1])?;
-    let mut visited_depth = BTreeMap::from([(start, 0_u32)]);
-    let mut layers = vec![vec![start]];
-    let terminal_depth = loop {
-        let depth = layers.len() - 1;
-        if layers[depth]
-            .iter()
-            .any(|placement| terminals.contains_key(placement))
-        {
-            break depth;
+    let mut bounds = BTreeMap::<[usize; 2], RouteLowerBound>::new();
+    let mut queue = BinaryHeap::new();
+    for (&placement, &native) in terminals {
+        if PairStateTable::<RouteLowerBound>::index(count, placement[0], placement[1]).is_none() {
+            continue;
         }
-        let next_depth = u32::try_from(depth).ok()?.saturating_add(1);
-        let mut next = BTreeSet::new();
-        for &placement in &layers[depth] {
-            for endpoint in placement {
-                for &neighbor in &swap_neighbors[endpoint] {
-                    let next_placement = pair_after_swap(placement, [endpoint, neighbor.index]);
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        visited_depth.entry(next_placement)
-                    {
-                        entry.insert(next_depth);
-                        next.insert(next_placement);
-                    }
-                }
-            }
-        }
-        if next.is_empty() {
-            return None;
-        }
-        layers.push(next.into_iter().collect());
-    };
+        let bound = RouteLowerBound {
+            remaining_swaps: 0,
+            native,
+        };
+        bounds.insert(placement, bound);
+        queue.push(Reverse((native.native_two_qubit_ops, 0_u32, placement)));
+    }
 
-    let mut native_from_state = layers[terminal_depth]
-        .iter()
-        .filter_map(|placement| terminals.get(placement).map(|cost| (*placement, *cost)))
-        .collect::<BTreeMap<_, _>>();
-    for depth in (0..terminal_depth).rev() {
-        let next_depth = u32::try_from(depth).ok()?.saturating_add(1);
-        for &placement in &layers[depth] {
-            let mut best = None;
-            for endpoint in placement {
-                for &neighbor in &swap_neighbors[endpoint] {
-                    let next_placement = pair_after_swap(placement, [endpoint, neighbor.index]);
-                    if visited_depth.get(&next_placement) != Some(&next_depth) {
-                        continue;
-                    }
-                    let Some(next_cost) = native_from_state.get(&next_placement).copied() else {
-                        continue;
-                    };
-                    let candidate = neighbor.swap.cost.combine(next_cost);
-                    if best.is_none_or(|current| {
-                        compare_optional_native_cost(Some(candidate), Some(current)).is_lt()
-                    }) {
-                        best = Some(candidate);
-                    }
+    while let Some(Reverse((native_two_qubit_ops, remaining_swaps, placement))) = queue.pop() {
+        let current = bounds.get(&placement).copied()?;
+        if current.native.native_two_qubit_ops != native_two_qubit_ops
+            || current.remaining_swaps != remaining_swaps
+        {
+            continue;
+        }
+        if placement == start {
+            return Some(current);
+        }
+        for endpoint in placement {
+            for &neighbor in &swap_neighbors[endpoint] {
+                let predecessor = pair_after_swap(placement, [endpoint, neighbor.index]);
+                let candidate = current.with_swap(neighbor.swap.cost);
+                if bounds
+                    .get(&predecessor)
+                    .is_none_or(|previous| candidate.compare(*previous).is_lt())
+                {
+                    bounds.insert(predecessor, candidate);
+                    queue.push(Reverse((
+                        candidate.native.native_two_qubit_ops,
+                        candidate.remaining_swaps,
+                        predecessor,
+                    )));
                 }
-            }
-            if let Some(best) = best {
-                native_from_state.insert(placement, best);
             }
         }
     }
-    Some(RouteLowerBound {
-        remaining_swaps: u32::try_from(terminal_depth).ok()?,
-        native: native_from_state.get(&start).copied()?,
-    })
+    None
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRouteMetadata {
     required_predecessors: Vec<u32>,
     requirement_ids: Vec<Option<usize>>,
+    /// Prepared metadata for control-flow bodies, indexed by parent DAG node.
+    /// Bodies use `SabreControlFlow::bodies` canonical traversal order.
+    nested: Vec<Vec<PreparedRouteMetadata>>,
     high_pair_reuse: bool,
 }
 
@@ -2334,6 +2321,18 @@ impl PreparedRouteMetadata {
                     target.interaction_id_for_node(sabre, node).map(Some)
                 }
                 SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => Ok(None),
+            })
+            .collect::<Result<Vec<_>, CompilerError>>()?;
+        let nested = sabre
+            .graph
+            .node_indices()
+            .map(|node| match &sabre.graph[node].kind {
+                SabreNodeKind::ControlFlow(flow) => flow
+                    .bodies()
+                    .into_iter()
+                    .map(|body| Self::new(body, target))
+                    .collect(),
+                _ => Ok(Vec::new()),
             })
             .collect::<Result<Vec<_>, CompilerError>>()?;
         let mut two_qubit_count = 0usize;
@@ -2354,6 +2353,7 @@ impl PreparedRouteMetadata {
         Ok(Self {
             required_predecessors,
             requirement_ids,
+            nested,
             high_pair_reuse,
         })
     }
@@ -2362,6 +2362,7 @@ impl PreparedRouteMetadata {
 #[derive(Debug)]
 struct RoutingState {
     layout: DenseRoutingLayout,
+    layout_hash: u64,
     front_layer: Layer,
     lookahead_layers: Vec<Layer>,
     required_predecessors: Vec<u32>,
@@ -2370,6 +2371,7 @@ struct RoutingState {
     decay: Vec<f64>,
     active_marks: Vec<u32>,
     active_generation: u32,
+    active_index_scratch: Vec<usize>,
     candidate_scratch: Vec<SwapChoice>,
     scored_scratch: Vec<ScoredCandidate>,
     eligible_scratch: Vec<ScoredCandidate>,
@@ -2444,8 +2446,10 @@ impl RoutingState {
         seed: u64,
     ) -> Result<Self, CompilerError> {
         let layout = DenseRoutingLayout::from_layout(layout, &target.physical_qubits)?;
+        let layout_hash = MappingCycleDetector::mapping_hash(layout.signature());
         Ok(Self {
             layout,
+            layout_hash,
             front_layer: Layer::new(sabre.graph.node_count(), target.physical_qubits.len()),
             lookahead_layers: vec![
                 Layer::new(
@@ -2460,6 +2464,7 @@ impl RoutingState {
             decay: vec![1.0; target.physical_qubits.len()],
             active_marks: vec![0; target.physical_qubits.len()],
             active_generation: 0,
+            active_index_scratch: Vec::new(),
             candidate_scratch: Vec::new(),
             scored_scratch: Vec::new(),
             eligible_scratch: Vec::new(),
@@ -2484,6 +2489,8 @@ impl RoutingState {
             target.physical_index(swap[0])?,
             target.physical_index(swap[1])?,
         ];
+        let before_left = self.layout.signature()[swap_indices[0]];
+        let before_right = self.layout.signature()[swap_indices[1]];
         if target.native_cost_enabled {
             let distance = |requirement, placement| {
                 target.distance_for_cached(requirement, placement, Some(&self.lower_bound_cache))
@@ -2503,17 +2510,25 @@ impl RoutingState {
         }
         self.layout
             .swap_physical_indices(swap_indices[0], swap_indices[1]);
+        self.layout_hash = MappingCycleDetector::hash_after_swap(
+            self.layout_hash,
+            swap_indices,
+            before_left,
+            before_right,
+        );
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_route(
         &mut self,
         sabre: &SabreDag,
         target: &RoutingTarget,
+        metadata: &PreparedRouteMetadata,
         heuristic: &SabreHeuristicConfig,
         output: &mut TrialOutput,
         nodes: &[NodeIndex],
-        initial_swaps: Option<Vec<[PhysicalQubit; 2]>>,
+        initial_swaps: Option<&mut Vec<[PhysicalQubit; 2]>>,
     ) -> Result<(), CompilerError> {
         let mut to_visit = nodes.iter().copied().collect::<VecDeque<_>>();
         let mut pending_swaps = initial_swaps;
@@ -2607,6 +2622,12 @@ impl RoutingState {
                     self.route_control_flow_node(
                         flow,
                         &node.operations,
+                        metadata.nested.get(node_id.index()).ok_or_else(|| {
+                            CompilerError::InvariantViolation(format!(
+                                "routing node {} has no prepared nested metadata slot",
+                                node_id.index()
+                            ))
+                        })?,
                         target,
                         heuristic,
                         output,
@@ -2635,6 +2656,7 @@ impl RoutingState {
         &mut self,
         flow: &SabreControlFlow,
         operations: &[Arc<Operation>],
+        body_metadata: &[PreparedRouteMetadata],
         target: &RoutingTarget,
         heuristic: &SabreHeuristicConfig,
         output: &mut TrialOutput,
@@ -2648,6 +2670,7 @@ impl RoutingState {
         // first operation with routed bodies, then map the remaining operations
         // through the unchanged parent layout.
         let emit_operations = output.emit_operations;
+        let mut metadata = body_metadata.iter();
         let routed = match flow {
             SabreControlFlow::If {
                 condition,
@@ -2657,6 +2680,9 @@ impl RoutingState {
                 let then_result = route_control_flow_body(
                     then_body,
                     target,
+                    metadata
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("if then"))?,
                     &entry_layout,
                     heuristic,
                     output.next_nested_seed(),
@@ -2668,6 +2694,9 @@ impl RoutingState {
                         route_control_flow_body(
                             body,
                             target,
+                            metadata
+                                .next()
+                                .ok_or_else(|| missing_nested_metadata("if else"))?,
                             &entry_layout,
                             heuristic,
                             output.next_nested_seed(),
@@ -2701,6 +2730,9 @@ impl RoutingState {
                 let body_result = route_control_flow_body(
                     body,
                     target,
+                    metadata
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("while"))?,
                     &entry_layout,
                     heuristic,
                     output.next_nested_seed(),
@@ -2730,6 +2762,9 @@ impl RoutingState {
                 let body_result = route_control_flow_body(
                     body,
                     target,
+                    metadata
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("for"))?,
                     &entry_layout,
                     heuristic,
                     output.next_nested_seed(),
@@ -2762,6 +2797,9 @@ impl RoutingState {
                     let result = route_control_flow_body(
                         &case.body,
                         target,
+                        metadata
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("switch case"))?,
                         &entry_layout,
                         heuristic,
                         output.next_nested_seed(),
@@ -2779,6 +2817,9 @@ impl RoutingState {
                         route_control_flow_body(
                             body,
                             target,
+                            metadata
+                                .next()
+                                .ok_or_else(|| missing_nested_metadata("switch default"))?,
                             &entry_layout,
                             heuristic,
                             output.next_nested_seed(),
@@ -2935,16 +2976,21 @@ impl RoutingState {
             self.active_marks.fill(0);
             self.active_generation = 1;
         }
+        let mut active_indices = std::mem::take(&mut self.active_index_scratch);
+        active_indices.clear();
         for active_index in self.front_layer.active_indices() {
-            self.active_marks[active_index] = self.active_generation;
+            if self.active_marks[active_index] != self.active_generation {
+                self.active_marks[active_index] = self.active_generation;
+                active_indices.push(active_index);
+            }
         }
+        // Preserve the candidate order of the previous full physical-table
+        // scan so seeded tie-breaking remains bit-for-bit deterministic.
+        active_indices.sort_unstable();
 
         let mut candidates = std::mem::take(&mut self.candidate_scratch);
         candidates.clear();
-        for active_index in 0..target.physical_qubits.len() {
-            if self.active_marks[active_index] != self.active_generation {
-                continue;
-            }
+        for &active_index in &active_indices {
             let active = target.physical_at(active_index)?;
             for &movement_neighbor in &target.neighbors_by_index[active_index] {
                 let neighbor_index = movement_neighbor.index;
@@ -3082,6 +3128,7 @@ impl RoutingState {
         scored.clear();
         eligible.clear();
         self.candidate_scratch = candidates;
+        self.active_index_scratch = active_indices;
         self.scored_scratch = scored;
         self.eligible_scratch = eligible;
         Ok(selected)
@@ -3245,8 +3292,7 @@ struct MappingCycleDetector {
 impl MappingCycleDetector {
     const WINDOW: usize = 32;
 
-    fn new(layout: &DenseRoutingLayout) -> Self {
-        let current_hash = Self::mapping_hash(layout.signature());
+    fn new(current_hash: u64) -> Self {
         Self {
             current_hash,
             recent: VecDeque::from([current_hash]),
@@ -3254,14 +3300,16 @@ impl MappingCycleDetector {
         }
     }
 
-    fn record_swap(&mut self, layout: &DenseRoutingLayout, swap: [usize; 2]) -> bool {
-        let [left, right] = swap;
-        let after_left = layout.signature()[left];
-        let after_right = layout.signature()[right];
-        self.current_hash ^= Self::entry_hash(left, after_right)
-            ^ Self::entry_hash(right, after_left)
-            ^ Self::entry_hash(left, after_left)
-            ^ Self::entry_hash(right, after_right);
+    fn reset(&mut self, current_hash: u64) {
+        self.current_hash = current_hash;
+        self.recent.clear();
+        self.recent.push_back(current_hash);
+        self.seen.clear();
+        self.seen.insert(current_hash);
+    }
+
+    fn record_hash(&mut self, current_hash: u64) -> bool {
+        self.current_hash = current_hash;
         if self.seen.contains(&self.current_hash) {
             return true;
         }
@@ -3273,6 +3321,19 @@ impl MappingCycleDetector {
             self.seen.remove(&expired);
         }
         false
+    }
+
+    fn hash_after_swap(
+        current_hash: u64,
+        [left, right]: [usize; 2],
+        before_left: Option<usize>,
+        before_right: Option<usize>,
+    ) -> u64 {
+        current_hash
+            ^ Self::entry_hash(left, before_left)
+            ^ Self::entry_hash(right, before_right)
+            ^ Self::entry_hash(left, before_right)
+            ^ Self::entry_hash(right, before_left)
     }
 
     fn mapping_hash(mapping: &[Option<usize>]) -> u64 {
@@ -3300,24 +3361,16 @@ fn compare_optional_native_cost(
     left: Option<NativePlanCost>,
     right: Option<NativePlanCost>,
 ) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
+    compare_some_first_by(left, right, |left, right| {
+        left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops)
+    })
 }
 
 fn compare_optional_route_bound(
     left: Option<RouteLowerBound>,
     right: Option<RouteLowerBound>,
 ) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.compare(right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
+    compare_some_first_by(left, right, |left, right| left.compare(right))
 }
 
 fn heuristic_score_after_swap(
@@ -3431,12 +3484,12 @@ impl TrialOutput {
     fn apply_pending_swaps(
         &mut self,
         target: &RoutingTarget,
-        swaps: Option<Vec<[PhysicalQubit; 2]>>,
+        swaps: Option<&mut Vec<[PhysicalQubit; 2]>>,
     ) -> Result<(), CompilerError> {
         if let Some(swaps) = swaps {
             self.swap_count += swaps.len();
             if self.emit_operations {
-                for swap in swaps {
+                for swap in swaps.drain(..) {
                     self.plan.push_swap(swap);
                     self.operation_count = self.operation_count.saturating_add(1);
                     self.two_qubit_operation_count =
@@ -3445,6 +3498,8 @@ impl TrialOutput {
                         self.native_cost.append_gate(target.swap_cost(swap)?);
                     }
                 }
+            } else {
+                swaps.clear();
             }
         }
         Ok(())
@@ -3480,16 +3535,16 @@ impl TrialOutput {
 fn route_control_flow_body(
     sabre: &SabreDag,
     target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
     entry_layout: &Layout,
     heuristic: &SabreHeuristicConfig,
     seed: u64,
     emit_operations: bool,
 ) -> Result<UnscoredTrial, CompilerError> {
-    let metadata = PreparedRouteMetadata::new(sabre, target)?;
     let mut result = route_trial_with_metadata(
         sabre,
         target,
-        &metadata,
+        metadata,
         entry_layout,
         heuristic,
         seed,
@@ -3534,6 +3589,12 @@ fn route_control_flow_body(
         ));
     }
     Ok(result)
+}
+
+fn missing_nested_metadata(body: &str) -> CompilerError {
+    CompilerError::InvariantViolation(format!(
+        "control-flow {body} body has no prepared routing metadata"
+    ))
 }
 
 /// Computes SWAPs that restore one layout to another on the target graph.
@@ -3633,23 +3694,23 @@ fn map_operation_qubits_dense(
 /// operations are rebuilt before the final table exists. This function walks
 /// recursively so every body points at the reordered routed table.
 fn remap_parameter_indices(
-    operation: &Operation,
+    mut operation: Operation,
     parameter_indices: &[u32],
 ) -> Result<Operation, CompilerError> {
-    let mut mapped = operation.clone();
-    for param in &mut mapped.params {
+    for param in &mut operation.params {
         if let CircuitParam::Index(index) = param {
             *index = *parameter_indices
                 .get(*index as usize)
                 .ok_or(crate::circuit::CircuitError::InvalidParameterIndex(*index))?;
         }
     }
-    mapped.instruction = match &operation.instruction {
+    operation.instruction = match &operation.instruction {
         Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
             let then_body = op
                 .then_body()
                 .operations()
                 .iter()
+                .cloned()
                 .map(|operation| remap_parameter_indices(operation, parameter_indices))
                 .collect::<Result<Vec<_>, _>>()?;
             let else_body = op
@@ -3657,6 +3718,7 @@ fn remap_parameter_indices(
                 .map(|body| {
                     body.operations()
                         .iter()
+                        .cloned()
                         .map(|operation| remap_parameter_indices(operation, parameter_indices))
                         .collect::<Result<Vec<_>, _>>()
                         .map(ControlBody::new)
@@ -3673,6 +3735,7 @@ fn remap_parameter_indices(
                 .body()
                 .operations()
                 .iter()
+                .cloned()
                 .map(|operation| remap_parameter_indices(operation, parameter_indices))
                 .collect::<Result<Vec<_>, _>>()?;
             Instruction::ClassicalControl(ClassicalControlOp::While(WhileOp::new(
@@ -3685,6 +3748,7 @@ fn remap_parameter_indices(
                 .body()
                 .operations()
                 .iter()
+                .cloned()
                 .map(|operation| remap_parameter_indices(operation, parameter_indices))
                 .collect::<Result<Vec<_>, _>>()?;
             Instruction::ClassicalControl(ClassicalControlOp::For(ForOp::new(
@@ -3704,6 +3768,7 @@ fn remap_parameter_indices(
                         .body()
                         .operations()
                         .iter()
+                        .cloned()
                         .map(|operation| remap_parameter_indices(operation, parameter_indices))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(SwitchCase::new(case.value(), ControlBody::new(body)))
@@ -3714,6 +3779,7 @@ fn remap_parameter_indices(
                 .map(|body| {
                     body.operations()
                         .iter()
+                        .cloned()
                         .map(|operation| remap_parameter_indices(operation, parameter_indices))
                         .collect::<Result<Vec<_>, _>>()
                         .map(ControlBody::new)
@@ -3727,7 +3793,7 @@ fn remap_parameter_indices(
         }
         _ => operation.instruction.clone(),
     };
-    Ok(mapped)
+    Ok(operation)
 }
 
 fn physical_for(layout: &Layout, logical: LogicalQubit) -> Result<PhysicalQubit, CompilerError> {
@@ -4204,6 +4270,45 @@ pub(crate) fn validate_reachable_interactions_for_target(
     }
 }
 
+pub(crate) fn validate_reachable_interactions_for_target_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    layout: &Layout,
+) -> Result<(), CompilerError> {
+    match interaction_reachability_for_target_with_metadata(sabre, target, metadata, layout)? {
+        InteractionReachability::Reachable => Ok(()),
+        InteractionReachability::UnreachableUnary {
+            logical,
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutableUnaryTerminal { logical },
+        )),
+        InteractionReachability::UnreachableUnary {
+            logical,
+            physical,
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachableUnaryPlacement { logical, physical },
+        )),
+        InteractionReachability::UnreachablePair {
+            logical,
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutablePairTerminal { logical },
+        )),
+        InteractionReachability::UnreachablePair {
+            logical,
+            physical,
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachablePairPlacement { logical, physical },
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InteractionReachability {
     Reachable,
@@ -4230,13 +4335,46 @@ pub(crate) fn interaction_reachability_for_target(
     target: &RoutingTarget,
     layout: &Layout,
 ) -> Result<InteractionReachability, CompilerError> {
+    let metadata = PreparedRouteMetadata::new(sabre, target)?;
+    interaction_reachability_for_target_with_metadata(sabre, target, &metadata, layout)
+}
+
+pub(crate) fn interaction_reachability_for_target_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    layout: &Layout,
+) -> Result<InteractionReachability, CompilerError> {
     for node_index in sabre.graph.node_indices() {
         let node = &sabre.graph[node_index];
+        let requirement = || {
+            metadata
+                .requirement_ids
+                .get(node_index.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "reachability node {} has no prepared requirement id",
+                        node_index.index()
+                    ))
+                })
+        };
+        let mut nested = metadata
+            .nested
+            .get(node_index.index())
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "reachability node {} has no prepared nested metadata slot",
+                    node_index.index()
+                ))
+            })?
+            .iter();
         match &node.kind {
             SabreNodeKind::Unary(logical) => {
                 let physical = physical_for(layout, *logical)?;
                 let physical_index = target.physical_index(physical)?;
-                let requirement = target.interaction_id_for_node(sabre, node_index)?;
+                let requirement = requirement()?;
                 if target
                     .distance_steps_for(requirement, RequirementPlacement::Unary(physical_index))
                     .is_none()
@@ -4257,7 +4395,7 @@ pub(crate) fn interaction_reachability_for_target(
                 let right = physical_for(layout, pair[1])?;
                 let left_index = target.physical_index(left)?;
                 let right_index = target.physical_index(right)?;
-                let interaction = target.interaction_id_for_node(sabre, node_index)?;
+                let interaction = requirement()?;
                 if target
                     .distance_steps_for(
                         interaction,
@@ -4281,12 +4419,26 @@ pub(crate) fn interaction_reachability_for_target(
                 else_body,
                 ..
             }) => {
-                let reachable = interaction_reachability_for_target(then_body, target, layout)?;
+                let reachable = interaction_reachability_for_target_with_metadata(
+                    then_body,
+                    target,
+                    nested
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("if then"))?,
+                    layout,
+                )?;
                 if reachable != InteractionReachability::Reachable {
                     return Ok(reachable);
                 }
                 if let Some(else_body) = else_body {
-                    let reachable = interaction_reachability_for_target(else_body, target, layout)?;
+                    let reachable = interaction_reachability_for_target_with_metadata(
+                        else_body,
+                        target,
+                        nested
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("if else"))?,
+                        layout,
+                    )?;
                     if reachable != InteractionReachability::Reachable {
                         return Ok(reachable);
                     }
@@ -4295,21 +4447,41 @@ pub(crate) fn interaction_reachability_for_target(
             SabreNodeKind::ControlFlow(
                 SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
             ) => {
-                let reachable = interaction_reachability_for_target(body, target, layout)?;
+                let reachable = interaction_reachability_for_target_with_metadata(
+                    body,
+                    target,
+                    nested
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("loop"))?,
+                    layout,
+                )?;
                 if reachable != InteractionReachability::Reachable {
                     return Ok(reachable);
                 }
             }
             SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
                 for case in cases {
-                    let reachable =
-                        interaction_reachability_for_target(&case.body, target, layout)?;
+                    let reachable = interaction_reachability_for_target_with_metadata(
+                        &case.body,
+                        target,
+                        nested
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("switch case"))?,
+                        layout,
+                    )?;
                     if reachable != InteractionReachability::Reachable {
                         return Ok(reachable);
                     }
                 }
                 if let Some(default) = default {
-                    let reachable = interaction_reachability_for_target(default, target, layout)?;
+                    let reachable = interaction_reachability_for_target_with_metadata(
+                        default,
+                        target,
+                        nested
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("switch default"))?,
+                        layout,
+                    )?;
                     if reachable != InteractionReachability::Reachable {
                         return Ok(reachable);
                     }
