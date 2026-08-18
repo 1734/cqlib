@@ -160,7 +160,7 @@ op = ValueOperation.from_standard_gate(
 
 | 方法 | 说明 |
 | --- | --- |
-| `name()` | 返回指令名称，例如 `"Barrier"`、`"Measure"` 或 `"Reset"`。 |
+| `name()` | 返回稳定的小写指令名称：`"barrier"`、`"measure"` 或 `"reset"`。 |
 | `is_barrier()` | 判断是否为屏障指令。 |
 | `is_measure()` | 判断是否为测量指令。 |
 | `is_reset()` | 判断是否为复位指令。 |

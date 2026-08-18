@@ -16,7 +16,7 @@ use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, 
 use std::collections::BTreeSet;
 
 /// Unsigned runtime range loop with half-open `[start, stop)` semantics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ForOp {
     var: ClassicalVar,
     start: ClassicalExpr,

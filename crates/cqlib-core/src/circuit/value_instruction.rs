@@ -426,58 +426,53 @@ impl ValueInstruction {
 
     /// Returns the human-readable instruction name.
     pub fn name(&self) -> String {
-        self.to_string()
+        match self {
+            Self::Instruction(instruction) => instruction.name(),
+            Self::ClassicalControl(control) => control.to_string(),
+        }
     }
 
     /// Returns a stable category name for this instruction.
     pub fn instruction_type(&self) -> &'static str {
         match self {
-            Self::Instruction(Instruction::Standard(_)) => "standard",
-            Self::Instruction(Instruction::McGate(_)) => "mcgate",
-            Self::Instruction(Instruction::UnitaryGate(_)) => "unitary",
-            Self::Instruction(Instruction::CircuitGate(_)) => "circuit",
-            Self::Instruction(Instruction::Directive(_)) => "directive",
-            Self::Instruction(Instruction::ClassicalData(_)) => "classical_data",
-            Self::Instruction(Instruction::ClassicalControl(_)) | Self::ClassicalControl(_) => {
-                "classical_control"
-            }
-            Self::Instruction(Instruction::Delay) => "delay",
+            Self::Instruction(instruction) => instruction.instruction_type(),
+            Self::ClassicalControl(_) => "classical_control",
         }
     }
 
     /// Returns `true` if this is a standard-gate instruction.
     pub fn is_standard(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::Standard(_)))
+        matches!(self, Self::Instruction(instruction) if instruction.is_standard())
     }
 
     /// Returns `true` if this is a multi-controlled-gate instruction.
     pub fn is_mcgate(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::McGate(_)))
+        matches!(self, Self::Instruction(instruction) if instruction.is_mcgate())
     }
 
     /// Returns `true` if this is a user-defined unitary instruction.
     pub fn is_unitary(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::UnitaryGate(_)))
+        matches!(self, Self::Instruction(instruction) if instruction.is_unitary())
     }
 
     /// Returns `true` if this is a circuit-backed gate instruction.
     pub fn is_circuit_gate(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::CircuitGate(_)))
+        matches!(self, Self::Instruction(instruction) if instruction.is_circuit_gate())
     }
 
     /// Returns `true` if this is a non-unitary directive.
     pub fn is_directive(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::Directive(_)))
+        matches!(self, Self::Instruction(instruction) if instruction.is_directive())
     }
 
     /// Returns `true` if this is a classical-data instruction.
     pub fn is_classical_data(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::ClassicalData(_)))
+        matches!(self, Self::Instruction(instruction) if instruction.is_classical_data())
     }
 
     /// Returns `true` if this is a delay instruction.
     pub fn is_delay(&self) -> bool {
-        matches!(self, Self::Instruction(Instruction::Delay))
+        matches!(self, Self::Instruction(instruction) if instruction.is_delay())
     }
 
     /// Returns the standard gate when this is a standard-gate instruction.
@@ -694,7 +689,8 @@ mod tests {
 
         let directive =
             ValueInstruction::from_instruction(Instruction::Directive(Directive::Barrier));
-        assert_eq!(directive.name(), "Barrier");
+        assert_eq!(directive.name(), "barrier");
+        assert_eq!(directive.to_string(), "barrier");
         assert_eq!(directive.instruction_type(), "directive");
         assert!(directive.is_directive());
         assert_eq!(directive.directive(), Some(Directive::Barrier));

@@ -152,7 +152,7 @@ mod switch_op;
 mod while_op;
 
 pub use body::ControlBody;
-pub use control_op::ClassicalControlOp;
+pub use control_op::{ClassicalControlKind, ClassicalControlOp};
 pub use for_op::ForOp;
 pub use if_op::IfOp;
 pub use switch_op::{SwitchCase, SwitchOp};

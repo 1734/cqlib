@@ -155,6 +155,25 @@ pub struct CircuitGate {
     pub(crate) circuit: Arc<FrozenCircuit>,
 }
 
+impl PartialEq for CircuitGate {
+    /// Compares two circuit gates by name, ordered signature, and defining circuit.
+    ///
+    /// The defining circuits compare with [`Circuit`]'s
+    /// structural equality, which ignores process-local circuit identity. The
+    /// frozen matrix cache never participates. Signature order is significant
+    /// because call parameters are bound positionally.
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.num_qubits == other.num_qubits
+            && self.num_params == other.num_params
+            && self
+                .signature_params
+                .iter()
+                .eq(other.signature_params.iter())
+            && self.circuit.circuit() == other.circuit.circuit()
+    }
+}
+
 impl CircuitGate {
     /// Creates a new circuit-based gate.
     ///

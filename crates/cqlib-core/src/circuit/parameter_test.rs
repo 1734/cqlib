@@ -11,7 +11,7 @@
 // that they have been altered from the originals.
 
 use super::Parameter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::{E, PI};
 
 #[test]
@@ -1179,4 +1179,36 @@ fn test_as_expr_and_into_expr() {
     let expr = p2.into_expr();
     // Just verify we can consume the parameter and get the expression
     let _ = expr;
+}
+
+#[test]
+fn simultaneous_substitution_does_not_cascade_overlapping_bindings() {
+    let parameter = Parameter::symbol("a") + Parameter::symbol("b");
+    let bindings = HashMap::from([
+        ("a".to_string(), Parameter::symbol("b")),
+        ("b".to_string(), Parameter::symbol("c")),
+    ]);
+
+    let substituted = parameter.substitute_many_simultaneous(&bindings);
+
+    assert_eq!(
+        substituted.get_symbols(),
+        HashSet::from(["b".to_string(), "c".to_string()])
+    );
+}
+
+#[test]
+fn simultaneous_substitution_does_not_revisit_replacement_expressions() {
+    let parameter = Parameter::symbol("a");
+    let bindings = HashMap::from([
+        (
+            "a".to_string(),
+            Parameter::symbol("b") + Parameter::from(1.0),
+        ),
+        ("b".to_string(), Parameter::from(2.0)),
+    ]);
+
+    let substituted = parameter.substitute_many_simultaneous(&bindings);
+
+    assert_eq!(substituted.get_symbols(), HashSet::from(["b".to_string()]));
 }

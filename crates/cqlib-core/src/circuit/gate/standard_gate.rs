@@ -46,7 +46,7 @@ use std::hash::Hash;
 /// `StandardGate` is designed to be lightweight (`Copy`, `repr(u8)`) for efficient
 /// storage and transmission.
 #[repr(u8)]
-#[derive(Eq, Hash, PartialEq, Debug, Default, Clone, Copy)]
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default, Clone, Copy)]
 pub enum StandardGate {
     /// Identity gate (No-operation).
     #[default]
@@ -226,11 +226,53 @@ const ALL_STANDARD_GATES: [StandardGate; 36] = [
 
 impl fmt::Display for StandardGate {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        f.write_str(self.name())
     }
 }
 
 impl StandardGate {
+    /// Returns the stable operation name used by circuit APIs and statistics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::I => "I",
+            Self::H => "H",
+            Self::RX => "RX",
+            Self::RXX => "RXX",
+            Self::RXY => "RXY",
+            Self::RY => "RY",
+            Self::RYY => "RYY",
+            Self::RZ => "RZ",
+            Self::RZX => "RZX",
+            Self::RZZ => "RZZ",
+            Self::S => "S",
+            Self::SDG => "SDG",
+            Self::SWAP => "SWAP",
+            Self::T => "T",
+            Self::TDG => "TDG",
+            Self::U => "U",
+            Self::X => "X",
+            Self::XY => "XY",
+            Self::X2P => "X2P",
+            Self::X2M => "X2M",
+            Self::XY2P => "XY2P",
+            Self::XY2M => "XY2M",
+            Self::Y => "Y",
+            Self::Y2P => "Y2P",
+            Self::Y2M => "Y2M",
+            Self::Z => "Z",
+            Self::Phase => "Phase",
+            Self::GPhase => "GPhase",
+            Self::CX => "CX",
+            Self::CCX => "CCX",
+            Self::CY => "CY",
+            Self::CZ => "CZ",
+            Self::CRX => "CRX",
+            Self::CRY => "CRY",
+            Self::CRZ => "CRZ",
+            Self::FSIM => "FSIM",
+        }
+    }
+
     /// Returns all standard gates in enum discriminant order.
     pub fn all() -> &'static [Self] {
         &ALL_STANDARD_GATES

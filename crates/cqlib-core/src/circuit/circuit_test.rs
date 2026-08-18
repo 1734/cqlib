@@ -15,7 +15,9 @@ use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::classical_data::ClassicalDataOp;
-use crate::circuit::gate::{Directive, Instruction, StandardGate, UnitaryGate};
+use crate::circuit::gate::{
+    CircuitGate, Directive, FrozenCircuit, Instruction, StandardGate, UnitaryGate,
+};
 use crate::circuit::operation::ValueOperation;
 use crate::circuit::parameter::Parameter;
 use crate::circuit::{
@@ -154,6 +156,39 @@ fn to_gate_does_not_promote_removed_operation_symbols_to_signature_params() {
     assert_eq!(gate.num_params(), 0);
     assert!(gate.signature_params().is_empty());
     assert!(gate.used_symbols().is_empty());
+}
+
+#[test]
+fn circuit_gate_equality_respects_signature_parameter_order() {
+    let mut definition = Circuit::new(1);
+    definition
+        .rx(Qubit::new(0), Parameter::symbol("theta"))
+        .unwrap();
+    definition
+        .ry(Qubit::new(0), Parameter::symbol("phi"))
+        .unwrap();
+
+    let ordered = CircuitGate::with_signature(
+        "G",
+        FrozenCircuit::new(definition.clone()),
+        ["theta".to_string(), "phi".to_string()],
+    )
+    .unwrap();
+    let same_order = CircuitGate::with_signature(
+        "G",
+        FrozenCircuit::new(definition.clone()),
+        ["theta".to_string(), "phi".to_string()],
+    )
+    .unwrap();
+    let reversed = CircuitGate::with_signature(
+        "G",
+        FrozenCircuit::new(definition),
+        ["phi".to_string(), "theta".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(ordered, same_order);
+    assert_ne!(ordered, reversed);
 }
 
 #[test]
@@ -2341,4 +2376,38 @@ fn test_from_operations_rejects_undefined_and_duplicate_values() {
         duplicate,
         Err(CircuitError::DuplicateClassicalValueDefinition { .. })
     ));
+}
+
+#[test]
+fn circuit_equality_resolves_reordered_parameter_tables() {
+    let mut left = Circuit::new(1);
+    left.rz(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    left.rx(Qubit::new(0), Parameter::symbol("phi")).unwrap();
+
+    let mut right = left.clone();
+    right.parameters.swap_indices(0, 1);
+    for operation in &mut right.data {
+        for parameter in &mut operation.params {
+            if let CircuitParam::Index(index) = parameter {
+                *index = 1 - *index;
+            }
+        }
+    }
+
+    assert_eq!(left, right);
+}
+
+#[test]
+fn cloned_control_flow_is_equal_across_circuit_ids() {
+    let mut circuit = Circuit::new(1);
+    let measured = circuit.measure(Qubit::new(0)).unwrap();
+    let condition = ClassicalExpr::bit_to_bool(measured.expr()).unwrap();
+    circuit
+        .if_(condition, |body| body.x(Qubit::new(0)))
+        .unwrap();
+
+    let cloned = circuit.clone();
+    assert_ne!(circuit.id(), cloned.id());
+    assert_eq!(circuit, cloned);
+    assert!(circuit.operations_structurally_equal(&cloned));
 }

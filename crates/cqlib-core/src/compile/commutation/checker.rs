@@ -284,12 +284,8 @@ fn same_application(
     rhs_qubits: &[Qubit],
     rhs_params: &[Parameter],
 ) -> bool {
-    let same_instruction = match (lhs_inst, rhs_inst) {
-        (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
-        (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,
-        (Instruction::UnitaryGate(lhs), Instruction::UnitaryGate(rhs)) => lhs == rhs,
-        _ => false,
-    };
+    let same_instruction =
+        lhs_inst.is_quantum_gate() && rhs_inst.is_quantum_gate() && lhs_inst == rhs_inst;
 
     lhs_qubits == rhs_qubits
         && same_instruction

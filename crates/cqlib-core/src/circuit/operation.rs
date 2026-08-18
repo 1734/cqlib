@@ -69,6 +69,24 @@ pub struct Operation {
     pub label: Option<Box<str>>,
 }
 
+impl PartialEq for Operation {
+    /// Compares the storage-level structure of two operations.
+    ///
+    /// Parameters compare in their circuit-local storage form (see
+    /// [`CircuitParam`]), and classical handles embedded in
+    /// [`Instruction::ClassicalData`]/[`Instruction::ClassicalControl`]
+    /// carry the owning circuit's process-local identity, so operations
+    /// originating from different circuits are generally unequal unless
+    /// remapped first (as [`Circuit`](crate::circuit::Circuit)'s own
+    /// equality does internally).
+    fn eq(&self, other: &Self) -> bool {
+        self.instruction == other.instruction
+            && self.qubits == other.qubits
+            && self.params == other.params
+            && self.label == other.label
+    }
+}
+
 impl Operation {
     /// Returns the standard gate represented directly by this operation.
     pub fn standard_gate(&self) -> Option<StandardGate> {

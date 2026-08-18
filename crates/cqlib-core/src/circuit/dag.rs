@@ -623,7 +623,7 @@ impl CircuitDag {
         let mut counts = IndexMap::new();
         for node in self.op_nodes() {
             if let Some(operation) = self.operation(node) {
-                let name = instruction_name(&operation.instruction);
+                let name = operation.instruction.name();
                 *counts.entry(name).or_insert(0) += 1;
             }
         }
@@ -1524,7 +1524,7 @@ impl CircuitDag {
     fn add_operation_counts_recursive(&self, counts: &mut IndexMap<String, usize>) {
         for node in self.op_nodes() {
             if let Some(operation) = self.operation(node) {
-                let name = instruction_name(&operation.instruction);
+                let name = operation.instruction.name();
                 *counts.entry(name).or_insert(0) += 1;
             }
             if let Some(control) = self.control_flow(node) {
@@ -1659,51 +1659,22 @@ fn is_two_qubit_gate(operation: &Operation) -> bool {
 }
 
 fn same_control_flow_kind(lhs: &Instruction, rhs: &Instruction) -> bool {
-    matches!(
-        (lhs, rhs),
-        (
-            Instruction::ClassicalControl(ClassicalControlOp::If(_)),
-            Instruction::ClassicalControl(ClassicalControlOp::If(_))
-        ) | (
-            Instruction::ClassicalControl(ClassicalControlOp::While(_)),
-            Instruction::ClassicalControl(ClassicalControlOp::While(_))
-        ) | (
-            Instruction::ClassicalControl(ClassicalControlOp::For(_)),
-            Instruction::ClassicalControl(ClassicalControlOp::For(_))
-        ) | (
-            Instruction::ClassicalControl(ClassicalControlOp::Switch(_)),
-            Instruction::ClassicalControl(ClassicalControlOp::Switch(_))
-        ) | (
-            Instruction::ClassicalControl(ClassicalControlOp::Break),
-            Instruction::ClassicalControl(ClassicalControlOp::Break)
-        ) | (
-            Instruction::ClassicalControl(ClassicalControlOp::Continue),
-            Instruction::ClassicalControl(ClassicalControlOp::Continue)
-        )
-    )
+    matches!((lhs, rhs), (Instruction::ClassicalControl(lhs), Instruction::ClassicalControl(rhs)) if lhs.kind() == rhs.kind())
 }
 
-fn instruction_name(instruction: &Instruction) -> String {
-    match instruction {
-        Instruction::Standard(gate) => format!("{gate:?}"),
-        Instruction::McGate(_) => "mc_gate".to_string(),
-        Instruction::UnitaryGate(_) => "unitary".to_string(),
-        Instruction::CircuitGate(_) => "circuit_gate".to_string(),
-        Instruction::Directive(Directive::Barrier) => "barrier".to_string(),
-        Instruction::Directive(Directive::Measure) => "measure".to_string(),
-        Instruction::Directive(Directive::Reset) => "reset".to_string(),
-        Instruction::ClassicalData(ClassicalDataOp::Store { .. }) => "store".to_string(),
-        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. }) => "measure_bit".to_string(),
-        Instruction::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => {
-            "measure_bits".to_string()
-        }
-        Instruction::ClassicalControl(ClassicalControlOp::If(_)) => "if".to_string(),
-        Instruction::ClassicalControl(ClassicalControlOp::While(_)) => "while".to_string(),
-        Instruction::ClassicalControl(ClassicalControlOp::For(_)) => "for".to_string(),
-        Instruction::ClassicalControl(ClassicalControlOp::Switch(_)) => "switch".to_string(),
-        Instruction::ClassicalControl(ClassicalControlOp::Break) => "break".to_string(),
-        Instruction::ClassicalControl(ClassicalControlOp::Continue) => "continue".to_string(),
-        Instruction::Delay => "delay".to_string(),
+impl TryFrom<&Circuit> for CircuitDag {
+    type Error = CircuitError;
+
+    fn try_from(circuit: &Circuit) -> Result<Self, Self::Error> {
+        Self::from_circuit(circuit)
+    }
+}
+
+impl TryFrom<&CircuitDag> for Circuit {
+    type Error = CircuitError;
+
+    fn try_from(dag: &CircuitDag) -> Result<Self, Self::Error> {
+        dag.to_circuit()
     }
 }
 

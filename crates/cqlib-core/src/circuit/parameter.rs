@@ -215,22 +215,28 @@ impl Parameter {
     /// assert!((expr.evaluate(&Some(bindings)).unwrap() - 2.0).abs() < 1e-10);
     /// ```
     pub fn evaluate(&self, bindings: &Option<HashMap<&str, f64>>) -> Result<f64, ParameterError> {
-        // Build the effective binding table used for evaluation.
-        let mut actual_bindings = HashMap::new();
-
-        // Automatically inject the fundamental math constants so callers
-        // never have to supply them manually.
-        actual_bindings.insert("π", std::f64::consts::PI);
-        actual_bindings.insert("e", std::f64::consts::E);
-        if let Some(user_bindings) = bindings {
-            actual_bindings.extend(user_bindings);
+        // Evaluate directly first. Numeric expressions and fully-bound user
+        // expressions avoid constructing a merged binding table entirely.
+        let mut evaluated = match bindings {
+            Some(bindings) => self.expr.evaluate(bindings, &HashMap::new()),
+            None => self.expr.evaluate(&(), &HashMap::new()),
+        };
+        // `symb_anafis` recognizes ASCII `pi`, while `Parameter::pi` uses the
+        // public Unicode spelling `π`. Only retry unresolved expressions with
+        // the compatibility constants, preserving the historical ability for
+        // explicit caller bindings to override them.
+        if evaluated.as_number().is_none() {
+            let mut actual_bindings =
+                HashMap::with_capacity(bindings.as_ref().map_or(2, |bindings| bindings.len() + 2));
+            actual_bindings.insert("π", std::f64::consts::PI);
+            actual_bindings.insert("e", std::f64::consts::E);
+            if let Some(bindings) = bindings {
+                actual_bindings.extend(bindings);
+            }
+            evaluated = self.expr.evaluate(&actual_bindings, &HashMap::new());
         }
 
-        if let Some(n) = self
-            .expr
-            .evaluate(&actual_bindings, &HashMap::new())
-            .as_number()
-        {
+        if let Some(n) = evaluated.as_number() {
             // Check for NaN
             if n.is_nan() {
                 return Err(ParameterError::DomainError(format!(
@@ -545,12 +551,44 @@ impl Parameter {
         substituted.simplify().unwrap_or(substituted)
     }
 
+    /// Simultaneously substitutes symbols in a single expression-tree pass.
+    ///
+    /// Replacement expressions are inserted as-is and are not visited again,
+    /// so overlapping bindings such as `a -> b` and `b -> c` do not cascade.
+    pub(crate) fn substitute_many_simultaneous(
+        &self,
+        bindings: &HashMap<String, Parameter>,
+    ) -> Self {
+        if bindings.is_empty() {
+            return self.clone();
+        }
+        let replacements = bindings
+            .iter()
+            .map(|(symbol, replacement)| (Self::symbol(symbol).expr, &replacement.expr))
+            .collect::<Vec<_>>();
+        Self::new(self.expr.map(|node| {
+            replacements
+                .iter()
+                .find(|(symbol, _)| node == symbol)
+                .map_or_else(|| node.clone(), |(_, replacement)| (*replacement).clone())
+        }))
+    }
+
     /// Returns whether two parameters are provably equal within `tolerance`.
     ///
     /// This is a conservative symbolic check.  It accepts structural equality
     /// after simplification and concrete numeric equality, but it does not try
     /// to prove arbitrary symbolic identities.
     pub fn provably_equal(&self, other: &Self, tolerance: f64) -> bool {
+        if self == other {
+            return true;
+        }
+        if let (Ok(lhs), Ok(rhs)) = (self.evaluate(&None), other.evaluate(&None))
+            && (lhs - rhs).abs() <= tolerance
+        {
+            return true;
+        }
+
         let lhs = self.simplify().unwrap_or_else(|_| self.clone());
         let rhs = other.simplify().unwrap_or_else(|_| other.clone());
         if lhs == rhs {

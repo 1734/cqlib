@@ -16,7 +16,7 @@ use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, 
 use std::collections::BTreeSet;
 
 /// Exact-value switch case.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwitchCase {
     value: u128,
     body: ControlBody,
@@ -40,7 +40,7 @@ impl SwitchCase {
 }
 
 /// Exact-value switch over an unsigned classical expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwitchOp {
     target: ClassicalExpr,
     cases: Box<[SwitchCase]>,

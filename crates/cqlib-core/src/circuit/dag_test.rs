@@ -12,10 +12,12 @@
 
 use super::{CircuitDag, DagControlFlow, DagNode, DagWire};
 use crate::circuit::Parameter;
+use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
-    Circuit, CircuitError, CircuitParam, ClassicalControlOp, ClassicalDataOp, ClassicalExpr,
-    ClassicalType, Directive, Instruction, Operation, ParameterValue, Qubit, StandardGate,
-    ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
+    Circuit, CircuitError, CircuitGate, CircuitParam, ClassicalControlOp, ClassicalDataOp,
+    ClassicalExpr, ClassicalType, Directive, Instruction, MCGate, Operation, ParameterValue, Qubit,
+    StandardGate, UnitaryGate, ValueClassicalControlOp, ValueControlBody, ValueInstruction,
+    ValueOperation,
 };
 use proptest::prelude::*;
 use rustworkx_core::petgraph::visit::EdgeRef;
@@ -1025,6 +1027,54 @@ fn operation_count_and_fact_queries_cover_top_level_operations() {
     assert_eq!(counts.get("measure_bit").copied(), Some(1));
     assert_eq!(counts.get("if").copied(), Some(1));
     assert_eq!(counts.get("X"), None);
+}
+
+#[test]
+fn operation_count_uses_stable_concrete_names_for_all_instruction_kinds() {
+    let mut circuit = Circuit::new(3);
+    circuit.h(q(0)).unwrap();
+    circuit
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+            [q(0), q(1), q(2)],
+            std::iter::empty(),
+            None,
+        )
+        .unwrap();
+    circuit
+        .unitary(UnitaryGate::new("custom", 1, 0), vec![q(0)])
+        .unwrap();
+    circuit
+        .unitary(UnitaryGate::new("custom", 1, 0), vec![q(1)])
+        .unwrap();
+    circuit
+        .unitary(UnitaryGate::new("other", 1, 0), vec![q(2)])
+        .unwrap();
+    circuit
+        .circuit_gate(
+            CircuitGate::new("composite", FrozenCircuit::new(Circuit::new(1))).unwrap(),
+            vec![q(0)],
+            std::iter::empty(),
+        )
+        .unwrap();
+    circuit.barrier(vec![q(0), q(1), q(2)]).unwrap();
+    circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.x(q(0))?;
+            Ok(())
+        })
+        .unwrap();
+
+    let counts = CircuitDag::from_circuit(&circuit)
+        .unwrap()
+        .operation_count_by_name();
+    assert_eq!(counts.get("H"), Some(&1));
+    assert_eq!(counts.get("C2-X"), Some(&1));
+    assert_eq!(counts.get("custom"), Some(&2));
+    assert_eq!(counts.get("other"), Some(&1));
+    assert_eq!(counts.get("composite"), Some(&1));
+    assert_eq!(counts.get("barrier"), Some(&1));
+    assert_eq!(counts.get("if"), Some(&1));
 }
 
 #[test]
@@ -2259,4 +2309,15 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn dag_try_from_round_trip_matches_inherent_api() {
+    let mut circuit = Circuit::new(2);
+    circuit.h(q(0)).unwrap();
+    circuit.cx(q(0), q(1)).unwrap();
+
+    let dag = CircuitDag::try_from(&circuit).unwrap();
+    let recovered = Circuit::try_from(&dag).unwrap();
+    assert_eq!(recovered, circuit);
 }
