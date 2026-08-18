@@ -245,7 +245,7 @@ pub struct TwoQubitSynthesisRequest<'a> {
 /// remaining parameterized operations, and finally a deterministic backend
 /// tie-breaker. When a target basis is configured these values are measured
 /// after applying the same lowering rules used by final translation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TargetAwareSynthesisCost {
     /// Two-qubit operations after target-basis lowering.
     pub lowered_two_qubit_ops: usize,
@@ -257,23 +257,6 @@ pub struct TargetAwareSynthesisCost {
     pub parameterized_ops: usize,
     /// Stable backend tie-breaker used only when all semantic cost fields tie.
     pub backend_order: usize,
-}
-
-impl Ord for TargetAwareSynthesisCost {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.lowered_two_qubit_ops
-            .cmp(&other.lowered_two_qubit_ops)
-            .then_with(|| self.lowered_depth.cmp(&other.lowered_depth))
-            .then_with(|| self.lowered_total_ops.cmp(&other.lowered_total_ops))
-            .then_with(|| self.parameterized_ops.cmp(&other.parameterized_ops))
-            .then_with(|| self.backend_order.cmp(&other.backend_order))
-    }
-}
-
-impl PartialOrd for TargetAwareSynthesisCost {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 /// Exact synthesis candidate emitted by the target-aware planner.

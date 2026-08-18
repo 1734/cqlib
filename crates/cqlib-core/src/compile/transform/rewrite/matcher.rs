@@ -53,7 +53,7 @@ use crate::compile::knowledge::matcher::KnowledgeInstructionKey as RewriteInstru
 use crate::compile::knowledge::matcher::{
     ConcreteOperationView, MatchBindings, conditions_hold as knowledge_conditions_hold,
     instantiate_target as knowledge_instantiate_target,
-    match_rule_item as knowledge_match_rule_item,
+    match_rule_item_with_keys as knowledge_match_rule_item_with_keys,
 };
 use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::compile::transform::rewrite::basis::TargetContext;
@@ -915,17 +915,15 @@ fn try_match_rule(
                 continue;
             }
 
-            let mut next_bindings = bindings.clone();
-            if match_item(block, position, item, item_key, &mut next_bindings, config)? {
-                found = Some((position, next_bindings));
+            if match_item(block, position, item, item_key, &mut bindings, config)? {
+                found = Some(position);
                 break;
             }
         }
 
-        let Some((position, next_bindings)) = found else {
+        let Some(position) = found else {
             return Ok(None);
         };
-        bindings = next_bindings;
         skipped_positions.extend(cursor..position);
         matched_positions.push(position);
         cursor = position + 1;
@@ -1180,8 +1178,10 @@ fn match_item(
         return Ok(false);
     }
 
-    knowledge_match_rule_item(
+    knowledge_match_rule_item_with_keys(
         item,
+        item_key,
+        block.key(position),
         ConcreteOperationView {
             instruction: &operation.instruction,
             qubits: &operation.qubits,

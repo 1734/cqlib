@@ -23,10 +23,8 @@ use super::config::TwoQubitBlockResynthesisConfig;
 use super::cost::{ResynthesisCost, cost_of_source_ops, value_operations_of_source_ops};
 use super::synthesis_cache::{CachedPlanView, TwoQubitSynthesisCache};
 use crate::circuit::{
-    Circuit, Instruction, Parameter, ParameterValue, ValueInstruction, ValueOperation,
-    circuit_to_matrix,
+    Instruction, ParameterValue, ValueInstruction, ValueOperation, value_operations_to_matrix,
 };
-use crate::compile::CompilerError;
 use crate::compile::transform::decompose::unitary::unitary_2q::{
     DeviceTwoQubitSynthesisCandidate, plan_numeric_2q_unitary_for_device,
 };
@@ -37,6 +35,7 @@ use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DevicePhysicalCost, DeviceSynthesisPlacement,
     DeviceTwoQubitSynthesisContext, TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
 };
+use crate::compile::{CompilerError, compare_some_first_by};
 use ndarray::Array2;
 use num_complex::Complex64;
 use std::cmp::{Ordering, Reverse};
@@ -152,12 +151,11 @@ fn compare_patches(lhs: &BlockPatch, rhs: &BlockPatch) -> Ordering {
         .lowered_two_qubit_ops
         .saturating_sub(rhs.after_cost.lowered_two_qubit_ops);
 
-    let physical = match (lhs.device_after_cost, rhs.device_after_cost) {
-        (Some(left), Some(right)) => left.compare(right),
-        (None, None) => Ordering::Equal,
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-    };
+    let physical = compare_some_first_by(
+        lhs.device_after_cost,
+        rhs.device_after_cost,
+        |left, right| left.compare(right),
+    );
 
     physical
         .then_with(|| lhs.after_cost.cmp(&rhs.after_cost))
@@ -447,6 +445,7 @@ fn patch_preserves_relevant_span(
     };
 
     let mut changed = true;
+    let mut converted = vec![None; ops.len()];
     while changed {
         changed = false;
         for (order, view) in ops.iter().enumerate().take(span_end + 1).skip(span_start) {
@@ -462,9 +461,10 @@ fn patch_preserves_relevant_span(
             {
                 continue;
             }
-            if operation_view_to_value(view).is_none() {
+            let Some(operation) = operation_view_to_value(view) else {
                 return Ok(false);
-            }
+            };
+            converted[order] = Some(operation);
             included_orders.insert(order);
             relevant_qubits.extend(view.operation.qubits.iter().copied());
             if relevant_qubits.len() > MAX_PATCH_VALIDATION_QUBITS {
@@ -474,15 +474,31 @@ fn patch_preserves_relevant_span(
         }
     }
 
+    for &order in &included_orders {
+        if converted[order].is_none() {
+            let Some(operation) = operation_view_to_value(&ops[order]) else {
+                return Ok(false);
+            };
+            converted[order] = Some(operation);
+        }
+    }
+
     let mut source_ops = Vec::new();
     let mut replacement_ops = Vec::new();
     let matched_orders = block.matched_orders.iter().copied().collect::<HashSet<_>>();
-    for (order, view) in ops.iter().enumerate().take(span_end + 1).skip(span_start) {
+    for (order, cached) in converted
+        .iter()
+        .enumerate()
+        .take(span_end + 1)
+        .skip(span_start)
+    {
         if included_orders.contains(&order) {
-            let Some(operation) = operation_view_to_value(view) else {
-                return Ok(false);
-            };
-            source_ops.push(operation);
+            source_ops.push(
+                cached
+                    .as_ref()
+                    .expect("included operation was converted")
+                    .clone(),
+            );
         }
 
         if order == block.first_order() {
@@ -492,32 +508,24 @@ fn patch_preserves_relevant_span(
             continue;
         }
         if included_orders.contains(&order) {
-            let Some(operation) = operation_view_to_value(view) else {
-                return Ok(false);
-            };
-            replacement_ops.push(operation);
+            replacement_ops.push(
+                cached
+                    .as_ref()
+                    .expect("included operation was converted")
+                    .clone(),
+            );
         }
     }
 
     let mut qubits = relevant_qubits.into_iter().collect::<Vec<_>>();
     qubits.sort_by_key(|qubit| qubit.index());
 
-    let Ok(source_circuit) = Circuit::from_operations(qubits.clone(), source_ops, None, None)
+    let Ok(source_matrix) = value_operations_to_matrix(&qubits, &source_ops, 0.0) else {
+        return Ok(false);
+    };
+    let Ok(replacement_matrix) =
+        value_operations_to_matrix(&qubits, &replacement_ops, synthesis_phase)
     else {
-        return Ok(false);
-    };
-    let Ok(mut replacement_circuit) = Circuit::from_operations(qubits, replacement_ops, None, None)
-    else {
-        return Ok(false);
-    };
-    if synthesis_phase != 0.0 {
-        replacement_circuit.set_global_phase(Parameter::from(synthesis_phase));
-    }
-
-    let Ok(source_matrix) = circuit_to_matrix(&source_circuit, None) else {
-        return Ok(false);
-    };
-    let Ok(replacement_matrix) = circuit_to_matrix(&replacement_circuit, None) else {
         return Ok(false);
     };
     Ok(source_matrix.shape() == replacement_matrix.shape()
@@ -539,7 +547,7 @@ fn operation_view_to_value(view: &OperationView<'_>) -> Option<ValueOperation> {
         .map(|param| param.evaluate(&None))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    if params.iter().any(|value| !value.is_finite()) || gate.matrix(&params).is_err() {
+    if params.iter().any(|value| !value.is_finite()) {
         return None;
     }
     Some(ValueOperation {

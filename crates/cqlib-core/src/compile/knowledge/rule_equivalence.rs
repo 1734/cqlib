@@ -251,7 +251,7 @@ fn rule_items_to_circuit(ops: &[RuleItem], num_qubits: usize) -> Result<Circuit,
             Instruction::Standard(gate) => Instruction::Standard(*gate),
             Instruction::McGate(gate) => Instruction::McGate(gate.clone()),
             other => {
-                return Err(VerifyError::UnsupportedPattern(format!("{other:?}")));
+                return Err(VerifyError::UnsupportedPattern(other.to_string()));
             }
         };
 
