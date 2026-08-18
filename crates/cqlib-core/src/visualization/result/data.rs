@@ -104,7 +104,7 @@ pub fn plot_distribution(
 
 /// Convert an execution result's measured counts into a plot series keyed by bitstring.
 ///
-/// Bitstrings are formatted using [`crate::device::Outcome::to_string`] with
+/// Bitstrings are formatted using [`crate::device::Outcome::to_bitstring`] with
 /// [`ExecutionResult::num_qubits`], preserving Cqlib's measurement-result display
 /// convention.
 pub(crate) fn execution_result_to_plot_series(
@@ -120,7 +120,7 @@ pub(crate) fn execution_result_to_plot_series(
     Ok(result
         .counts()
         .iter()
-        .map(|(outcome, count)| (outcome.to_string(num_qubits), *count as f64))
+        .map(|(outcome, count)| (outcome.to_bitstring(num_qubits), *count as f64))
         .collect())
 }
 

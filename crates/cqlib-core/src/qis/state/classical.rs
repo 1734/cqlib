@@ -56,7 +56,7 @@ impl RuntimeValue {
     pub fn to_bitstring(&self) -> Option<String> {
         match self {
             Self::Bit(value) => Some(if *value { "1" } else { "0" }.to_string()),
-            Self::BitVec { width, bits } => Some(bits.to_string(*width as usize)),
+            Self::BitVec { width, bits } => Some(bits.to_bitstring(*width as usize)),
             Self::Bool(_) | Self::UInt { .. } => None,
         }
     }
