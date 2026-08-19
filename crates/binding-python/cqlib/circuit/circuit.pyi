@@ -290,7 +290,11 @@ class Circuit:
         """Continue the nearest enclosing loop callback body."""
         ...
     def operation(self, index: int) -> ValueOperation:
-        """Return one operation by index with circuit-local parameters resolved."""
+        """Return one operation by index with circuit-local parameters resolved.
+
+        Raises:
+            IndexError: If ``index`` is out of bounds.
+        """
         ...
     def remove_operation(self, index: int) -> ValueOperation:
         """Remove one top-level operation and return it.
@@ -299,8 +303,9 @@ class Circuit:
             index: Original operation index before deletion.
 
         Raises:
-            CircuitError: If ``index`` is out of bounds or deletion would
-                violate classical-value/control-flow invariants.
+            IndexError: If ``index`` is out of bounds.
+            CircuitError: If deletion would violate classical-value/control-flow
+                invariants.
         """
         ...
     def remove_operations(self, indices: list[int]) -> list[ValueOperation]:
@@ -311,9 +316,9 @@ class Circuit:
         returned in ascending original-index order.
 
         Raises:
-            CircuitError: If any index is out of bounds or deletion would
-                violate classical-value/control-flow invariants. On failure the
-                circuit is unchanged.
+            IndexError: If any index is out of bounds.
+            CircuitError: If deletion would violate classical-value/control-flow
+                invariants. On failure the circuit is unchanged.
         """
         ...
     def append_gate(
@@ -669,7 +674,11 @@ class Circuit:
         ...
     def __len__(self) -> int: ...
     def __getitem__(self, index: int) -> ValueOperation:
-        """Return an operation by index. Negative indices are supported."""
+        """Return an operation by index. Negative indices are supported.
+
+        Raises:
+            IndexError: If ``index`` is out of bounds.
+        """
         ...
     def __copy__(self) -> Circuit: ...
     def __deepcopy__(self, memo: dict) -> Circuit: ...

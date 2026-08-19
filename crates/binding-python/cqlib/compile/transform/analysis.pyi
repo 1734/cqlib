@@ -48,4 +48,6 @@ class CircuitAnalysis:
     def __copy__(self) -> CircuitAnalysis: ...
     def __deepcopy__(self, memo: dict[int, object]) -> CircuitAnalysis: ...
 
-__all__: list[str]
+__all__ = [
+    "CircuitAnalysis",
+]

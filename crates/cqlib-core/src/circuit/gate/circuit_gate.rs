@@ -111,6 +111,19 @@ impl FrozenCircuit {
     }
 }
 
+impl PartialEq for FrozenCircuit {
+    /// Compares two frozen circuits by their defining circuit and used-symbol
+    /// set.
+    ///
+    /// The defining circuits compare with [`Circuit`]'s structural equality,
+    /// which ignores process-local circuit identity. The derived symbolic
+    /// matrix cache never participates: freezing equal circuits and then
+    /// materializing the matrix on only one side keeps them equal.
+    fn eq(&self, other: &Self) -> bool {
+        self.circuit == other.circuit && self.used_symbols == other.used_symbols
+    }
+}
+
 /// A composite gate defined by a quantum circuit.
 ///
 /// `CircuitGate` encapsulates a frozen circuit as a reusable gate operation.
@@ -491,5 +504,27 @@ mod tests {
 
         assert_eq!(inverse.signature_params(), gate.signature_params());
         assert_eq!(inverse.used_symbols(), gate.used_symbols());
+    }
+
+    #[test]
+    fn frozen_circuits_compare_structurally_ignoring_matrix_cache() {
+        let make_frozen = || {
+            let mut circuit = Circuit::new(1);
+            circuit.h(Qubit::new(0)).unwrap();
+            FrozenCircuit::new(circuit)
+        };
+
+        let a = make_frozen();
+        let b = make_frozen();
+        assert_eq!(a, b);
+
+        // Materializing the symbolic-matrix cache on one side must not
+        // change equality.
+        a.symbolic_matrix().unwrap();
+        assert_eq!(a, b);
+
+        let mut other = Circuit::new(1);
+        other.x(Qubit::new(0)).unwrap();
+        assert_ne!(a, FrozenCircuit::new(other));
     }
 }

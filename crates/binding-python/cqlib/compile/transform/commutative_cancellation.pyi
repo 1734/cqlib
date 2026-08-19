@@ -40,4 +40,6 @@ class CommutativeCancellation:
     def __copy__(self) -> CommutativeCancellation: ...
     def __deepcopy__(self, memo: dict[int, object]) -> CommutativeCancellation: ...
 
-__all__: list[str]
+__all__ = [
+    "CommutativeCancellation",
+]

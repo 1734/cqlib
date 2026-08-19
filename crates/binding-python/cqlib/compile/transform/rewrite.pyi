@@ -169,4 +169,11 @@ def rewrite_circuit(
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "RewriteMode",
+    "RewriteConfig",
+    "KnowledgeRewriter",
+    "KnowledgeRewriteStats",
+    "KnowledgeRewriteResult",
+    "rewrite_circuit",
+]

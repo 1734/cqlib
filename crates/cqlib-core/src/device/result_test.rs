@@ -335,3 +335,45 @@ fn outcome_does_not_retain_input_width() {
         "01"
     );
 }
+
+#[test]
+fn status_compares_by_value_and_hashes_consistently() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    assert_eq!(Status::Completed, Status::Completed);
+
+    let failed = Status::Failed {
+        error_msg: "boom".to_string(),
+        error_code: 1,
+    };
+    assert_eq!(
+        failed,
+        Status::Failed {
+            error_msg: "boom".to_string(),
+            error_code: 1,
+        }
+    );
+    assert_ne!(
+        failed,
+        Status::Failed {
+            error_msg: "other".to_string(),
+            error_code: 1,
+        }
+    );
+    assert_ne!(Status::Completed, Status::Cancelled);
+
+    let hash_of = |status: &Status| {
+        let mut hasher = DefaultHasher::new();
+        status.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_eq!(hash_of(&Status::Completed), hash_of(&Status::Completed));
+    assert_eq!(
+        hash_of(&failed),
+        hash_of(&Status::Failed {
+            error_msg: "boom".to_string(),
+            error_code: 1,
+        })
+    );
+}

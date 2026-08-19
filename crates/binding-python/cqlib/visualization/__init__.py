@@ -13,6 +13,13 @@
 from __future__ import annotations
 
 from .._native import visualization as _visualization_module
+from ..qis import DensityMatrix, Statevector
+
+FigureSize = tuple[float, float]
+"""Width/height in inches for figure-rendering functions."""
+
+QuantumState = Statevector | DensityMatrix
+"""State types accepted by state-visualization functions."""
 
 
 class _InlineSvg(str):
@@ -203,6 +210,8 @@ def plot_state_paulivec(
 
 
 __all__ = [
+    "FigureSize",
+    "QuantumState",
     "draw_text",
     "draw_figure",
     "plot_histogram",

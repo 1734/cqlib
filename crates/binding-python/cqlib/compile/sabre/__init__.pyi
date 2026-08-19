@@ -37,4 +37,13 @@ from .routing import sabre_route as sabre_route
 from .routing import normalize_initial_layout as normalize_initial_layout
 from .routing import validate_reachable_interactions as validate_reachable_interactions
 
-__all__: list[str]
+__all__ = [
+    "SabreHeuristicConfig",
+    "SabreVf2PrepassConfig",
+    "SabreConfig",
+    "SabreRoutingDiagnostics",
+    "SabreRoutingResult",
+    "sabre_route",
+    "normalize_initial_layout",
+    "validate_reachable_interactions",
+]

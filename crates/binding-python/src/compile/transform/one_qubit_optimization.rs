@@ -14,7 +14,9 @@
 
 use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::error::compiler_error_to_py_err;
+use crate::compile::target_basis_item::PyTargetBasisItem;
 use crate::compile::transform::PyTransformResult;
+use crate::utils::python_string_literal;
 use cqlib_core::circuit::Instruction;
 use cqlib_core::compile::transform::{OptimizeOneQubitRuns, Transformer};
 use pyo3::prelude::*;
@@ -43,12 +45,15 @@ impl PyOptimizeOneQubitRuns {
     }
 
     /// Creates an optimizer costed after exact lowering to `target_basis`.
+    ///
+    /// Basis entries are either case-insensitive standard-gate names (e.g.
+    /// `'H'`, `'X2P'`) or `Instruction` objects for multi-controlled gates.
     #[staticmethod]
-    fn basis(py: Python<'_>, target_basis: Vec<PyInstruction>) -> PyResult<Self> {
+    fn basis(py: Python<'_>, target_basis: Vec<PyTargetBasisItem>) -> PyResult<Self> {
         let target_basis = target_basis
             .into_iter()
-            .map(|instruction| instruction.inner)
-            .collect::<Vec<_>>();
+            .map(PyTargetBasisItem::into_instruction)
+            .collect::<PyResult<Vec<_>>>()?;
         let optimizer_basis = target_basis.clone();
         py.detach(move || OptimizeOneQubitRuns::basis(optimizer_basis))
             .map(|inner| Self {
@@ -94,7 +99,7 @@ impl PyOptimizeOneQubitRuns {
                 "OptimizeOneQubitRuns.basis([{}])",
                 target_basis
                     .iter()
-                    .map(|instruction| format!("{:?}", instruction.to_string()))
+                    .map(|instruction| python_string_literal(&instruction.name()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -109,7 +114,7 @@ impl PyOptimizeOneQubitRuns {
                     && left
                         .iter()
                         .zip(right)
-                        .all(|(left, right)| left.to_string() == right.to_string())
+                        .all(|(left, right)| left.name() == right.name())
             }
             (None, Some(_)) | (Some(_), None) => false,
         }

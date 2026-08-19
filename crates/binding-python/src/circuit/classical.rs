@@ -20,20 +20,13 @@ use crate::circuit::bit::PyQubit;
 use crate::circuit::classical_expr::PyClassicalExpr;
 use crate::circuit::error::CircuitError as PyCircuitError;
 use crate::device::result::PyOutcome;
+use crate::utils::hash_value;
 use cqlib_core::circuit::{
     CircuitError, CircuitId, ClassicalType, ClassicalValue, ClassicalVar, Measurement,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use smallvec::SmallVec;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-fn hash_value(value: impl Hash) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
 
 /// Process-local identity shared by classical handles owned by one circuit.
 #[pyclass(name = "CircuitId", module = "cqlib.circuit", from_py_object)]
@@ -75,7 +68,7 @@ impl PyCircuitId {
     }
 
     fn __hash__(&self) -> u64 {
-        hash_value(self.inner)
+        hash_value(&self.inner)
     }
 }
 
@@ -180,7 +173,7 @@ impl PyClassicalType {
     }
 
     fn __hash__(&self) -> u64 {
-        hash_value(self.inner)
+        hash_value(&self.inner)
     }
 }
 
@@ -258,7 +251,7 @@ impl PyClassicalVar {
     }
 
     fn __hash__(&self) -> u64 {
-        hash_value(self.inner)
+        hash_value(&self.inner)
     }
 }
 
@@ -329,7 +322,7 @@ impl PyClassicalValue {
     }
 
     fn __hash__(&self) -> u64 {
-        hash_value(self.inner)
+        hash_value(&self.inner)
     }
 }
 
@@ -471,8 +464,8 @@ mod tests {
         );
         let full = PyOutcome::from(Outcome::from_indices(2, [0]));
 
-        assert_eq!(measurement.project(full).inner.to_string(2), "10");
-        assert_eq!(measurement.project_basis(0b10).inner.to_string(2), "01");
+        assert_eq!(measurement.project(full).inner.to_bitstring(2), "10");
+        assert_eq!(measurement.project_basis(0b10).inner.to_bitstring(2), "01");
         assert!(measurement.check_qubits(2).is_ok());
         assert!(measurement.check_qubits(1).is_err());
     }

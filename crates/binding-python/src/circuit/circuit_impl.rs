@@ -17,7 +17,9 @@
 //! construction boundary for custom instructions and structured control flow.
 
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit, PyIntQubitList, PyQubit};
-use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
+use crate::circuit::error::{
+    CircuitError as PyCircuitError, ParameterError as PyParameterError, circuit_error_to_py_err,
+};
 use crate::circuit::{
     PyCircuitDag, PyCircuitGate, PyCircuitId, PyClassicalControlOp, PyClassicalExpr,
     PyClassicalType, PyClassicalVar, PyMcGate, PyMeasurement, PyParameter, PyStandardGate,
@@ -27,8 +29,8 @@ use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::Instruction;
 use cqlib_core::circuit::symbolic_matrix::circuit_to_symbolic_matrix;
 use cqlib_core::circuit::{
-    Circuit, CircuitDag, CircuitError, ClassicalControlOp, ExternalControlScope, ForOp, IfOp,
-    Parameter, ParameterValue, Qubit, SwitchOp, ValueInstruction, ValueOperation, WhileOp,
+    Circuit, CircuitDag, ClassicalControlOp, ExternalControlScope, ForOp, IfOp, Parameter,
+    ParameterValue, Qubit, SwitchOp, ValueInstruction, ValueOperation, WhileOp,
 };
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
@@ -474,14 +476,13 @@ impl PyCircuit {
     }
 
     /// Returns one operation with circuit-local parameters resolved.
+    ///
+    /// Raises `IndexError` when `index` is out of bounds.
     fn operation(&self, index: usize) -> PyResult<PyValueOperation> {
         self.inner
             .index(index)
             .map(PyValueOperation::from)
-            .map_err(|error| match error {
-                CircuitError::InvalidOperation(message) => PyIndexError::new_err(message),
-                error => PyCircuitError::new_err(error.to_string()),
-            })
+            .map_err(circuit_error_to_py_err)
     }
 
     /// Removes one top-level operation and returns it.
@@ -490,10 +491,10 @@ impl PyCircuit {
             .inner
             .index(index)
             .map(PyValueOperation::from)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+            .map_err(circuit_error_to_py_err)?;
         self.inner
             .remove_operation(index)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+            .map_err(circuit_error_to_py_err)?;
         Ok(removed)
     }
 
@@ -510,13 +511,13 @@ impl PyCircuit {
                 self.inner
                     .index(index)
                     .map(PyValueOperation::from)
-                    .map_err(|error| PyCircuitError::new_err(error.to_string()))
+                    .map_err(circuit_error_to_py_err)
             })
             .collect::<PyResult<Vec<_>>>()?;
 
         self.inner
             .remove_operations(indices)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+            .map_err(circuit_error_to_py_err)?;
         Ok(removed)
     }
 
@@ -954,17 +955,15 @@ impl PyCircuit {
     }
 
     /// Returns an inverse circuit when every operation is reversible.
-    fn inverse(&self) -> PyResult<Self> {
-        self.inner
-            .inverse()
+    fn inverse(&self, py: Python<'_>) -> PyResult<Self> {
+        py.detach(|| self.inner.inverse())
             .map(Self::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
     /// Recursively expands circuit-defined gates.
-    fn decompose(&self) -> PyResult<Self> {
-        self.inner
-            .decompose()
+    fn decompose(&self, py: Python<'_>) -> PyResult<Self> {
+        py.detach(|| self.inner.decompose())
             .map(Self::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
@@ -1024,16 +1023,20 @@ impl PyCircuit {
         py: Python<'py>,
         qubits_order: Option<Vec<usize>>,
     ) -> PyResult<Bound<'py, PyArray2<Complex64>>> {
-        self.inner
-            .to_matrix(qubits_order.as_deref())
-            .map(|matrix| matrix.to_pyarray(py))
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+        let matrix = py
+            .detach(|| self.inner.to_matrix(qubits_order.as_deref()))
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+        Ok(matrix.to_pyarray(py))
     }
 
     /// Computes a dense unitary matrix while preserving symbolic parameters.
     #[pyo3(signature = (qubits_order=None))]
-    fn to_symbolic_matrix(&self, qubits_order: Option<Vec<usize>>) -> PyResult<PySymbolicMatrix> {
-        circuit_to_symbolic_matrix(&self.inner, qubits_order.as_deref())
+    fn to_symbolic_matrix(
+        &self,
+        py: Python<'_>,
+        qubits_order: Option<Vec<usize>>,
+    ) -> PyResult<PySymbolicMatrix> {
+        py.detach(|| circuit_to_symbolic_matrix(&self.inner, qubits_order.as_deref()))
             .map(PySymbolicMatrix::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
@@ -1043,6 +1046,20 @@ impl PyCircuit {
         self.inner
             .validate()
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Compares two circuits by structural equality.
+    ///
+    /// Circuit identity, the order of the interned parameter table, and other
+    /// process-local classical handles are ignored; qubits, resolved
+    /// parameters, and the ordered operation sequence must match. Cost is
+    /// linear in the circuit's IR size. Circuits are unhashable.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyCircuit>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyRef<'_, PyCircuit>>()?;
+        Ok(self.inner == other.inner)
     }
 
     fn __len__(&self) -> usize {
@@ -1185,12 +1202,17 @@ mod tests {
 
     #[test]
     fn symbolic_matrix_preserves_unbound_parameters() {
+        Python::initialize();
         let mut circuit = Circuit::new(1);
         circuit
             .rx(Qubit::new(0), Parameter::symbol("theta"))
             .unwrap();
 
-        let matrix = PyCircuit::from(circuit).to_symbolic_matrix(None).unwrap();
+        let matrix = Python::attach(|py| {
+            PyCircuit::from(circuit)
+                .to_symbolic_matrix(py, None)
+                .unwrap()
+        });
 
         assert!(matrix.inner.iter().any(|value| {
             value.re.get_symbols().contains("theta") || value.im.get_symbols().contains("theta")

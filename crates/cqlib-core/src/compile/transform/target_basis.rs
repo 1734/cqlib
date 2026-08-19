@@ -265,7 +265,8 @@ impl TargetBasisCostModel {
         &self.signature
     }
 
-    pub(crate) fn target_basis(&self) -> &[Instruction] {
+    /// Returns the configured target instruction basis in insertion order.
+    pub fn target_basis(&self) -> &[Instruction] {
         self.lowerer.target_basis()
     }
 

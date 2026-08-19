@@ -12,7 +12,7 @@
 
 use super::ControlBody;
 use crate::circuit::classical_expr::{ClassicalExpr, ClassicalExprKind, simplify};
-use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, Qubit};
+use crate::circuit::{CircuitError, ClassicalValue, ClassicalVar, Qubit};
 use std::collections::BTreeSet;
 
 /// Unsigned runtime range loop with half-open `[start, stop)` semantics.
@@ -34,33 +34,7 @@ impl ForOp {
         step: ClassicalExpr,
         body: ControlBody,
     ) -> Result<Self, CircuitError> {
-        if !matches!(var.ty(), ClassicalType::UInt(_)) {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for loop variable must be UInt, got {:?}",
-                var.ty()
-            )));
-        }
-        if start.ty() != var.ty() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for start type must match loop variable {:?}, got {:?}",
-                var.ty(),
-                start.ty()
-            )));
-        }
-        if stop.ty() != var.ty() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for stop type must match loop variable {:?}, got {:?}",
-                var.ty(),
-                stop.ty()
-            )));
-        }
-        if step.ty() != var.ty() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for step type must match loop variable {:?}, got {:?}",
-                var.ty(),
-                step.ty()
-            )));
-        }
+        super::validate_for_types(var, &start, &stop, &step)?;
 
         Ok(Self {
             var,

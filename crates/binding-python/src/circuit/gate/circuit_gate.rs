@@ -108,6 +108,18 @@ impl PyFrozenCircuit {
         )
     }
 
+    /// Compares two frozen circuits by structural equality.
+    ///
+    /// The defining circuits compare structurally (circuit identity is
+    /// ignored) and the derived symbolic-matrix cache never participates.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyFrozenCircuit>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyFrozenCircuit>()?;
+        Ok(self.inner == other.inner)
+    }
+
     fn __copy__(&self) -> Self {
         self.clone()
     }
@@ -205,6 +217,11 @@ impl PyCircuitGate {
             .inverse()
             .map(|inner| Self { inner })
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Structural equality: name, ordered signature, and defining circuit.
+    fn __eq__(&self, other: &PyCircuitGate) -> bool {
+        self.inner == other.inner
     }
 
     fn __repr__(&self) -> String {

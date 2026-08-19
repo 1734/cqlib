@@ -82,6 +82,6 @@ def test_decompose_keeps_top_level_barrier():
 
     assert [op.instruction.instruction.name for op in decomposed.operations] == [
         "H",
-        "Barrier",
+        "barrier",
         "X",
     ]

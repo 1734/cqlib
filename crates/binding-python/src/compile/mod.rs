@@ -18,6 +18,7 @@ pub mod error;
 pub mod knowledge;
 pub mod resource;
 pub mod sabre;
+pub mod target_basis_item;
 pub mod transform;
 
 pub use compiler::{

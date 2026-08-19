@@ -12,11 +12,20 @@
 
 """Tests for device property types and Device APIs."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from cqlib import Qubit
 from cqlib.circuit import Instruction, StandardGate
-from cqlib.device import Device, EdgeProp, InstructionProp, QubitProp, Topology
+from cqlib.device import (
+    Device,
+    EdgeProp,
+    InstructionProp,
+    PhysicalQubit,
+    QubitProp,
+    Topology,
+)
 
 
 class TestPropertyBuilders:
@@ -82,7 +91,7 @@ class TestDeviceProperties:
         device.add_edge_properties(0, 1, ep01)
 
         assert device.name == "mock_backend"
-        assert sorted(device.qubits) == [Qubit(0), Qubit(1), Qubit(2)]
+        assert sorted(device.qubits) == [PhysicalQubit(0), PhysicalQubit(1), PhysicalQubit(2)]
         assert device.invalid_qubits == []
         assert device.default_single_qubit_error == pytest.approx(0.001)
         assert device.default_two_qubit_error == pytest.approx(0.01)
@@ -102,6 +111,22 @@ class TestDeviceProperties:
         ep_query = device.edge_properties(0, 1)
         assert ep_query is not None
         assert ep_query.native_instructions[0].instruction.name == "CX"
+
+    def test_calibration_time_round_trip(self):
+        """Calibration timestamps should round-trip, including pre-epoch ones."""
+        topo = Topology([0, 1], [(0, 1, "G1")])
+        device = Device("mock", [Qubit(0), Qubit(1)], topo)
+
+        assert device.calibration_time is None
+
+        timestamps = [
+            datetime(1970, 1, 1, tzinfo=timezone.utc),
+            datetime(1960, 1, 1, 0, 0, 0, 500000, tzinfo=timezone.utc),
+            datetime(2026, 8, 18, 12, 34, 56, 789012, tzinfo=timezone.utc),
+        ]
+        for ts in timestamps:
+            device.set_calibration_time(ts)
+            assert device.calibration_time == ts
 
     def test_device_rejects_invalid_qubit_or_edge(self):
         """Adding properties outside topology should raise ValueError."""

@@ -198,6 +198,27 @@ impl PyOperation {
     fn __str__(&self) -> String {
         format!("{}", self.operation.instruction)
     }
+
+    /// Compares two operations by storage-level structure.
+    ///
+    /// Classical handles embedded in classical-data/control instructions
+    /// carry the owning circuit's process-local identity, so operations from
+    /// different circuits are generally unequal.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyOperation>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyRef<'_, PyOperation>>()?;
+        Ok(self.operation == other.operation)
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
 }
 
 #[pyclass(name = "ValueOperation", module = "cqlib.circuit", from_py_object)]
@@ -444,6 +465,14 @@ impl PyValueOperation {
 
     fn __repr__(&self) -> String {
         format!("ValueOperation(\"{}\")", self.inner)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyValueOperation>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyValueOperation>()?;
+        Ok(self.inner == other.inner)
     }
 
     fn __copy__(&self) -> Self {

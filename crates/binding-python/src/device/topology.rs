@@ -40,14 +40,13 @@
 //! topology.supports_directed_coupling(1, 0)  # False: 1 -> 0 not present
 //!
 //! # Get successors (qubits reachable via outgoing couplings)
-//! topology.successors(0)  # [Qubit(1)]
+//! topology.successors(0)  # [PhysicalQubit(1)]
 //!
 //! # Get predecessors (qubits with incoming couplings)
-//! topology.predecessors(1)  # [Qubit(0)]
+//! topology.predecessors(1)  # [PhysicalQubit(0)]
 //! ```
 
-use crate::circuit::PyQubit;
-use crate::device::qubit::{PyPhysicalQubitLike, PyPhysicalQubitList};
+use crate::device::qubit::{PyPhysicalQubit, PyPhysicalQubitLike, PyPhysicalQubitList};
 use cqlib_core::device::{PhysicalQubit, topology::Topology};
 use pyo3::exceptions::PyValueError;
 use pyo3::{Bound, PyAny, PyResult, pyclass, pymethods};
@@ -174,11 +173,8 @@ impl PyTopology {
 
     /// Returns all physical qubits in the topology.
     #[getter]
-    fn qubits(&self) -> Vec<PyQubit> {
-        self.inner
-            .qubits()
-            .map(|pq| PyQubit { inner: pq.qubit() })
-            .collect()
+    fn qubits(&self) -> Vec<PyPhysicalQubit> {
+        self.inner.qubits().map(Into::into).collect()
     }
 
     /// Adds physical qubits to the topology.
@@ -318,17 +314,17 @@ impl PyTopology {
     ///     qubit: The source qubit.
     ///
     /// Returns:
-    ///     List[Qubit]: List of successors.
+    ///     List[PhysicalQubit]: List of successors.
     ///
     /// Example:
     ///     ```python
     ///     topology = Topology([0, 1, 2], [(0, 1, "CX"), (0, 2, "CX")])
-    ///     topology.successors(0)  # [Qubit(1), Qubit(2)]
+    ///     topology.successors(0)  # [PhysicalQubit(1), PhysicalQubit(2)]
     ///     ```
-    fn successors(&self, qubit: PyPhysicalQubitLike) -> Vec<PyQubit> {
+    fn successors(&self, qubit: PyPhysicalQubitLike) -> Vec<PyPhysicalQubit> {
         self.inner
             .successors(qubit.into())
-            .map(|pq| PyQubit { inner: pq.qubit() })
+            .map(Into::into)
             .collect()
     }
 
@@ -340,11 +336,11 @@ impl PyTopology {
     ///     qubit: The target qubit.
     ///
     /// Returns:
-    ///     List[Qubit]: List of predecessors.
-    fn predecessors(&self, qubit: PyPhysicalQubitLike) -> Vec<PyQubit> {
+    ///     List[PhysicalQubit]: List of predecessors.
+    fn predecessors(&self, qubit: PyPhysicalQubitLike) -> Vec<PyPhysicalQubit> {
         self.inner
             .predecessors(qubit.into())
-            .map(|pq| PyQubit { inner: pq.qubit() })
+            .map(Into::into)
             .collect()
     }
 
@@ -356,11 +352,11 @@ impl PyTopology {
     ///     qubit: The qubit to query.
     ///
     /// Returns:
-    ///     List[Qubit]: List of coupled neighbors.
-    fn neighbors_undirected(&self, qubit: PyPhysicalQubitLike) -> Vec<PyQubit> {
+    ///     List[PhysicalQubit]: List of coupled neighbors.
+    fn neighbors_undirected(&self, qubit: PyPhysicalQubitLike) -> Vec<PyPhysicalQubit> {
         self.inner
             .neighbors_undirected(qubit.into())
-            .map(|pq| PyQubit { inner: pq.qubit() })
+            .map(Into::into)
             .collect()
     }
 
@@ -370,11 +366,12 @@ impl PyTopology {
     /// bidirectional couplings collapse to one pair.
     ///
     /// Returns:
-    ///     List[Tuple[Qubit, Qubit]]: List of undirected edge pairs.
-    fn undirected_edges(&self) -> Vec<(PyQubit, PyQubit)> {
+    ///     List[Tuple[PhysicalQubit, PhysicalQubit]]: List of undirected
+    ///     edge pairs.
+    fn undirected_edges(&self) -> Vec<(PyPhysicalQubit, PyPhysicalQubit)> {
         self.inner
             .undirected_edges()
-            .map(|(a, b)| (PyQubit { inner: a.qubit() }, PyQubit { inner: b.qubit() }))
+            .map(|(a, b)| (a.into(), b.into()))
             .collect()
     }
 

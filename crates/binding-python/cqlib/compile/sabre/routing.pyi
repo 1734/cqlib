@@ -93,10 +93,11 @@ class SabreConfig:
     def refinement_iterations(self) -> int: ...
     @property
     def routing_trials(self) -> int:
-        """Complete routing trials run for each initial candidate.
+        """Complete routing trials run for each fully refined layout.
 
-        Trials are distributed across distinct lightweight refinement
-        checkpoints. The search returns the best route directly.
+        The search directly returns the best route and does not route
+        intermediate refinement states or run a separate layout-scoring
+        phase.
         """
         ...
     @property
@@ -204,4 +205,13 @@ def validate_reachable_interactions(
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "SabreHeuristicConfig",
+    "SabreVf2PrepassConfig",
+    "SabreConfig",
+    "SabreRoutingDiagnostics",
+    "SabreRoutingResult",
+    "sabre_route",
+    "normalize_initial_layout",
+    "validate_reachable_interactions",
+]

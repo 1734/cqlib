@@ -12,7 +12,7 @@
 
 use super::ControlBody;
 use crate::circuit::classical_expr::ClassicalExpr;
-use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, Qubit};
+use crate::circuit::{CircuitError, ClassicalValue, ClassicalVar, Qubit};
 use std::collections::BTreeSet;
 
 /// Exact-value switch case.
@@ -54,30 +54,7 @@ impl SwitchOp {
         cases: Vec<SwitchCase>,
         default: Option<ControlBody>,
     ) -> Result<Self, CircuitError> {
-        let width = match target.ty() {
-            ClassicalType::UInt(width) => width.get(),
-            ty => {
-                return Err(CircuitError::InvalidOperation(format!(
-                    "switch target must be UInt, got {ty:?}"
-                )));
-            }
-        };
-
-        let mut values = BTreeSet::new();
-        for case in &cases {
-            if width < 128 && case.value >= (1u128 << width) {
-                return Err(CircuitError::InvalidOperation(format!(
-                    "switch case value {} does not fit in target width {width}",
-                    case.value
-                )));
-            }
-            if !values.insert(case.value) {
-                return Err(CircuitError::InvalidOperation(format!(
-                    "duplicate switch case value {}",
-                    case.value
-                )));
-            }
-        }
+        super::validate_switch(&target, cases.iter().map(|case| case.value))?;
 
         Ok(Self {
             target,

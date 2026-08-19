@@ -20,6 +20,8 @@ Test coverage:
 - Parametric CircuitGate creation and usage
 """
 
+import pytest
+
 from cqlib.circuit import Circuit, Parameter
 from cqlib.circuit.gates import CircuitGate
 
@@ -251,3 +253,47 @@ class TestCircuitGateType:
 
         op = main[0]
         assert op.name == "CustomH"
+
+
+class TestCircuitGateEquality:
+    """Test structural equality and unhashability of CircuitGate."""
+
+    @staticmethod
+    def _bell(name="Bell"):
+        c = Circuit(2)
+        c.h(0)
+        c.cx(0, 1)
+        return c.to_gate(name)
+
+    def test_structurally_equal(self):
+        """Two independently built identical gates compare equal."""
+        assert self._bell() == self._bell()
+
+    def test_self_equal(self):
+        """A gate compares equal to itself."""
+        g = self._bell()
+        assert g == g
+
+    def test_different_name_not_equal(self):
+        """A differing name breaks equality."""
+        assert self._bell("Bell") != self._bell("Other")
+
+    def test_different_structure_not_equal(self):
+        """A differing circuit definition breaks equality."""
+        a = Circuit(2)
+        a.h(0)
+        a.cx(0, 1)
+
+        b = Circuit(2)
+        b.x(0)
+
+        assert a.to_gate("G") != b.to_gate("G")
+
+    def test_unhashable(self):
+        """CircuitGate has no core Hash impl, so it must be unhashable."""
+        g = self._bell()
+        assert CircuitGate.__hash__ is None
+        with pytest.raises(TypeError):
+            hash(g)
+        with pytest.raises(TypeError):
+            {g: 1}

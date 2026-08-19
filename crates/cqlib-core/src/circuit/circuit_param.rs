@@ -97,6 +97,20 @@ pub enum ParameterValue {
     Fixed(f64),
 }
 
+impl PartialEq for ParameterValue {
+    /// Compares the construction form: two values are equal only when both
+    /// are symbolic with structurally equal expressions, or both are fixed
+    /// with the same value. A symbolic parameter and its evaluated fixed
+    /// value compare unequal even when numerically identical.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Param(lhs), Self::Param(rhs)) => lhs == rhs,
+            (Self::Fixed(lhs), Self::Fixed(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+}
+
 impl From<f64> for ParameterValue {
     fn from(v: f64) -> Self {
         Self::Fixed(v)

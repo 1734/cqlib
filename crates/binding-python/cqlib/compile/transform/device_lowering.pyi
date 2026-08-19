@@ -36,4 +36,6 @@ class DeviceLowerer:
     def __deepcopy__(self, memo: dict[int, object]) -> DeviceLowerer: ...
     def __repr__(self) -> str: ...
 
-__all__: list[str]
+__all__ = [
+    "DeviceLowerer",
+]

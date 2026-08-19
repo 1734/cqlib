@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from cqlib.circuit import Circuit
+from cqlib.circuit import Circuit, Instruction
 from cqlib.compile.commutation import CommutationConfig
 from .decompose import TwoQubitUnitaryDecomposeBasis
 from .result import TransformResult
@@ -22,6 +22,7 @@ class TwoQubitBlockResynthesisConfig:
         self,
         *,
         two_qubit_basis: TwoQubitUnitaryDecomposeBasis | None = None,
+        target_basis: list[Instruction | str] | None = None,
         enhanced: bool = False,
         max_block_ops: int | None = None,
         max_crossed_ops: int | None = None,
@@ -31,7 +32,21 @@ class TwoQubitBlockResynthesisConfig:
         commutation: CommutationConfig | None = None,
     ) -> None: ...
     @property
-    def two_qubit_basis(self) -> TwoQubitUnitaryDecomposeBasis: ...
+    def two_qubit_basis(self) -> TwoQubitUnitaryDecomposeBasis | None:
+        """Basis used for synthesized two-qubit interaction gates.
+
+        ``None`` when the config uses the unconstrained core default target.
+        """
+        ...
+    @property
+    def target_basis(self) -> list[Instruction] | None:
+        """Explicit target basis used for two-qubit synthesis candidate choice.
+
+        ``None`` when the config uses the unconstrained core default target or
+        the legacy ``two_qubit_basis`` selection. Mutually exclusive with
+        ``two_qubit_basis``.
+        """
+        ...
     @property
     def max_block_ops(self) -> int: ...
     @property
@@ -72,4 +87,8 @@ def resynthesize_two_qubit_blocks(
     """Resynthesize strictly improving fixed numeric two-qubit blocks."""
     ...
 
-__all__: list[str]
+__all__ = [
+    "TwoQubitBlockResynthesisConfig",
+    "ResynthesizeTwoQubitBlocks",
+    "resynthesize_two_qubit_blocks",
+]

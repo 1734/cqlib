@@ -43,8 +43,9 @@ def test_operation_method_and_getitem_report_out_of_range():
     circuit = Circuit(1)
     circuit.h(0)
 
-    with pytest.raises(CircuitError):
+    with pytest.raises(IndexError) as excinfo:
         circuit.operation(1)
+    assert not isinstance(excinfo.value, CircuitError)
 
     with pytest.raises(IndexError):
         circuit[1]
@@ -52,6 +53,8 @@ def test_operation_method_and_getitem_report_out_of_range():
     empty = Circuit(1)
     with pytest.raises(IndexError):
         empty[0]
+    with pytest.raises(IndexError):
+        empty.operation(0)
 
 
 def test_remove_operation_returns_removed_operation():
@@ -79,12 +82,22 @@ def test_remove_operations_returns_original_index_order_and_deduplicates():
     assert [op.instruction.name for op in circuit.operations] == ["H", "Z"]
 
 
+def test_remove_operation_out_of_bounds_raises_index_error():
+    circuit = Circuit(1)
+    circuit.h(0)
+
+    with pytest.raises(IndexError):
+        circuit.remove_operation(5)
+
+    assert [op.instruction.name for op in circuit.operations] == ["H"]
+
+
 def test_remove_operations_out_of_bounds_does_not_mutate():
     circuit = Circuit(1)
     circuit.h(0)
     circuit.x(0)
 
-    with pytest.raises(CircuitError):
+    with pytest.raises(IndexError):
         circuit.remove_operations([0, 2])
 
     assert [op.instruction.name for op in circuit.operations] == ["H", "X"]

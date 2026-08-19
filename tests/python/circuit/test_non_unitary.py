@@ -73,8 +73,8 @@ def test_barrier_reset_and_delay_append_expected_directives():
     circuit.delay(1, tau)
 
     assert [op.instruction.instruction.name for op in circuit.operations] == [
-        "Barrier",
-        "Reset",
+        "barrier",
+        "reset",
         "delay",
     ]
     assert list(circuit.parameters) == [tau]
@@ -111,7 +111,7 @@ def test_directive_factories_and_inverse_behavior():
     assert barrier.is_barrier()
     assert measure.is_measure()
     assert reset.is_reset()
-    assert barrier.inverse().name() == "Barrier"
+    assert barrier.inverse().name() == "barrier"
 
     assert measure.inverse() is None
     assert reset.inverse() is None

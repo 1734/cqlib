@@ -65,7 +65,7 @@ class CanonicalizeConfig:
     def __repr__(self) -> str:
         """Return a self-documenting configuration representation."""
         ...
-    def __eq__(self, other: CanonicalizeConfig) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Return whether two configurations contain the same options."""
         ...
     def __copy__(self) -> CanonicalizeConfig:
@@ -155,4 +155,9 @@ def canonicalize_circuit(circuit: Circuit) -> CanonicalizeResult:
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "CanonicalizeConfig",
+    "Canonicalizer",
+    "CanonicalizeResult",
+    "canonicalize_circuit",
+]

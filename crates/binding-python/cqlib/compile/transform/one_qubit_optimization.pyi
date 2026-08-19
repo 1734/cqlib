@@ -31,12 +31,15 @@ class OptimizeOneQubitRuns:
         """Create an optimizer using target-neutral logical cost."""
         ...
     @staticmethod
-    def basis(target_basis: Sequence[Instruction]) -> OptimizeOneQubitRuns:
+    def basis(target_basis: Sequence[Instruction | str]) -> OptimizeOneQubitRuns:
         """Create an optimizer using exact target-basis lowering cost.
 
+        Basis entries are case-insensitive standard-gate names (e.g. ``'H'``,
+        ``'X2P'``) or ``Instruction`` objects for multi-controlled gates.
+
         Raises:
-            CompilerConfigError: If the target basis is empty or contains an
-                unsupported instruction.
+            CompilerConfigError: If the target basis is empty, contains an
+                unsupported instruction, or an unknown gate name.
         """
         ...
     @property
@@ -51,4 +54,6 @@ class OptimizeOneQubitRuns:
     def __copy__(self) -> OptimizeOneQubitRuns: ...
     def __deepcopy__(self, memo: dict[int, object]) -> OptimizeOneQubitRuns: ...
 
-__all__: list[str]
+__all__ = [
+    "OptimizeOneQubitRuns",
+]

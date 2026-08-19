@@ -46,4 +46,23 @@ class CompilerInternalError(CompilerError):
 
     ...
 
-__all__: list[str]
+__all__ = [
+    "commutation",
+    "knowledge",
+    "resource",
+    "sabre",
+    "transform",
+    "CompileMode",
+    "DeviceCompileTarget",
+    "CompileTarget",
+    "CompileConfig",
+    "WorkflowStepReport",
+    "DeviceCompilationMetadata",
+    "CompileResult",
+    "CompilerWorkflow",
+    "CompilerError",
+    "CompilerConfigError",
+    "CompilerTransformError",
+    "CompilerInternalError",
+    "compile",
+]

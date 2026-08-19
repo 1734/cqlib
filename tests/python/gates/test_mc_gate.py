@@ -23,7 +23,7 @@ Test coverage:
 """
 
 import numpy as np
-from cqlib.circuit.gates import MCGate, X, H, RX, RZ, Phase, CX
+from cqlib.circuit.gates import MCGate, StandardGate, X, H, RX, RZ, Phase, CX
 from cqlib.circuit import Parameter
 
 
@@ -244,3 +244,23 @@ class TestMcGateEdgeCases:
         ccx_via_cx = MCGate(1, CX)
         assert ccx_via_cx.num_ctrl_qubits == 2
         assert ccx_via_cx.num_qubits == 3
+
+
+class TestMcGateRepr:
+    """Test MCGate repr reconstructability"""
+
+    def test_repr_round_trips_through_eval(self):
+        namespace = {"MCGate": MCGate, "StandardGate": StandardGate}
+
+        gate = MCGate(2, X)
+        assert repr(gate) == "MCGate(2, StandardGate.X)"
+        assert eval(repr(gate), namespace) == gate
+
+    def test_parametric_repr_round_trips_through_eval(self):
+        namespace = {"MCGate": MCGate, "StandardGate": StandardGate}
+
+        gate = MCGate(1, RX(1.5))
+        assert repr(gate) == "MCGate(1, StandardGate.RX(1.5))"
+        rebuilt = eval(repr(gate), namespace)
+        assert rebuilt == gate
+        assert [str(p) for p in rebuilt.params] == [str(p) for p in gate.params]

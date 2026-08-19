@@ -40,15 +40,15 @@ class Layout:
         >>> layout.num_vacant_physical  # 2
         >>> layout.num_physical         # 4
         >>>
-        >>> layout.get_physical(0)  # Qubit(100) or similar
-        >>> layout.get_logical(100) # Qubit(0) or similar
+        >>> layout.get_physical(0)  # PhysicalQubit(100) or similar
+        >>> layout.get_logical(100) # LogicalQubit(0) or similar
 
     Key Usage — custom initial mapping::
 
         >>> init_map = {0: 101, 1: 100}
         >>> layout = Layout([0, 1], [100, 101, 102], init_map=init_map)
         >>>
-        >>> layout.get_physical(0)  # Qubit(101)
+        >>> layout.get_physical(0)  # PhysicalQubit(101)
 
     Key Usage — from pairs::
 
@@ -123,19 +123,23 @@ class Layout:
 
     # ---- Lookup methods ----
 
-    def get_physical(self, logical_id: _LogicalQubitLike) -> Qubit | None:
+    def get_physical(self, logical_id: _LogicalQubitLike) -> PhysicalQubit | None:
         """Get the physical qubit mapped to a logical qubit.
 
-        Returns ``None`` if the logical qubit is not bound.
+        Returns ``None`` if the logical qubit is not bound. Use the
+        ``.qubit`` property on the result for an explicit bridge to a
+        circuit :class:`cqlib.Qubit`.
 
         Args:
             logical_id: The logical qubit to look up.
         """
 
-    def get_logical(self, physical_id: _PhysicalQubitLike) -> Qubit | None:
+    def get_logical(self, physical_id: _PhysicalQubitLike) -> LogicalQubit | None:
         """Get the logical qubit carried by a physical qubit.
 
-        Returns ``None`` if the physical qubit is vacant.
+        Returns ``None`` if the physical qubit is vacant. Use the
+        ``.qubit`` property on the result for an explicit bridge to a
+        circuit :class:`cqlib.Qubit`.
 
         Args:
             physical_id: The physical qubit to look up.
@@ -144,15 +148,15 @@ class Layout:
     # ---- Iterators ----
 
     @property
-    def logical_qubits(self) -> list[Qubit]:
+    def logical_qubits(self) -> list[LogicalQubit]:
         """All mapped logical qubits."""
 
     @property
-    def physical_qubits(self) -> list[Qubit]:
+    def physical_qubits(self) -> list[PhysicalQubit]:
         """All physical qubits available to the layout."""
 
     @property
-    def vacant_physical_qubits(self) -> list[Qubit]:
+    def vacant_physical_qubits(self) -> list[PhysicalQubit]:
         """All vacant physical qubits (not carrying a logical qubit)."""
 
     def is_physical_vacant(self, physical_id: _PhysicalQubitLike) -> bool:
@@ -165,14 +169,14 @@ class Layout:
     # ---- Mapping dictionaries ----
 
     @property
-    def l2p_map(self) -> dict[Qubit, Qubit]:
+    def l2p_map(self) -> dict[LogicalQubit, PhysicalQubit]:
         """The logical-to-physical qubit mapping.
 
         Returns a dict mapping each logical qubit to its physical qubit.
         """
 
     @property
-    def p2l_map(self) -> dict[Qubit, Qubit]:
+    def p2l_map(self) -> dict[PhysicalQubit, LogicalQubit]:
         """The physical-to-logical qubit mapping.
 
         Returns a dict mapping each occupied physical qubit to its
@@ -197,7 +201,7 @@ class Layout:
                 either qubit already participates in a mapping.
         """
 
-    def unbind(self, logical_id: _LogicalQubitLike) -> Qubit:
+    def unbind(self, logical_id: _LogicalQubitLike) -> PhysicalQubit:
         """Remove the mapping for a logical qubit and return the released
         physical qubit.
 

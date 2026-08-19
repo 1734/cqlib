@@ -57,6 +57,22 @@ class TestStatus:
         assert cancelled.kind == "cancelled"
         assert cancelled.is_terminal() is True
 
+    def test_status_value_equality(self):
+        """Statuses compare by value; identical states are equal."""
+        assert Status.completed() == Status.completed()
+        assert Status.failed("x", 1) == Status.failed("x", 1)
+        assert Status.failed("x", 1) != Status.failed("y", 1)
+        assert Status.failed("x", 1) != Status.failed("x", 2)
+        assert Status.completed() != Status.cancelled()
+
+    def test_status_cross_type_comparison_returns_false(self):
+        assert (Status.completed() == 42) is False
+        assert (Status.completed() == "completed") is False
+
+    def test_status_is_hashable_and_deduplicates(self):
+        assert hash(Status.completed()) == hash(Status.completed())
+        assert len({Status.completed(), Status.completed(), Status.cancelled()}) == 2
+
 
 class TestExecutionResult:
     """Tests execution result lifecycle transitions and accessors."""
@@ -105,3 +121,26 @@ class TestExecutionResult:
         invalid = ExecutionResult("task-invalid", [Qubit(0)], 10, 1, None)
         with pytest.raises(ValueError):
             invalid.finish({"2": 1})
+
+    def test_from_counts_rejects_key_collision(self):
+        """Distinct keys that collapse to one outcome must raise ValueError."""
+        with pytest.raises(ValueError):
+            ExecutionResult.from_counts("task", [0, 1], 3, 2, {"1": 1, "01": 2})
+
+    def test_from_counts_rejects_width_mismatch(self):
+        """A key wider than num_qubits must raise ValueError, not truncate."""
+        with pytest.raises(ValueError):
+            ExecutionResult.from_counts("task", [0, 1], 1, 2, {"100": 1})
+
+    def test_from_counts_accepts_valid_width(self):
+        """Keys of exactly num_qubits bits are accepted and preserved."""
+        result = ExecutionResult.from_counts("task", [0, 1], 3, 2, {"01": 1, "10": 2})
+        assert result.counts == {"01": 1, "10": 2}
+
+    def test_finish_applies_same_width_validation(self):
+        """finish() must validate width and collisions like from_counts()."""
+        result = ExecutionResult("task", [0, 1], 3, 2)
+        with pytest.raises(ValueError):
+            result.finish({"1": 1, "01": 2})
+        with pytest.raises(ValueError):
+            result.finish({"100": 1})

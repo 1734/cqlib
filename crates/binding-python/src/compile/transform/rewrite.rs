@@ -15,14 +15,13 @@
 use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::error::compiler_error_to_py_err;
 use crate::compile::knowledge::library::PyRuleKind;
+use crate::utils::hash_value;
 use cqlib_core::compile::knowledge::library::RuleKind;
 use cqlib_core::compile::transform::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, RewriteConfig, RewriteMode,
     rewrite_circuit,
 };
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// High-level knowledge-rule application mode.
 #[pyclass(
@@ -76,9 +75,7 @@ impl PyRewriteMode {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.name().hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {

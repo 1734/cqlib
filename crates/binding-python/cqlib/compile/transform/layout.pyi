@@ -392,8 +392,10 @@ def sabre_layout_prepared(
     """Run SABRE layout selection from precomputed circuit and device data.
 
     Like :func:`sabre_layout`, this performs fused refinement and routing
-    search. Complete route trials are distributed across distinct lightweight
-    refinement checkpoints and ranked by predicted native route quality.
+    search. Every configured refinement iteration completes before the
+    resulting layout is routed; complete routes are never created for
+    intermediate refinement states, and trials are ranked by predicted
+    native route quality.
     ``objective`` contributes candidate generation and the diagnostic score in
     the result, but is not the route-selection key.
 
@@ -498,8 +500,10 @@ def sabre_layout(
 ) -> LayoutResult:
     """Select an initial layout with fused SABRE refinement and routing search.
 
-    Complete route trials are distributed across distinct lightweight
-    refinement checkpoints and ranked by predicted native route quality. This
+    Every configured refinement iteration completes before the resulting
+    layout is routed; complete routes are never created for intermediate
+    refinement states, and trials are ranked by predicted native route
+    quality. This
     layout-only API returns the winning route's initial layout; it does not
     insert SWAPs or return a routed circuit. ``None`` selects topology-only
     scoring and the default SABRE configuration. ``objective`` contributes
@@ -511,4 +515,29 @@ def sabre_layout(
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "LayoutObjective",
+    "LayoutScore",
+    "LayoutDiagnostics",
+    "LayoutResult",
+    "Vf2EdgeRequirement",
+    "Vf2LayoutConfig",
+    "Interaction",
+    "InteractionGraph",
+    "CircuitLayoutAnalysis",
+    "DistanceTable",
+    "PhysicalLayoutGraph",
+    "PreparedSabreCircuit",
+    "PreparedSabreDeviceTarget",
+    "analyze_circuit_for_layout",
+    "prepare_sabre_circuit",
+    "prepare_sabre_device_target",
+    "sabre_layout_prepared",
+    "trivial_layout_prepared",
+    "greedy_layout_prepared",
+    "vf2_perfect_layout_prepared",
+    "trivial_layout",
+    "greedy_layout",
+    "vf2_perfect_layout",
+    "sabre_layout",
+]

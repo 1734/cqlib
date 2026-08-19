@@ -12,14 +12,13 @@
 
 use crate::circuit::PyQubit;
 use crate::circuit::bit::PyIntListOrQubitList;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Qubit;
 use cqlib_core::compile::resource::{
     AncillaRequirement, ResourceLease, ResourcePlan, ResourceRequest,
 };
 use pyo3::prelude::*;
 use std::collections::BTreeSet;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// State-restoration contract for ancillary qubits.
 #[pyclass(
@@ -75,13 +74,7 @@ impl PyAncillaRequirement {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        match self.inner {
-            AncillaRequirement::CleanZero => 0_u8,
-            AncillaRequirement::Dirty => 1_u8,
-        }
-        .hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {

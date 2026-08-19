@@ -135,4 +135,9 @@ def route_sabre(
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "RoutedCircuit",
+    "SabreRouteResult",
+    "route_with_layout",
+    "route_sabre",
+]

@@ -12,6 +12,8 @@
 
 """Tests for DensityMatrix quantum state simulation."""
 
+import inspect
+
 import pytest
 import math
 import numpy as np
@@ -852,6 +854,60 @@ class TestDensityMatrixNumericalPrecision:
         )
 
 
+class TestDensityMatrixToleranceDefaults:
+    """Test that physical-constraint checks default tol=1e-10 when omitted.
+
+    The Rust bindings declare ``f64`` parameters with
+    ``#[pyo3(signature = (tol=1e-10))]``, so no-arg calls must work and the
+    Python-visible default matches ``density_matrix.pyi``'s ``tol: float = 1e-10``.
+    """
+
+    @pytest.fixture
+    def valid_dm(self):
+        dm = DensityMatrix(1)
+        dm.apply_h(0)
+        return dm
+
+    def test_signatures_expose_1e_10_default(self):
+        """The Python-visible default must be 1e-10, not required or None."""
+        for method in (
+            DensityMatrix.is_hermitian,
+            DensityMatrix.is_positive_semidefinite,
+            DensityMatrix.validate_physical,
+        ):
+            assert inspect.signature(method).parameters["tol"].default == 1e-10
+
+    def test_is_hermitian_no_arg_defaults_to_1e_10(self, valid_dm):
+        """is_hermitian() without arguments must not raise TypeError."""
+        assert valid_dm.is_hermitian() is True
+        # Explicit tolerance must keep working, positional and keyword.
+        assert valid_dm.is_hermitian(1e-10) is True
+        assert valid_dm.is_hermitian(tol=1e-12) is True
+
+    def test_is_hermitian_with_custom_tol(self, valid_dm):
+        """Tight tolerance still passes for an exactly prepared state."""
+        assert valid_dm.is_hermitian(tol=1e-15) is True
+
+    def test_is_positive_semidefinite_no_arg_defaults_to_1e_10(self, valid_dm):
+        """is_positive_semidefinite() without arguments must not raise TypeError."""
+        assert valid_dm.is_positive_semidefinite() is True
+        assert valid_dm.is_positive_semidefinite(1e-10) is True
+        assert valid_dm.is_positive_semidefinite(tol=1e-8) is True
+
+    def test_validate_physical_no_arg_defaults_to_1e_10(self, valid_dm):
+        """validate_physical() without arguments must not raise TypeError."""
+        assert valid_dm.validate_physical() is None
+        assert valid_dm.validate_physical(1e-10) is None
+        assert valid_dm.validate_physical(tol=1e-8) is None
+
+    def test_tol_rejects_none(self, valid_dm):
+        """tol is typed float; passing None must raise TypeError, matching the stub."""
+        with pytest.raises(TypeError):
+            valid_dm.is_hermitian(None)
+        with pytest.raises(TypeError):
+            valid_dm.validate_physical(None)
+
+
 class TestDensityMatrixCopySemantics:
     """Test copy behavior and independence."""
 
@@ -885,3 +941,26 @@ class TestDensityMatrixCopySemantics:
         assert np.isclose(data2[0, 0], original_val, atol=1e-10), (
             "Modifying returned data array affected density matrix"
         )
+
+
+class TestDensityMatrixMaximallyMixed:
+    """Test the maximally mixed state constructor."""
+
+    @pytest.mark.parametrize("num_qubits", [0, 1, 2])
+    def test_matrix_is_identity_over_dim(self, num_qubits):
+        """Test the matrix equals I / 2^N."""
+        dim = 2**num_qubits
+        dm = DensityMatrix.maximally_mixed(num_qubits)
+        assert dm.num_qubits == num_qubits
+        data = dm.data
+        assert data.shape == (dim, dim)
+        np.testing.assert_allclose(
+            data, np.eye(dim, dtype=complex) / dim, atol=1e-12
+        )
+
+    def test_trace_and_probabilities(self):
+        """Test physical-state invariants: trace 1, uniform probabilities."""
+        dm = DensityMatrix.maximally_mixed(2)
+        assert np.isclose(dm.trace(), 1.0)
+        assert dm.probabilities() == pytest.approx([0.25, 0.25, 0.25, 0.25])
+        assert dm.is_hermitian(1e-10)

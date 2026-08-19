@@ -259,7 +259,7 @@ x q[1];
 
         assert c[0].name == "H"
         assert c[1].is_directive
-        assert c[1].name == "Barrier"
+        assert c[1].name == "barrier"
         assert c[2].name == "X"
 
     def test_loads_barrier_multiple(self):
@@ -276,7 +276,7 @@ x q[1];
         assert len(c) == 3
 
         barrier_op = c[1]
-        assert barrier_op.name == "Barrier"
+        assert barrier_op.name == "barrier"
         assert barrier_op.num_qubits == 3
 
     def test_loads_barrier_register(self):
@@ -293,7 +293,7 @@ x q[1];
         assert len(c) == 3
 
         barrier_op = c[1]
-        assert barrier_op.name == "Barrier"
+        assert barrier_op.name == "barrier"
         assert barrier_op.num_qubits == 3
 
     def test_loads_reset_single(self):
@@ -310,7 +310,7 @@ reset q[0];
 
         assert c[0].name == "X"
         assert c[1].is_directive
-        assert c[1].name == "Reset"
+        assert c[1].name == "reset"
         assert c[1].qubits[0].index == 0
 
     def test_loads_reset_register(self):
@@ -326,8 +326,8 @@ reset q;
         # x + 2 resets
         assert len(c) == 3
 
-        assert c[1].name == "Reset"
-        assert c[2].name == "Reset"
+        assert c[1].name == "reset"
+        assert c[2].name == "reset"
 
     def test_loads_bell_state(self):
         """Parse Bell state circuit and verify structure."""

@@ -174,30 +174,7 @@ impl PyEvolutionStrategy {
     }
 
     fn __eq__(&self, other: &PyEvolutionStrategy) -> bool {
-        use cqlib_core::qis::evolution::TrotterMode;
-        match (&self.inner, &other.inner) {
-            (EvolutionStrategy::Exact, EvolutionStrategy::Exact) => true,
-            (EvolutionStrategy::Auto { steps: a }, EvolutionStrategy::Auto { steps: b }) => a == b,
-            (
-                EvolutionStrategy::Trotter {
-                    mode: ma,
-                    steps: sa,
-                },
-                EvolutionStrategy::Trotter {
-                    mode: mb,
-                    steps: sb,
-                },
-            ) => {
-                sa == sb
-                    && match (ma, mb) {
-                        (TrotterMode::FirstOrder, TrotterMode::FirstOrder) => true,
-                        (TrotterMode::SecondOrder, TrotterMode::SecondOrder) => true,
-                        (TrotterMode::Randomized(a), TrotterMode::Randomized(b)) => a == b,
-                        _ => false,
-                    }
-            }
-            _ => false,
-        }
+        self.inner == other.inner
     }
 
     fn __copy__(&self) -> Self {
@@ -440,7 +417,7 @@ impl PyPauliEvolutionAnsatz {
     /// Examples:
     ///     >>> ansatz = ansatz.with_time_param_name("tau")
     ///     >>> circuit = ansatz.build_circuit("ignored")
-    ///     >>> circuit.symbols  # ("tau",)
+    ///     >>> circuit.symbols  # ["tau"]
     fn with_time_param_name(&self, name: &str) -> Self {
         Self {
             inner: self.inner.clone().with_time_param_name(name),

@@ -242,14 +242,14 @@ class TestQcisLoadsDirectives:
         c = loads(qcis)
         assert len(c) == 1
         assert c[0].is_directive
-        assert c[0].name == "Barrier"
+        assert c[0].name == "barrier"
 
     def test_loads_barrier_multiple_qubits(self):
         """Parse barrier on multiple qubits and verify."""
         qcis = "B Q0 Q1 Q2 Q3"
         c = loads(qcis)
         assert len(c) == 1
-        assert c[0].name == "Barrier"
+        assert c[0].name == "barrier"
         assert c[0].num_qubits == 4
 
     def test_loads_measurement_single_qubit(self):

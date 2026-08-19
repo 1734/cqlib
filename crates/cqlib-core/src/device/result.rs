@@ -233,7 +233,7 @@ impl FromStr for Outcome {
 }
 
 /// Execution status of a quantum job.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Status {
     /// Task has been submitted and is queued for execution.
     Queued,

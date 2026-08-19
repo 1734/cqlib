@@ -756,3 +756,36 @@ class TestGateEdgeCases:
         xy2m_inv_mat = xy2m_inv.matrix()
         product = xy2p_mat @ xy2m_inv_mat
         assert np.allclose(product, np.eye(2)), "XY2P @ XY2M should be identity"
+
+
+class TestStandardGateFromName:
+    """Test StandardGate.from_name resolution"""
+
+    def test_from_name_resolves_canonical_names(self):
+        assert StandardGate.from_name("H") == StandardGate.H
+        assert StandardGate.from_name("X2P") == StandardGate.X2P
+        assert StandardGate.from_name("Phase") == StandardGate.Phase
+
+    def test_from_name_is_case_insensitive(self):
+        assert StandardGate.from_name("h") == StandardGate.H
+        assert StandardGate.from_name("cx") == StandardGate.CX
+        assert StandardGate.from_name("phase") == StandardGate.Phase
+
+    def test_from_name_rejects_unknown_names(self):
+        for bad in ("not-a-gate", "C2-X"):
+            with pytest.raises(ValueError, match="unknown standard gate"):
+                StandardGate.from_name(bad)
+
+
+class TestStandardGateRepr:
+    """Test StandardGate repr reconstructability"""
+
+    def test_unbound_repr_matches_class_attribute(self):
+        assert repr(StandardGate.H) == "StandardGate.H"
+        assert repr(StandardGate.RX) == "StandardGate.RX"
+
+    def test_bound_repr_round_trips_through_eval(self):
+        gate = StandardGate.RX(1.5)
+
+        assert repr(gate) == "StandardGate.RX(1.5)"
+        assert eval(repr(gate), {"StandardGate": StandardGate}) == gate

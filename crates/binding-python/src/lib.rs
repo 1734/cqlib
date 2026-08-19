@@ -16,6 +16,7 @@ pub mod device;
 pub mod error_mitigation;
 pub mod ir;
 pub mod qis;
+mod utils;
 pub mod visualization;
 
 use pyo3::prelude::*;

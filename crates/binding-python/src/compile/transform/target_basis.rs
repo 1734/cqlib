@@ -15,13 +15,13 @@
 use crate::circuit::bit::PyIntOrQubit;
 use crate::circuit::{PyCircuit, PyInstruction, PyStandardGate, PyValueOperation};
 use crate::compile::error::compiler_error_to_py_err;
+use crate::compile::target_basis_item::PyTargetBasisItem;
 use crate::compile::transform::PyTransformResult;
+use crate::utils::{hash_value, python_string_literal};
 use cqlib_core::compile::transform::{
     TargetBasisCost, TargetBasisCostModel, TargetBasisLowerer, TargetBasisSignature, Transformer,
 };
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Deterministic lowerer for one explicit standard-instruction basis.
 #[pyclass(
@@ -36,12 +36,14 @@ pub struct PyTargetBasisLowerer {
 
 #[pymethods]
 impl PyTargetBasisLowerer {
+    /// Basis entries are either case-insensitive standard-gate names (e.g.
+    /// `'H'`, `'X2P'`) or `Instruction` objects for multi-controlled gates.
     #[new]
-    fn new(py: Python<'_>, target_basis: Vec<PyInstruction>) -> PyResult<Self> {
+    fn new(py: Python<'_>, target_basis: Vec<PyTargetBasisItem>) -> PyResult<Self> {
         let target_basis = target_basis
             .into_iter()
-            .map(|instruction| instruction.inner)
-            .collect();
+            .map(PyTargetBasisItem::into_instruction)
+            .collect::<PyResult<Vec<_>>>()?;
         py.detach(move || TargetBasisLowerer::new(target_basis))
             .map(|inner| Self { inner })
             .map_err(compiler_error_to_py_err)
@@ -74,7 +76,7 @@ impl PyTargetBasisLowerer {
             self.inner
                 .target_basis()
                 .iter()
-                .map(|instruction| format!("{:?}", instruction.to_string()))
+                .map(|instruction| python_string_literal(&instruction.name()))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -123,9 +125,7 @@ impl PyTargetBasisSignature {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -212,12 +212,15 @@ pub struct PyTargetBasisCostModel {
 
 #[pymethods]
 impl PyTargetBasisCostModel {
+    /// Basis entries are either case-insensitive standard-gate names (e.g.
+    /// `'H'`, `'X2P'`) or `Instruction` objects; the basis must contain only
+    /// standard instructions.
     #[new]
-    fn new(py: Python<'_>, target_basis: Vec<PyInstruction>) -> PyResult<Self> {
+    fn new(py: Python<'_>, target_basis: Vec<PyTargetBasisItem>) -> PyResult<Self> {
         let target_basis = target_basis
             .into_iter()
-            .map(|instruction| instruction.inner)
-            .collect();
+            .map(PyTargetBasisItem::into_instruction)
+            .collect::<PyResult<Vec<_>>>()?;
         py.detach(move || TargetBasisCostModel::new(target_basis))
             .map(|inner| Self { inner })
             .map_err(compiler_error_to_py_err)
@@ -226,6 +229,28 @@ impl PyTargetBasisCostModel {
     #[getter]
     fn signature(&self) -> PyTargetBasisSignature {
         self.inner.signature().clone().into()
+    }
+
+    #[getter]
+    fn target_basis(&self) -> Vec<PyInstruction> {
+        self.inner
+            .target_basis()
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TargetBasisCostModel(target_basis=[{}])",
+            self.inner
+                .target_basis()
+                .iter()
+                .map(|instruction| python_string_literal(&instruction.name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     fn cost_of_fixed_operations(
@@ -243,10 +268,6 @@ impl PyTargetBasisCostModel {
         py.detach(move || model.cost_of_fixed_operations(qubits, operations))
             .map(Into::into)
             .map_err(compiler_error_to_py_err)
-    }
-
-    fn __repr__(&self) -> String {
-        "TargetBasisCostModel(...)".to_string()
     }
 
     fn __eq__(&self, other: &Self) -> bool {

@@ -16,7 +16,7 @@ import sys
 import pytest
 
 from cqlib.circuit import Circuit
-from cqlib.compile import CompilerConfigError
+from cqlib.compile import CompilerConfigError, CompilerTransformError
 from cqlib.compile import sabre
 from cqlib.compile.sabre import (
     SabreConfig,
@@ -169,5 +169,5 @@ def test_route_rejects_invalid_configuration_and_disconnected_interaction():
         [0, 1],
         Topology([0, 1], []),
     )
-    with pytest.raises(CompilerConfigError, match="disconnected"):
+    with pytest.raises(CompilerTransformError, match="no executable native terminal pair"):
         sabre_route(circuit, disconnected, layout)
