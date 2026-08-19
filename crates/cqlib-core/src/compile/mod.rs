@@ -265,6 +265,19 @@ mod test_utils;
 /// Tolerance for proving equality between compiler parameter expressions.
 pub(crate) const PARAMETER_EQ_TOLERANCE: f64 = 1e-12;
 
+pub(crate) fn compare_some_first_by<T>(
+    left: Option<T>,
+    right: Option<T>,
+    compare: impl FnOnce(T, T) -> std::cmp::Ordering,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => compare(left, right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 /// Tolerance for treating a scalar as numerically zero.
 pub(crate) const NUMERIC_ZERO_TOLERANCE: f64 = 1e-14;
 

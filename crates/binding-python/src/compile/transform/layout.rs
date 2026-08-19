@@ -16,6 +16,7 @@ use crate::compile::sabre::PySabreConfig;
 use crate::device::device_impl::PyDevice;
 use crate::device::layout::PyLayout;
 use crate::device::qubit::{PyLogicalQubit, PyPhysicalQubit, PyPhysicalQubitLike};
+use crate::utils::hash_value;
 use cqlib_core::compile::sabre::SabreConfig;
 use cqlib_core::compile::transform::layout::{DistanceTable, PhysicalLayoutGraph};
 use cqlib_core::compile::transform::{
@@ -26,8 +27,6 @@ use cqlib_core::compile::transform::{
     trivial_layout, trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Registers layout bindings as `_native.compile.transform.layout`.
 pub(crate) fn register_layout_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -426,7 +425,12 @@ impl PyLayoutDiagnostics {
     }
 }
 
-/// Selected initial layout, score, and diagnostics.
+/// Selected initial layout, observed score, and diagnostics.
+///
+/// The score is the observed objective value of the selected layout.
+/// Individual algorithms may use a different selection key; in particular,
+/// SABRE selects its winner by predicted native route quality and reports
+/// this score for diagnostics.
 #[pyclass(
     name = "LayoutResult",
     module = "cqlib.compile.transform.layout",
@@ -450,6 +454,9 @@ impl PyLayoutResult {
         self.inner.layout.clone().into()
     }
 
+    /// Observed score of this layout under the requested objective, when
+    /// available. This score is diagnostic and is not necessarily the
+    /// algorithm's selection key.
     #[getter]
     fn score(&self) -> Option<PyLayoutScore> {
         self.inner.score.clone().map(Into::into)
@@ -534,9 +541,7 @@ impl PyVf2EdgeRequirement {
             Vf2EdgeRequirement::PositiveInteractions => 0_u8,
             Vf2EdgeRequirement::AllInteractions => 1,
         };
-        let mut hasher = DefaultHasher::new();
-        discriminant.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&discriminant)
     }
 
     fn __copy__(&self) -> Self {

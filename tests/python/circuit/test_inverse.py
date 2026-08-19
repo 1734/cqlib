@@ -51,7 +51,7 @@ def test_barrier_is_preserved_in_inverse():
 
     inverse = circuit.inverse()
 
-    assert [op.instruction.instruction.name for op in inverse.operations] == ["X", "Barrier", "H"]
+    assert [op.instruction.instruction.name for op in inverse.operations] == ["X", "barrier", "H"]
 
 
 def test_non_unitary_operations_are_not_invertible():

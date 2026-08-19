@@ -50,7 +50,7 @@ def test_instruction_factory_methods_expose_names_and_kinds():
 
     assert standard.name == "H"
     assert standard.is_standard
-    assert directive.name == "Barrier"
+    assert directive.name == "barrier"
     assert directive.is_directive
 
 
@@ -63,7 +63,7 @@ def test_value_instruction_wraps_instruction_and_control_variants():
     assert standard.instruction_type == "standard"
     assert standard.is_standard
     assert standard.instruction.name == "X"
-    assert repr(standard.standard_gate) == "X"
+    assert repr(standard.standard_gate) == "StandardGate.X"
 
     body_circuit = Circuit(1)
     body_circuit.h(0)
@@ -107,10 +107,10 @@ def test_value_operation_matrix_rejects_directive_without_matrix():
     instruction = Instruction.from_directive(Directive.barrier())
     operation = ValueOperation.from_instruction(instruction, [Qubit(0)])
 
-    assert operation.name == "Barrier"
+    assert operation.name == "barrier"
     assert operation.is_directive
     assert operation.instruction.is_directive
-    assert operation.instruction.directive.name() == "Barrier"
+    assert operation.instruction.directive.name() == "barrier"
 
     with pytest.raises(ValueError):
         operation.matrix()

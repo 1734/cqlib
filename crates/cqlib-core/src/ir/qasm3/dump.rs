@@ -23,6 +23,7 @@ use crate::circuit::{
     ClassicalExpr, ClassicalExprKind, ClassicalType, ClassicalUnaryOp, ClassicalValue,
     ClassicalVar, Qubit,
 };
+use crate::ir::io_errors_equivalent;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -51,9 +52,7 @@ pub enum Qasm3DumpError {
 impl PartialEq for Qasm3DumpError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::IoError(lhs), Self::IoError(rhs)) => {
-                lhs.kind() == rhs.kind() && lhs.to_string() == rhs.to_string()
-            }
+            (Self::IoError(lhs), Self::IoError(rhs)) => io_errors_equivalent(lhs, rhs),
             (Self::FormatError(lhs), Self::FormatError(rhs)) => lhs == rhs,
             (Self::UnsupportedInstruction(lhs), Self::UnsupportedInstruction(rhs)) => lhs == rhs,
             (Self::UnsupportedClassicalData(lhs), Self::UnsupportedClassicalData(rhs)) => {

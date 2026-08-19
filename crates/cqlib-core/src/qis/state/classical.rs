@@ -33,7 +33,7 @@ use crate::device::Outcome;
 use crate::qis::QisError;
 
 /// A typed runtime classical value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeValue {
     Bit(bool),
     Bool(bool),
@@ -56,7 +56,7 @@ impl RuntimeValue {
     pub fn to_bitstring(&self) -> Option<String> {
         match self {
             Self::Bit(value) => Some(if *value { "1" } else { "0" }.to_string()),
-            Self::BitVec { width, bits } => Some(bits.to_string(*width as usize)),
+            Self::BitVec { width, bits } => Some(bits.to_bitstring(*width as usize)),
             Self::Bool(_) | Self::UInt { .. } => None,
         }
     }
@@ -470,5 +470,60 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn runtime_value_compares_by_value_and_hashes_consistently() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let hash_of = |value: &RuntimeValue| {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        assert_eq!(
+            RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            },
+            RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            }
+        );
+        assert_ne!(
+            RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            },
+            RuntimeValue::UInt {
+                width: 8,
+                value: 43
+            }
+        );
+        assert_ne!(RuntimeValue::Bit(true), RuntimeValue::Bool(true),);
+
+        let bit_vec = RuntimeValue::BitVec {
+            width: 3,
+            bits: crate::device::Outcome::from_bitstring("101").unwrap(),
+        };
+        let bit_vec_again = RuntimeValue::BitVec {
+            width: 3,
+            bits: crate::device::Outcome::from_bitstring("101").unwrap(),
+        };
+        assert_eq!(bit_vec, bit_vec_again);
+        assert_eq!(hash_of(&bit_vec), hash_of(&bit_vec_again));
+        assert_eq!(
+            hash_of(&RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            }),
+            hash_of(&RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            })
+        );
     }
 }

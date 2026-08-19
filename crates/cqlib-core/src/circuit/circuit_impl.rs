@@ -51,6 +51,7 @@ use crate::circuit::bit::Qubit;
 use crate::circuit::circuit_classical::ControlScopeKind;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::classical::CircuitId;
+use crate::circuit::classical_expr::{ClassicalExpr, ClassicalExprKind};
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
 use crate::circuit::gate::instruction::Instruction;
@@ -134,6 +135,19 @@ pub struct Circuit {
 impl Clone for Circuit {
     fn clone(&self) -> Self {
         let circuit_id = CircuitId::new();
+        if self.classical_vars.is_empty() && self.classical_values.is_empty() {
+            return Self {
+                circuit_id,
+                qubits: self.qubits.clone(),
+                symbols: self.symbols.clone(),
+                parameters: self.parameters.clone(),
+                data: self.data.clone(),
+                classical_vars: Vec::new(),
+                classical_values: Vec::new(),
+                control_scope_stack: self.control_scope_stack.clone(),
+                global_phase: self.global_phase.clone(),
+            };
+        }
         let var_map = self
             .classical_vars
             .iter()
@@ -199,149 +213,296 @@ impl PartialEq for Circuit {
     fn eq(&self, other: &Self) -> bool {
         if self.qubits != other.qubits
             || self.symbols != other.symbols
-            || self.parameters != other.parameters
+            || self.parameters.len() != other.parameters.len()
+            || !self
+                .parameters
+                .iter()
+                .all(|parameter| other.parameters.contains(parameter))
             || self.classical_vars != other.classical_vars
             || self.classical_values != other.classical_values
             || self.control_scope_stack != other.control_scope_stack
-            || !circuit_params_equal(
-                std::slice::from_ref(&self.global_phase),
-                std::slice::from_ref(&other.global_phase),
-            )
             || self.data.len() != other.data.len()
         {
             return false;
         }
-
-        let qubit_mapping = other
-            .qubits
-            .iter()
-            .copied()
-            .map(|qubit| (qubit, qubit))
-            .collect::<HashMap<_, _>>();
-        let param_index_map = (0..other.parameters.len())
-            .map(|index| CircuitParam::Index(index as u32))
-            .collect::<Vec<_>>();
-        let var_map = other
-            .classical_vars
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, ty)| {
-                (
-                    ClassicalVar::new(other.circuit_id, index as u32, ty),
-                    ClassicalVar::new(self.circuit_id, index as u32, ty),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let value_map = other
-            .classical_values
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, ty)| {
-                (
-                    ClassicalValue::new(other.circuit_id, index as u32, ty),
-                    ClassicalValue::new(self.circuit_id, index as u32, ty),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
-        other.data.iter().zip(&self.data).all(|(rhs, lhs)| {
-            Self::remap_compose_operation(
-                rhs,
-                &qubit_mapping,
-                &param_index_map,
-                &var_map,
-                &value_map,
-            )
-            .is_ok_and(|rhs| operations_equal(lhs, &rhs))
-        })
+        circuit_params_equal(
+            &self.global_phase,
+            &other.global_phase,
+            &self.parameters,
+            &other.parameters,
+        ) && operations_structurally_equal(
+            &self.data,
+            &other.data,
+            &self.parameters,
+            &other.parameters,
+        )
     }
 }
 
-fn operations_equal(lhs: &Operation, rhs: &Operation) -> bool {
-    instructions_equal(&lhs.instruction, &rhs.instruction)
-        && lhs.qubits == rhs.qubits
-        && circuit_params_equal(&lhs.params, &rhs.params)
-        && lhs.label == rhs.label
-}
-
-pub(crate) fn instructions_equal(lhs: &Instruction, rhs: &Instruction) -> bool {
-    match (lhs, rhs) {
-        (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
-        (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,
-        (Instruction::Directive(lhs), Instruction::Directive(rhs)) => lhs == rhs,
-        (Instruction::Delay, Instruction::Delay) => true,
-        (Instruction::CircuitGate(lhs), Instruction::CircuitGate(rhs)) => {
-            lhs.name() == rhs.name()
-                && lhs.num_qubits() == rhs.num_qubits()
-                && lhs.num_params() == rhs.num_params()
-                && lhs.circuit().circuit() == rhs.circuit().circuit()
-        }
-        (Instruction::UnitaryGate(lhs), Instruction::UnitaryGate(rhs)) => lhs == rhs,
-        (Instruction::ClassicalData(lhs), Instruction::ClassicalData(rhs)) => {
-            classical_data_equal(lhs, rhs)
-        }
-        (Instruction::ClassicalControl(lhs), Instruction::ClassicalControl(rhs)) => {
-            classical_control_equal(lhs, rhs)
-        }
-        _ => false,
+impl Circuit {
+    /// Compares operation semantics without allocating remapped operation trees.
+    pub(crate) fn operations_structurally_equal(&self, other: &Self) -> bool {
+        operations_structurally_equal(&self.data, &other.data, &self.parameters, &other.parameters)
     }
 }
 
-fn classical_data_equal(lhs: &ClassicalDataOp, rhs: &ClassicalDataOp) -> bool {
-    match (lhs, rhs) {
+fn circuit_params_equal(
+    left: &CircuitParam,
+    right: &CircuitParam,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    match (left, right) {
+        (CircuitParam::Fixed(left), CircuitParam::Fixed(right)) => left == right,
+        (CircuitParam::Index(left), CircuitParam::Index(right)) => left_parameters
+            .get_index(*left as usize)
+            .zip(right_parameters.get_index(*right as usize))
+            .is_some_and(|(left, right)| left == right),
+        (CircuitParam::Fixed(value), CircuitParam::Index(index)) => right_parameters
+            .get_index(*index as usize)
+            .is_some_and(|right| Parameter::from(*value) == *right),
+        (CircuitParam::Index(index), CircuitParam::Fixed(value)) => left_parameters
+            .get_index(*index as usize)
+            .is_some_and(|left| *left == Parameter::from(*value)),
+    }
+}
+
+fn classical_var_equal(left: ClassicalVar, right: ClassicalVar) -> bool {
+    left.index() == right.index() && left.ty() == right.ty()
+}
+
+fn classical_value_equal(left: ClassicalValue, right: ClassicalValue) -> bool {
+    left.index() == right.index() && left.ty() == right.ty()
+}
+
+fn classical_expr_equal(left: &ClassicalExpr, right: &ClassicalExpr) -> bool {
+    if left.ty() != right.ty() {
+        return false;
+    }
+    match (left.kind(), right.kind()) {
+        (ClassicalExprKind::Var(left), ClassicalExprKind::Var(right)) => {
+            classical_var_equal(*left, *right)
+        }
+        (ClassicalExprKind::Value(left), ClassicalExprKind::Value(right)) => {
+            classical_value_equal(*left, *right)
+        }
+        (
+            ClassicalExprKind::Unary {
+                op: left_op,
+                expr: left,
+            },
+            ClassicalExprKind::Unary {
+                op: right_op,
+                expr: right,
+            },
+        ) => left_op == right_op && classical_expr_equal(left, right),
+        (
+            ClassicalExprKind::Binary {
+                op: left_op,
+                lhs: left_lhs,
+                rhs: left_rhs,
+            },
+            ClassicalExprKind::Binary {
+                op: right_op,
+                lhs: right_lhs,
+                rhs: right_rhs,
+            },
+        ) => {
+            left_op == right_op
+                && classical_expr_equal(left_lhs, right_lhs)
+                && classical_expr_equal(left_rhs, right_rhs)
+        }
+        (
+            ClassicalExprKind::Compare {
+                op: left_op,
+                lhs: left_lhs,
+                rhs: left_rhs,
+            },
+            ClassicalExprKind::Compare {
+                op: right_op,
+                lhs: right_lhs,
+                rhs: right_rhs,
+            },
+        ) => {
+            left_op == right_op
+                && classical_expr_equal(left_lhs, right_lhs)
+                && classical_expr_equal(left_rhs, right_rhs)
+        }
+        (
+            ClassicalExprKind::Cast {
+                cast: left_cast,
+                expr: left,
+            },
+            ClassicalExprKind::Cast {
+                cast: right_cast,
+                expr: right,
+            },
+        ) => left_cast == right_cast && classical_expr_equal(left, right),
+        (
+            ClassicalExprKind::Select {
+                condition: left_condition,
+                then_expr: left_then,
+                else_expr: left_else,
+            },
+            ClassicalExprKind::Select {
+                condition: right_condition,
+                then_expr: right_then,
+                else_expr: right_else,
+            },
+        ) => {
+            classical_expr_equal(left_condition, right_condition)
+                && classical_expr_equal(left_then, right_then)
+                && classical_expr_equal(left_else, right_else)
+        }
+        (
+            ClassicalExprKind::ExtractBit {
+                value: left,
+                index: left_index,
+            },
+            ClassicalExprKind::ExtractBit {
+                value: right,
+                index: right_index,
+            },
+        ) => left_index == right_index && classical_expr_equal(left, right),
+        (
+            ClassicalExprKind::ExtractBits {
+                value: left,
+                offset: left_offset,
+                width: left_width,
+            },
+            ClassicalExprKind::ExtractBits {
+                value: right,
+                offset: right_offset,
+                width: right_width,
+            },
+        ) => {
+            left_offset == right_offset
+                && left_width == right_width
+                && classical_expr_equal(left, right)
+        }
+        (ClassicalExprKind::Concat { parts: left }, ClassicalExprKind::Concat { parts: right })
+        | (
+            ClassicalExprKind::PackBits { bits: left },
+            ClassicalExprKind::PackBits { bits: right },
+        ) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| classical_expr_equal(left, right))
+        }
+        (left, right) => left == right,
+    }
+}
+
+fn classical_data_equal(left: &ClassicalDataOp, right: &ClassicalDataOp) -> bool {
+    match (left, right) {
         (
             ClassicalDataOp::Store {
-                target: lhs_target,
-                value: lhs_value,
+                target: left_target,
+                value: left_value,
             },
             ClassicalDataOp::Store {
-                target: rhs_target,
-                value: rhs_value,
+                target: right_target,
+                value: right_value,
             },
-        ) => lhs_target == rhs_target && lhs_value == rhs_value,
+        ) => {
+            classical_var_equal(*left_target, *right_target)
+                && classical_expr_equal(left_value, right_value)
+        }
         (
-            ClassicalDataOp::MeasureBit { result: lhs },
-            ClassicalDataOp::MeasureBit { result: rhs },
+            ClassicalDataOp::MeasureBit { result: left },
+            ClassicalDataOp::MeasureBit { result: right },
         )
         | (
-            ClassicalDataOp::MeasureBits { result: lhs },
-            ClassicalDataOp::MeasureBits { result: rhs },
-        ) => lhs == rhs,
+            ClassicalDataOp::MeasureBits { result: left },
+            ClassicalDataOp::MeasureBits { result: right },
+        ) => classical_value_equal(*left, *right),
         _ => false,
     }
 }
 
-fn classical_control_equal(lhs: &ClassicalControlOp, rhs: &ClassicalControlOp) -> bool {
-    match (lhs, rhs) {
-        (ClassicalControlOp::If(lhs), ClassicalControlOp::If(rhs)) => {
-            lhs.condition() == rhs.condition()
-                && bodies_equal(lhs.then_body(), rhs.then_body())
-                && match (lhs.else_body(), rhs.else_body()) {
-                    (Some(lhs), Some(rhs)) => bodies_equal(lhs, rhs),
+fn operation_instruction_equal(
+    left: &Instruction,
+    right: &Instruction,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    match (left, right) {
+        (Instruction::ClassicalData(left), Instruction::ClassicalData(right)) => {
+            classical_data_equal(left, right)
+        }
+        (Instruction::ClassicalControl(left), Instruction::ClassicalControl(right)) => {
+            classical_control_equal(left, right, left_parameters, right_parameters)
+        }
+        _ => left == right,
+    }
+}
+
+fn control_body_equal(
+    left: &ControlBody,
+    right: &ControlBody,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    operations_structurally_equal(
+        left.operations(),
+        right.operations(),
+        left_parameters,
+        right_parameters,
+    )
+}
+
+fn classical_control_equal(
+    left: &ClassicalControlOp,
+    right: &ClassicalControlOp,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    match (left, right) {
+        (ClassicalControlOp::If(left), ClassicalControlOp::If(right)) => {
+            classical_expr_equal(left.condition(), right.condition())
+                && control_body_equal(
+                    left.then_body(),
+                    right.then_body(),
+                    left_parameters,
+                    right_parameters,
+                )
+                && match (left.else_body(), right.else_body()) {
+                    (Some(left), Some(right)) => {
+                        control_body_equal(left, right, left_parameters, right_parameters)
+                    }
                     (None, None) => true,
                     _ => false,
                 }
         }
-        (ClassicalControlOp::While(lhs), ClassicalControlOp::While(rhs)) => {
-            lhs.condition() == rhs.condition() && bodies_equal(lhs.body(), rhs.body())
+        (ClassicalControlOp::While(left), ClassicalControlOp::While(right)) => {
+            classical_expr_equal(left.condition(), right.condition())
+                && control_body_equal(left.body(), right.body(), left_parameters, right_parameters)
         }
-        (ClassicalControlOp::For(lhs), ClassicalControlOp::For(rhs)) => {
-            lhs.var() == rhs.var()
-                && lhs.start() == rhs.start()
-                && lhs.stop() == rhs.stop()
-                && lhs.step() == rhs.step()
-                && bodies_equal(lhs.body(), rhs.body())
+        (ClassicalControlOp::For(left), ClassicalControlOp::For(right)) => {
+            classical_var_equal(left.var(), right.var())
+                && classical_expr_equal(left.start(), right.start())
+                && classical_expr_equal(left.stop(), right.stop())
+                && classical_expr_equal(left.step(), right.step())
+                && control_body_equal(left.body(), right.body(), left_parameters, right_parameters)
         }
-        (ClassicalControlOp::Switch(lhs), ClassicalControlOp::Switch(rhs)) => {
-            lhs.target() == rhs.target()
-                && lhs.cases().len() == rhs.cases().len()
-                && lhs.cases().iter().zip(rhs.cases()).all(|(lhs, rhs)| {
-                    lhs.value() == rhs.value() && bodies_equal(lhs.body(), rhs.body())
+        (ClassicalControlOp::Switch(left), ClassicalControlOp::Switch(right)) => {
+            classical_expr_equal(left.target(), right.target())
+                && left.cases().len() == right.cases().len()
+                && left.cases().iter().zip(right.cases()).all(|(left, right)| {
+                    left.value() == right.value()
+                        && control_body_equal(
+                            left.body(),
+                            right.body(),
+                            left_parameters,
+                            right_parameters,
+                        )
                 })
-                && match (lhs.default(), rhs.default()) {
-                    (Some(lhs), Some(rhs)) => bodies_equal(lhs, rhs),
+                && match (left.default(), right.default()) {
+                    (Some(left), Some(right)) => {
+                        control_body_equal(left, right, left_parameters, right_parameters)
+                    }
                     (None, None) => true,
                     _ => false,
                 }
@@ -352,21 +513,26 @@ fn classical_control_equal(lhs: &ClassicalControlOp, rhs: &ClassicalControlOp) -
     }
 }
 
-fn bodies_equal(lhs: &ControlBody, rhs: &ControlBody) -> bool {
-    lhs.operations().len() == rhs.operations().len()
-        && lhs
-            .operations()
-            .iter()
-            .zip(rhs.operations())
-            .all(|(lhs, rhs)| operations_equal(lhs, rhs))
-}
-
-fn circuit_params_equal(lhs: &[CircuitParam], rhs: &[CircuitParam]) -> bool {
-    lhs.len() == rhs.len()
-        && lhs.iter().zip(rhs).all(|(lhs, rhs)| match (lhs, rhs) {
-            (CircuitParam::Fixed(lhs), CircuitParam::Fixed(rhs)) => lhs == rhs,
-            (CircuitParam::Index(lhs), CircuitParam::Index(rhs)) => lhs == rhs,
-            _ => false,
+fn operations_structurally_equal(
+    left: &[Operation],
+    right: &[Operation],
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.qubits == right.qubits
+                && left.label == right.label
+                && left.params.len() == right.params.len()
+                && left.params.iter().zip(&right.params).all(|(left, right)| {
+                    circuit_params_equal(left, right, left_parameters, right_parameters)
+                })
+                && operation_instruction_equal(
+                    &left.instruction,
+                    &right.instruction,
+                    left_parameters,
+                    right_parameters,
+                )
         })
 }
 
@@ -467,7 +633,7 @@ impl Circuit {
         circuit.classical_vars = classical_vars.unwrap_or_default();
         circuit.classical_values = classical_values.unwrap_or_default();
         for operation in operations {
-            circuit.append_value_operation(operation)?;
+            circuit.append_value_operation_deferred_validation(operation)?;
         }
         circuit.validate_operation_parameters(circuit.operations())?;
         circuit.validate()?;
@@ -483,12 +649,28 @@ impl Circuit {
         &mut self,
         operation: ValueOperation,
     ) -> Result<(), CircuitError> {
+        self.append_value_operation_with_validation(operation, true)
+    }
+
+    fn append_value_operation_deferred_validation(
+        &mut self,
+        operation: ValueOperation,
+    ) -> Result<(), CircuitError> {
+        self.append_value_operation_with_validation(operation, false)
+    }
+
+    fn append_value_operation_with_validation(
+        &mut self,
+        operation: ValueOperation,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError> {
         let instruction = self.lower_instruction(operation.instruction)?;
-        self.append(
+        self.append_with_validation(
             instruction,
             operation.qubits,
             operation.params,
             operation.label.as_deref(),
+            validate_builder_state,
         )
     }
 
@@ -1066,11 +1248,28 @@ impl Circuit {
         Q::Item: Into<Qubit>,
         P: IntoIterator<Item = ParameterValue>,
     {
-        let validate_classical = matches!(
-            instruction,
-            Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
-        );
-        let checkpoint = validate_classical.then(|| self.checkpoint());
+        self.append_with_validation(instruction, qubits, params, label, true)
+    }
+
+    fn append_with_validation<Q, P>(
+        &mut self,
+        instruction: Instruction,
+        qubits: Q,
+        params: P,
+        label: Option<&str>,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError>
+    where
+        Q: IntoIterator,
+        Q::Item: Into<Qubit>,
+        P: IntoIterator<Item = ParameterValue>,
+    {
+        let validate_classical_now = validate_builder_state
+            && matches!(
+                instruction,
+                Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
+            );
+        let checkpoint = validate_classical_now.then(|| self.checkpoint());
 
         if let Instruction::ClassicalControl(op) = &instruction {
             self.validate_control_op(op)?;
@@ -1138,7 +1337,7 @@ impl Circuit {
             label: label.map(Into::into),
         });
 
-        if validate_classical && let Err(error) = self.validate_builder_state() {
+        if validate_classical_now && let Err(error) = self.validate_builder_state() {
             self.rollback_to(checkpoint.expect("classical append must define a checkpoint"));
             return Err(error);
         }
@@ -2189,28 +2388,8 @@ impl Circuit {
         }
     }
 
-    fn apply_param_map(mut param: Parameter, map: &HashMap<String, Parameter>) -> Parameter {
-        if map.is_empty() {
-            return param;
-        }
-
-        // Simultaneous substitution strategy using temporary placeholders
-        // 1. Replace all target symbols with unique temp symbols
-        let mut temp_map = HashMap::new();
-        for (key, val) in map {
-            // Use a specific internal prefix to avoid collisions during the two-step replacement.
-            // This acts as a simultaneous substitution.
-            let temp_key = format!("__INTERNAL_SUB_{}", key);
-            param = param.replace(key, Parameter::try_from(temp_key.as_str()).unwrap());
-            temp_map.insert(temp_key, val);
-        }
-
-        // 2. Replace temp symbols with actual values
-        for (temp_key, val) in temp_map {
-            param = param.replace(&temp_key, val.clone());
-        }
-
-        param
+    fn apply_param_map(param: Parameter, map: &HashMap<String, Parameter>) -> Parameter {
+        param.substitute_many_simultaneous(map)
     }
 
     /// Computes the dense unitary matrix represented by this circuit.
@@ -2335,25 +2514,28 @@ impl Circuit {
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
     ) -> Result<Operation, CircuitError> {
-        let mut new_op = op.clone();
-
-        for q in &mut new_op.qubits {
-            *q = qubit_mapping
-                .get(q)
-                .copied()
-                .ok_or(CircuitError::QubitNotFound(q.id()))?;
-        }
-
-        for p in &mut new_op.params {
-            if let CircuitParam::Index(old_idx) = p {
-                *p = param_index_map
+        let qubits = op
+            .qubits
+            .iter()
+            .map(|q| {
+                qubit_mapping
+                    .get(q)
+                    .copied()
+                    .ok_or(CircuitError::QubitNotFound(q.id()))
+            })
+            .collect::<Result<_, _>>()?;
+        let params = op
+            .params
+            .iter()
+            .map(|param| match param {
+                CircuitParam::Index(old_idx) => param_index_map
                     .get(*old_idx as usize)
                     .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(*old_idx))?;
-            }
-        }
-
-        new_op.instruction = match &op.instruction {
+                    .ok_or(CircuitError::InvalidParameterIndex(*old_idx)),
+                CircuitParam::Fixed(value) => Ok(CircuitParam::Fixed(*value)),
+            })
+            .collect::<Result<_, _>>()?;
+        let instruction = match &op.instruction {
             Instruction::ClassicalData(classical_op) => Instruction::ClassicalData(
                 Self::remap_classical_data_op(classical_op, var_map, value_map)?,
             ),
@@ -2369,7 +2551,12 @@ impl Circuit {
             _ => op.instruction.clone(),
         };
 
-        Ok(new_op)
+        Ok(Operation {
+            instruction,
+            qubits,
+            params,
+            label: op.label.clone(),
+        })
     }
 
     fn remap_classical_data_op(

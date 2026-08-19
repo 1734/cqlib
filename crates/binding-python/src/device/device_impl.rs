@@ -44,8 +44,8 @@
 //! device.add_qubit_properties(0, prop)
 //! ```
 
-use crate::circuit::{PyCircuit, PyInstruction, PyQubit, PyValueOperation};
-use crate::device::qubit::{PyPhysicalQubitLike, PyPhysicalQubitList};
+use crate::circuit::{PyCircuit, PyInstruction, PyValueOperation};
+use crate::device::qubit::{PyPhysicalQubit, PyPhysicalQubitLike, PyPhysicalQubitList};
 use crate::device::topology::PyTopology;
 use crate::device::{validate_nonnegative, validate_positive, validate_probability};
 use chrono::{DateTime, TimeZone, Utc};
@@ -493,11 +493,16 @@ impl PyDevice {
     /// Returns the calibration timestamp with nanosecond precision.
     #[getter]
     fn calibration_time(&self) -> Option<DateTime<Utc>> {
-        self.inner.calibration_time().and_then(|t| {
+        self.inner.calibration_time().map(|t| {
+            // Pre-epoch timestamps have negative total nanos; truncating
+            // division would yield a negative remainder, which is an invalid
+            // nanos value.
             let nanos = t.unix_timestamp_nanos();
-            let secs = (nanos / 1_000_000_000) as i64;
-            let nsecs = (nanos % 1_000_000_000) as u32;
-            Utc.timestamp_opt(secs, nsecs).single()
+            let secs = nanos.div_euclid(1_000_000_000) as i64;
+            let nsecs = nanos.rem_euclid(1_000_000_000) as u32;
+            Utc.timestamp_opt(secs, nsecs)
+                .single()
+                .expect("calibration time within chrono representable range")
         })
     }
 
@@ -528,19 +533,13 @@ impl PyDevice {
     }
 
     #[getter]
-    fn qubits(&self) -> Vec<PyQubit> {
-        self.inner
-            .qubits()
-            .map(|pq| PyQubit { inner: pq.qubit() })
-            .collect()
+    fn qubits(&self) -> Vec<PyPhysicalQubit> {
+        self.inner.qubits().map(Into::into).collect()
     }
 
     #[getter]
-    fn invalid_qubits(&self) -> Vec<PyQubit> {
-        self.inner
-            .invalid_qubits()
-            .map(|pq| PyQubit { inner: pq.qubit() })
-            .collect()
+    fn invalid_qubits(&self) -> Vec<PyPhysicalQubit> {
+        self.inner.invalid_qubits().map(Into::into).collect()
     }
 
     #[setter]
@@ -875,13 +874,10 @@ impl PyDevice {
     ///
     /// # Returns
     ///
-    /// A list of `Qubit` objects representing usable qubits.
+    /// A list of `PhysicalQubit` objects representing usable qubits.
     #[getter]
-    pub fn usable_qubits(&self) -> Vec<PyQubit> {
-        self.inner
-            .usable_qubits()
-            .map(|pq| PyQubit { inner: pq.qubit() })
-            .collect()
+    pub fn usable_qubits(&self) -> Vec<PyPhysicalQubit> {
+        self.inner.usable_qubits().map(Into::into).collect()
     }
 
     /// Returns the number of usable (registered and not invalid) physical

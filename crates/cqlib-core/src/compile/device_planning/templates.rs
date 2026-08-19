@@ -30,7 +30,7 @@ impl DirectionTemplate {
         match self {
             Self::Cx => "direction_reverse_CX".to_string(),
             Self::Rzx => "direction_reverse_RZX".to_string(),
-            Self::Symmetric(gate) => format!("direction_reverse_{gate:?}"),
+            Self::Symmetric(gate) => format!("direction_reverse_{}", gate.name()),
         }
     }
 

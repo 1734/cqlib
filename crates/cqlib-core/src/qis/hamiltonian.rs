@@ -67,11 +67,7 @@ impl Hamiltonian {
     /// # Arguments
     /// * `pauli` - The Pauli string to wrap into a Hamiltonian.
     pub fn from_pauli(pauli: PauliString) -> Self {
-        let n = pauli.num_qubits;
-        Self {
-            num_qubits: n,
-            terms: vec![(pauli, Complex64::new(1.0, 0.0))],
-        }
+        pauli.into()
     }
 
     /// Returns the dense complex matrix represented by this Hamiltonian.
@@ -117,6 +113,24 @@ impl Hamiltonian {
     pub fn from_list(
         ops: Vec<(PauliString, Complex64)>,
     ) -> Result<Self, crate::qis::error::QisError> {
+        Self::try_from(ops)
+    }
+}
+
+impl From<PauliString> for Hamiltonian {
+    fn from(pauli: PauliString) -> Self {
+        let num_qubits = pauli.num_qubits;
+        Self {
+            num_qubits,
+            terms: vec![(pauli, Complex64::new(1.0, 0.0))],
+        }
+    }
+}
+
+impl TryFrom<Vec<(PauliString, Complex64)>> for Hamiltonian {
+    type Error = QisError;
+
+    fn try_from(ops: Vec<(PauliString, Complex64)>) -> Result<Self, Self::Error> {
         if ops.is_empty() {
             // Handle the empty case by returning a 0-qubit empty Hamiltonian.
             // Depending on design, this could also panic, but allowing an empty
@@ -138,7 +152,9 @@ impl Hamiltonian {
             terms: ops,
         })
     }
+}
 
+impl Hamiltonian {
     /// Adds a new Pauli string term with a given coefficient to the Hamiltonian.
     ///
     /// # Arguments

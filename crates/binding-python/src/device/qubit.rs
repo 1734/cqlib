@@ -32,11 +32,10 @@
 //! ```
 
 use crate::circuit::PyQubit;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Qubit;
 use cqlib_core::device::{LogicalQubit, PhysicalQubit};
 use pyo3::{Borrowed, Bound, FromPyObject, PyAny, PyErr, pyclass, pymethods};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Python wrapper for [`LogicalQubit`].
 ///
@@ -171,6 +170,13 @@ impl PyLogicalQubit {
         self.inner.id()
     }
 
+    /// Returns the qubit identifier as an index (for parity with
+    /// `Qubit.index`).
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.id() as usize
+    }
+
     fn __copy__(&self) -> Self {
         *self
     }
@@ -185,10 +191,32 @@ impl PyLogicalQubit {
             .is_ok_and(|other| self.inner == other.borrow().inner)
     }
 
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner < other.borrow().inner)
+    }
+
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner <= other.borrow().inner)
+    }
+
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner > other.borrow().inner)
+    }
+
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner >= other.borrow().inner)
+    }
+
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     /// Returns a string representation for debugging.
@@ -355,6 +383,13 @@ impl PyPhysicalQubit {
         self.inner.id()
     }
 
+    /// Returns the hardware-qubit identifier as an index (for parity
+    /// with `Qubit.index`).
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.id() as usize
+    }
+
     fn __copy__(&self) -> Self {
         *self
     }
@@ -369,10 +404,32 @@ impl PyPhysicalQubit {
             .is_ok_and(|other| self.inner == other.borrow().inner)
     }
 
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner < other.borrow().inner)
+    }
+
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner <= other.borrow().inner)
+    }
+
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner > other.borrow().inner)
+    }
+
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner >= other.borrow().inner)
+    }
+
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     /// Returns a string representation for debugging.

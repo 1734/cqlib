@@ -52,14 +52,13 @@ use crate::circuit::PyStandardGate;
 use crate::device::qubit::PyPhysicalQubitLike;
 use crate::device::validate_probability;
 use crate::qis::pauli::PyPauli;
+use crate::utils::hash_value;
 use cqlib_core::circuit::{Parameter, Qubit};
 use cqlib_core::device::{NoiseModel, OperationKey, ReadoutError, SingleQubitNoise, TwoQubitNoise};
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Single-qubit quantum noise channel.
 ///
@@ -271,6 +270,14 @@ impl PySingleQubitNoise {
             }
         }
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PySingleQubitNoise>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PySingleQubitNoise>()?;
+        Ok(self.inner == other.inner)
+    }
 }
 
 /// Two-qubit quantum noise channel.
@@ -423,6 +430,14 @@ impl PyTwoQubitNoise {
             ),
         }
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyTwoQubitNoise>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyTwoQubitNoise>()?;
+        Ok(self.inner == other.inner)
+    }
 }
 
 /// Asymmetric readout error model.
@@ -524,6 +539,14 @@ impl PyReadoutError {
             self.p_0_given_1(),
             self.p_1_given_0()
         )
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyReadoutError>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyReadoutError>()?;
+        Ok(self.inner == other.inner)
     }
 }
 
@@ -668,9 +691,7 @@ impl PyOperationKey {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {

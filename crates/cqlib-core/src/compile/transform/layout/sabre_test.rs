@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::sabre::dense_interaction_path_skips_refinement;
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::sabre::{SabreConfig, sabre_route};
@@ -39,6 +40,68 @@ fn disconnected_device(name: &str, component_ids: &[&[u32]]) -> Device {
         .collect::<Vec<_>>();
     let topology = Topology::new(qubits.clone(), edges).unwrap();
     Device::new(name, qubits.into_iter().collect(), topology).unwrap()
+}
+
+#[test]
+fn dense_interaction_refinement_skip_requires_a_path_topology() {
+    let mut complete = Circuit::new(4);
+    for left in 0..4 {
+        for right in (left + 1)..4 {
+            complete.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+        }
+    }
+    let complete = analyze_circuit_for_layout(&complete).unwrap();
+    let line = PhysicalLayoutGraph::from_device(&Device::line("line", 4).unwrap()).unwrap();
+    let grid = PhysicalLayoutGraph::from_device(&Device::grid("grid", 2, 2).unwrap()).unwrap();
+
+    let disconnected_qubits = (0..6).map(PhysicalQubit::new).collect::<Vec<_>>();
+    let disconnected_edges = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5)]
+        .into_iter()
+        .map(|(left, right)| {
+            (
+                PhysicalQubit::new(left),
+                PhysicalQubit::new(right),
+                "cx".to_string(),
+            )
+        })
+        .collect();
+    let disconnected_topology =
+        Topology::new(disconnected_qubits.clone(), disconnected_edges).unwrap();
+    let disconnected = PhysicalLayoutGraph::from_device(
+        &Device::new(
+            "cycle-plus-path",
+            disconnected_qubits.into_iter().collect(),
+            disconnected_topology,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert!(dense_interaction_path_skips_refinement(&complete, &line));
+    assert!(!dense_interaction_path_skips_refinement(&complete, &grid));
+    assert!(!dense_interaction_path_skips_refinement(
+        &complete,
+        &disconnected
+    ));
+
+    let mut nonuniform = Circuit::new(4);
+    for left in 0..4 {
+        for right in (left + 1)..4 {
+            nonuniform.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+        }
+    }
+    for _ in 0..4 {
+        nonuniform.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    }
+    let nonuniform = analyze_circuit_for_layout(&nonuniform).unwrap();
+    assert!(!dense_interaction_path_skips_refinement(&nonuniform, &line));
+
+    let mut sparse = Circuit::new(4);
+    sparse.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    sparse.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    sparse.cx(Qubit::new(2), Qubit::new(3)).unwrap();
+    let sparse = analyze_circuit_for_layout(&sparse).unwrap();
+    assert!(!dense_interaction_path_skips_refinement(&sparse, &line));
 }
 
 #[test]
@@ -382,6 +445,25 @@ fn disconnected_target_control_flow_routing_restores_body_layout() {
 }
 
 #[test]
+fn layout_and_route_entry_points_select_the_same_seeded_initial_layout() {
+    let device = Device::line("fused-entry-parity", 4).unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    let objective = LayoutObjective::topology_only();
+    let config = SabreConfig::deterministic_seeded(41);
+
+    let layout = sabre_layout(&circuit, &device, &objective, &config).unwrap();
+    let routed = route_sabre(&circuit, &device, &objective, &config).unwrap();
+
+    assert_eq!(layout.layout, *routed.initial_layout());
+    assert_eq!(
+        routed.diagnostics().trials_evaluated,
+        routed.layout_diagnostics().candidates_evaluated * config.routing_trials
+    );
+}
+
+#[test]
 fn sabre_layout_returns_perfect_layout_when_candidate_can_match_interactions() {
     let device = Device::line("line", 3).unwrap();
     let objective = LayoutObjective::topology_only();
@@ -438,18 +520,18 @@ fn sabre_layout_distinguishes_assignment_budget_exhaustion() {
 }
 
 #[test]
-fn sabre_layout_rejects_zero_layout_scoring_trials() {
+fn sabre_layout_rejects_zero_routing_trials() {
     let device = Device::line("line", 2).unwrap();
     let objective = LayoutObjective::topology_only();
     let mut config = SabreConfig::deterministic_seeded(7);
-    config.layout_scoring_trials = 0;
+    config.routing_trials = 0;
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
     let error = sabre_layout(&circuit, &device, &objective, &config).unwrap_err();
 
     assert!(
-        matches!(error, CompilerError::InvalidInput(message) if message.contains("layout_scoring_trials"))
+        matches!(error, CompilerError::InvalidInput(message) if message.contains("routing_trials"))
     );
 }
 

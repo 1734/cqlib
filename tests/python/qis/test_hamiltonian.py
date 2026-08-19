@@ -12,7 +12,8 @@
 
 import pytest
 import math
-from cqlib.qis import Hamiltonian, PauliString, TrotterMode
+import numpy as np
+from cqlib.qis import Hamiltonian, PauliString, Phase, TrotterMode
 
 
 def test_hamiltonian_initialization():
@@ -677,3 +678,46 @@ class TestHamiltonianAdvancedFeatures:
         h1.simplify()
         h2.simplify()
         assert h1 == h2
+
+
+def test_hamiltonian_to_matrix_empty_is_zero():
+    """Test an empty Hamiltonian evaluates to the zero matrix."""
+    matrix = Hamiltonian(2).to_matrix()
+    assert matrix.shape == (4, 4)
+    assert matrix.dtype == np.complex128
+    np.testing.assert_array_equal(matrix, np.zeros((4, 4), dtype=complex))
+
+
+def test_hamiltonian_to_matrix_sums_coefficients_and_pauli_phases():
+    """Test coefficients and Pauli phases are both applied: -2X + iZ."""
+    x = PauliString.from_str("X")
+    x.phase = Phase.minus()
+    z = PauliString.from_str("Z")
+    h = Hamiltonian.from_list([(x, 2.0), (z, 1j)])
+    expected = np.array([[1j, -2], [-2, -1j]], dtype=complex)
+    np.testing.assert_array_equal(h.to_matrix(), expected)
+
+
+def test_hamiltonian_to_matrix_zero_qubits_is_scalar():
+    """Test a zero-qubit Hamiltonian yields a 1x1 matrix."""
+    pauli = PauliString(0)
+    pauli.phase = Phase.i()
+    h = Hamiltonian.from_list([(pauli, 2.0)])
+    matrix = h.to_matrix()
+    assert matrix.shape == (1, 1)
+    np.testing.assert_array_equal(matrix, np.array([[2j]], dtype=complex))
+
+
+def test_hamiltonian_from_list_rejects_mixed_qubit_counts():
+    """Test the qubit-mismatch invariant is enforced at construction.
+
+    to_matrix's own mismatch error path is therefore unreachable through the
+    public Python API.
+    """
+    with pytest.raises(ValueError):
+        Hamiltonian.from_list(
+            [
+                (PauliString.from_str("Z"), 1.0),
+                (PauliString.from_str("ZZ"), 1.0),
+            ]
+        )

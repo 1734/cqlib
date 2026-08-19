@@ -13,9 +13,11 @@
 
 //! Compatibility boundary for native-plan costs used by SABRE routing.
 
+#[cfg(test)]
 pub(crate) use crate::compile::device_planning::cost::{
-    CalibrationEstimator, MetricAvailability, NativePlanCost, RobustDurationKey, RobustErrorKey,
+    CalibrationEstimator, RobustDurationKey, RobustErrorKey,
 };
+pub(crate) use crate::compile::device_planning::cost::{MetricAvailability, NativePlanCost};
 
 #[cfg(test)]
 use crate::compile::device_planning::cost::{negative_log_success, quantiles};

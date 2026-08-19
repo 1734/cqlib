@@ -32,7 +32,7 @@ pub(crate) use planner::{DevicePlanner, DevicePlannerError, PlanChoice, PlanId, 
 pub(crate) use templates::DirectionTemplate;
 
 /// A parameter-independent gate state on exact ordered physical qargs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct DeviceGateState {
     pub(crate) instruction: KnowledgeInstructionKey,
     pub(crate) ordered_qargs: SmallVec<[PhysicalQubit; 2]>,
@@ -81,6 +81,40 @@ mod tests {
     }
 
     #[test]
+    fn catalog_results_are_independent_of_root_input_order() {
+        let device = Device::line("native-plan-root-order", 2)
+            .unwrap()
+            .with_native_gates(vec![
+                Instruction::Standard(StandardGate::H),
+                Instruction::Standard(StandardGate::CX),
+            ])
+            .unwrap();
+        let swap = DeviceGateState::standard(
+            StandardGate::SWAP,
+            smallvec![PhysicalQubit::new(0), PhysicalQubit::new(1)],
+        );
+        let h = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
+
+        let forward = NativePlanCatalog::build(&device, [swap.clone(), h.clone()]).unwrap();
+        let reverse = NativePlanCatalog::build(&device, [h.clone(), swap.clone()]).unwrap();
+        for root in [&swap, &h] {
+            let project = |catalog: &NativePlanCatalog| {
+                let summary = catalog.summary(root).expect("root should be lowerable");
+                (
+                    summary.native_two_qubit_ops,
+                    summary.native_total_ops,
+                    summary
+                        .leaves
+                        .iter()
+                        .map(|leaf| (leaf.instruction.clone(), leaf.ordered_qargs.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            assert_eq!(project(&forward), project(&reverse));
+        }
+    }
+
+    #[test]
     fn catalog_distinguishes_unsupported_from_unprepared_roots() {
         let device = Device::line("native-plan-availability", 2).unwrap();
         let unsupported = DeviceGateState::standard(
@@ -122,10 +156,6 @@ impl DeviceGateState {
             ordered_qargs,
         })
     }
-
-    pub(crate) fn stable_sort_key(&self) -> String {
-        format!("{:?}:{:?}", self.instruction, self.ordered_qargs)
-    }
 }
 
 /// Result of planning one requested exact-device root.
@@ -155,7 +185,7 @@ impl NativePlanCatalog {
         let library = RuleLibrary::builtin_rules()
             .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
         let mut roots = roots.into_iter().collect::<Vec<_>>();
-        roots.sort_by_key(DeviceGateState::stable_sort_key);
+        roots.sort();
         roots.dedup();
         let planner = DevicePlanner::build(device, library, roots.iter().cloned())
             .map_err(DevicePlannerError::into_compiler_error)?;

@@ -44,7 +44,9 @@ fn sabre_routing_auto_layout_routes_non_embeddable_interactions() {
 fn sabre_routing_keeps_adjacent_two_qubit_circuit_without_swap() {
     let device = Device::line("line", 2).unwrap();
     let objective = LayoutObjective::topology_only();
-    let config = SabreConfig::deterministic_seeded(7);
+    let mut config = SabreConfig::deterministic_seeded(7);
+    config.layout_trials = 8;
+    config.routing_trials = 4;
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
@@ -52,7 +54,8 @@ fn sabre_routing_keeps_adjacent_two_qubit_circuit_without_swap() {
 
     assert!(!result.changed(&circuit));
     assert_eq!(result.swap_count(), 0);
-    assert_eq!(result.diagnostics().trials_evaluated, config.routing_trials);
+    assert_eq!(result.diagnostics().trials_evaluated, 1);
+    assert_eq!(result.layout_diagnostics().candidates_evaluated, 1);
     assert_eq!(result.circuit().operations().len(), 1);
 }
 

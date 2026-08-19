@@ -23,7 +23,6 @@ use crate::compile::transform::transformer::{TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 
 use super::config::CanonicalizeConfig;
-use super::equivalence::circuits_equivalent_for_canonicalize;
 use super::ops::{canonicalize_operation_qubits, is_strict_noop, push_operation};
 use super::verify::{VerifyMode, verify_circuit};
 
@@ -109,10 +108,10 @@ impl Canonicalizer {
                 },
             )?;
 
-            if circuits_equivalent_for_canonicalize(&current, &next) {
+            if current == next {
                 return Ok(CanonicalizeResult {
                     circuit: next,
-                    changed: !circuits_equivalent_for_canonicalize(circuit, &current),
+                    changed: circuit != &current,
                     rounds: round,
                 });
             }

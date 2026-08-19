@@ -78,7 +78,7 @@ pub enum TrotterMode {
     /// Error scales as $O(t^2/n)$.
     FirstOrder,
 
-    /// Second-order Strange splitting (symmetric decomposition).
+    /// Second-order Strang splitting (symmetric decomposition).
     ///
     /// $$U(t) \approx \left[ e^{-i c_1 t/2n \cdot P_1} \cdots e^{-i c_m t/2n \cdot P_m}
     /// \cdot e^{-i c_m t/2n \cdot P_m} \cdots e^{-i c_1 t/2n \cdot P_1} \right]^n$$
@@ -388,7 +388,7 @@ pub(crate) fn trotter_first_order_core(
     Ok(())
 }
 
-/// Applies second-order Suzuki (Strange) splitting decomposition.
+/// Applies second-order Suzuki (Strang) splitting decomposition.
 ///
 /// Realizes:
 /// $$U(t) \approx \left[\prod_k e^{-i c_k t/(2n) P_k}

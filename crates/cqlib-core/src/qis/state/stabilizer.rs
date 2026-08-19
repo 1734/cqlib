@@ -1341,7 +1341,7 @@ impl StabilizerState {
     /// or execute the circuit IR. The [`Measurement`] already carries the qubits
     /// and their result bit order:
     /// - `measurement.qubits()[i]` becomes bit `i` in each [`Outcome`].
-    /// - [`Outcome::to_string`] displays the most-significant result bit first,
+    /// - [`Outcome::to_bitstring`] displays the most-significant result bit first,
     ///   so string order is the reverse of `measurement.qubits()`.
     ///
     /// # Example
@@ -1362,7 +1362,8 @@ impl StabilizerState {
     /// assert!(result
     ///     .counts()
     ///     .keys()
-    ///     .all(|bits| bits.to_string(out.width()) == "00" || bits.to_string(out.width()) == "11"));
+    ///     .all(|bits| bits.to_bitstring(out.width()) == "00"
+    ///         || bits.to_bitstring(out.width()) == "11"));
     /// ```
     pub fn sample(
         &self,
@@ -1840,8 +1841,7 @@ impl StabilizerState {
         // Build the query symplectic vector from the PauliString.
         let mut qx = vec![0u64; n_words];
         let mut qz = vec![0u64; n_words];
-        for q in 0..n {
-            let p = pauli.get_pauli(q);
+        for (q, p) in pauli.iter().enumerate() {
             match p {
                 Pauli::X | Pauli::Y => qx[q / 64] |= 1u64 << (q % 64),
                 _ => {}

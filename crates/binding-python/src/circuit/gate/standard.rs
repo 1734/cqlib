@@ -19,17 +19,16 @@
 use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
 use crate::circuit::gate::PyMcGate;
 use crate::circuit::parameter::PyParameter;
+use crate::utils::hash_value;
 use cqlib_core::circuit::CircuitError as CoreCircuitError;
 use cqlib_core::circuit::Parameter;
 use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::{MCGate, StandardGate};
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::RwLock;
 
 /// Native standard gate with optional bound symbolic parameters.
@@ -74,6 +73,30 @@ impl PyStandardGate {
             .copied()
             .map(|gate| PyStandardGate::from(gate, Vec::new()))
             .collect()
+    }
+
+    /// Resolves a standard-gate name to its unbound definition.
+    ///
+    /// Matching is case-insensitive against the canonical gate names, so
+    /// `StandardGate.from_name('cx')` returns `StandardGate.CX`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Canonical gate name (e.g. `'H'`, `'X2P'`, `'Phase'`).
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - If `name` does not match any standard gate.
+    #[staticmethod]
+    fn from_name(name: &str) -> PyResult<Self> {
+        standard_gate_from_name(name).map_or_else(
+            || {
+                Err(PyValueError::new_err(format!(
+                    "unknown standard gate name: {name:?}"
+                )))
+            },
+            |gate| Ok(Self::from(gate, Vec::new())),
+        )
     }
 
     /// Binds parameters to the gate.
@@ -147,10 +170,14 @@ impl PyStandardGate {
 
     fn __repr__(&self) -> String {
         if self.params.is_empty() {
-            format!("{:?}", self.inner)
+            format!("StandardGate.{}", self.inner.name())
         } else {
             let params_str: Vec<String> = self.params.iter().map(|p| p.to_string()).collect();
-            format!("{:?}({})", self.inner, params_str.join(", "))
+            format!(
+                "StandardGate.{}({})",
+                self.inner.name(),
+                params_str.join(", ")
+            )
         }
     }
 
@@ -175,10 +202,7 @@ impl PyStandardGate {
         if let Some(hash) = *guard {
             return hash;
         }
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        self.params.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = hash_value(&(&self.inner, &self.params));
 
         *guard = Some(hash);
         hash
@@ -418,6 +442,19 @@ impl PyStandardGate {
             hash: RwLock::new(None),
         }
     }
+}
+
+/// Resolves a case-insensitive standard-gate name to its gate definition.
+///
+/// Canonical names come from [`StandardGate::name`] (e.g. `"H"`, `"Phase"`),
+/// so `"h"` and `"PHASE"` resolve identically. This is the single shared
+/// lookup used by `StandardGate.from_name` and every Python API that accepts
+/// basis entries as strings.
+pub(crate) fn standard_gate_from_name(name: &str) -> Option<StandardGate> {
+    StandardGate::all()
+        .iter()
+        .copied()
+        .find(|gate| gate.name().eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]

@@ -10,25 +10,28 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::cost::{CalibrationEstimator, NativePlanCost, RobustDurationKey, RobustErrorKey};
+use super::cost::NativePlanCost;
 use super::dag::{SabreControlFlow, SabreDag, SabreNode, SabreNodeKind};
-use super::heuristic::{SabreConfig, SabreHeuristicConfig, SabreTrialObjective};
+use super::dense_layout::DenseRoutingLayout;
+use super::heuristic::{SabreConfig, SabreHeuristicConfig};
 use super::layer::{Layer, RequirementPlacement};
 use crate::circuit::value_instruction::storage_operation_to_value;
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ControlBody, ForOp, IfOp, Instruction, Operation,
     Parameter, Qubit, StandardGate, SwitchCase, SwitchOp, WhileOp,
 };
-use crate::compile::device_planning::{DeviceGateState, NativePlanAvailability, NativePlanCatalog};
+use crate::compile::device_planning::{
+    DeviceGateState, NativePlanAvailability, NativePlanCatalog, NativePlanSummary,
+};
 use crate::compile::error::DeviceLoweringFailure;
 use crate::compile::knowledge::KnowledgeInstructionKey;
 use crate::compile::physical_target::PhysicalLayoutGraph;
-use crate::compile::{CompilerError, SabreRoutingFailure};
+use crate::compile::{CompilerError, SabreRoutingFailure, compare_some_first_by};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use indexmap::IndexSet;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
-use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use rustworkx_core::petgraph::Direction;
 use rustworkx_core::petgraph::graph::{NodeIndex, UnGraph};
@@ -36,14 +39,16 @@ use rustworkx_core::petgraph::visit::EdgeRef;
 use rustworkx_core::token_swapper::token_swapper;
 use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
 const CONTROL_FLOW_EPILOGUE_TRIALS: usize = 4;
 const EAGER_PAIR_STATE_BUDGET: usize = 1_000_000;
 const LAZY_PAIR_CACHE_BUDGET: usize = 100_000;
 const TRIAL_PAIR_CACHE_BUDGET: usize = 4_096;
+const HIGH_PAIR_REUSE_FACTOR: usize = 16;
+const WIDE_FRONT_FRACTION: usize = 8;
 
 /// Routed circuit and layout metadata produced by [`sabre_route`].
 #[derive(Debug, Clone)]
@@ -79,22 +84,10 @@ pub struct SabreRoutingDiagnostics {
     pub native_two_qubit_count: usize,
     /// ASAP two-qubit depth using the selected exact-qargs native plans.
     pub native_two_qubit_depth: usize,
+    /// ASAP total depth using the selected exact-qargs native plans.
+    pub native_total_depth: usize,
     /// Predicted total native operation count after device lowering.
     pub native_operation_count: usize,
-    /// Independent-gate negative log-success proxy, when calibration exists.
-    pub predicted_log_error: Option<f64>,
-    /// Native leaves whose error calibration could not be estimated.
-    pub unavailable_error_count: u32,
-    /// Native leaves using conservative error imputation.
-    pub imputed_error_count: u32,
-    /// Sum of native gate durations, when duration calibration exists.
-    ///
-    /// This is workload, not an ASAP-scheduled circuit makespan.
-    pub duration_work: Option<f64>,
-    /// Native-leaf ASAP makespan using exact-qargs selected lowering plans.
-    /// `None` means duration calibration is disabled/incomplete or a dynamic
-    /// non-zero loop has no statically known execution count.
-    pub predicted_makespan: Option<f64>,
     /// Dynamic `for`/`while` loops whose total execution cost is unknown.
     pub unknown_loop_count: usize,
     /// Number of distinct unary/pair requirement signatures prepared.
@@ -124,9 +117,87 @@ pub(crate) struct TrialResult {
     pub(crate) quality: TrialQuality,
 }
 
+/// Compact per-trial route representation.
+///
+/// Topology-only trials retain ordinary operations by shared source plus mapped
+/// qargs, and inserted SWAPs as physical endpoint pairs. Full operations are
+/// built only when a trial participates in a depth tie or wins the search.
+#[derive(Debug, Clone, Default)]
+struct CompactRoutePlan {
+    steps: Vec<CompactRouteStep>,
+}
+
+#[derive(Debug, Clone)]
+enum CompactRouteStep {
+    Owned(Box<Operation>),
+    Mapped {
+        source: Arc<Operation>,
+        qubits: SmallVec<[Qubit; 3]>,
+    },
+    Swap([PhysicalQubit; 2]),
+}
+
+impl CompactRoutePlan {
+    fn push_operation(&mut self, operation: Operation) {
+        self.steps
+            .push(CompactRouteStep::Owned(Box::new(operation)));
+    }
+
+    fn push_mapped_operation(&mut self, source: Arc<Operation>, qubits: SmallVec<[Qubit; 3]>) {
+        self.steps.push(CompactRouteStep::Mapped { source, qubits });
+    }
+
+    fn push_swap(&mut self, swap: [PhysicalQubit; 2]) {
+        self.steps.push(CompactRouteStep::Swap(swap));
+    }
+
+    fn last_operation(&self) -> Option<&Operation> {
+        match self.steps.last() {
+            Some(CompactRouteStep::Owned(operation)) => Some(operation),
+            Some(CompactRouteStep::Mapped { source, .. }) => Some(source),
+            Some(CompactRouteStep::Swap(_)) | None => None,
+        }
+    }
+
+    fn pop_last_operation(&mut self) -> Option<Operation> {
+        match self.steps.last() {
+            Some(CompactRouteStep::Owned(_) | CompactRouteStep::Mapped { .. }) => {
+                match self.steps.pop() {
+                    Some(CompactRouteStep::Owned(operation)) => Some(*operation),
+                    Some(CompactRouteStep::Mapped { source, qubits }) => Some(Operation {
+                        instruction: source.instruction.clone(),
+                        qubits,
+                        params: source.params.clone(),
+                        label: source.label.clone(),
+                    }),
+                    _ => unreachable!("the last route-plan step was checked as an operation"),
+                }
+            }
+            Some(CompactRouteStep::Swap(_)) | None => None,
+        }
+    }
+
+    fn materialize(&self, target: &RoutingTarget) -> Result<Vec<Operation>, CompilerError> {
+        let mut operations = Vec::with_capacity(self.steps.len());
+        for step in &self.steps {
+            match step {
+                CompactRouteStep::Owned(operation) => operations.push((**operation).clone()),
+                CompactRouteStep::Mapped { source, qubits } => operations.push(Operation {
+                    instruction: source.instruction.clone(),
+                    qubits: qubits.clone(),
+                    params: source.params.clone(),
+                    label: source.label.clone(),
+                }),
+                CompactRouteStep::Swap(swap) => operations.push(target.swap_operation(*swap)?),
+            }
+        }
+        Ok(operations)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UnscoredTrial {
-    pub(crate) operations: Vec<Operation>,
+    plan: CompactRoutePlan,
     pub(crate) final_layout: Layout,
     pub(crate) swap_count: usize,
     pub(crate) fallback_count: usize,
@@ -134,35 +205,190 @@ pub(crate) struct UnscoredTrial {
     lazy_pair_l1_lookup_count: usize,
     lazy_pair_l1_hit_count: usize,
     lazy_pair_l1_cached_count: usize,
+    native_cost: NativeCircuitCost,
+    two_qubit_operation_count: usize,
+    operation_count: usize,
 }
 
 impl UnscoredTrial {
     pub(crate) fn abstract_quality(&self) -> AbstractTrialQuality {
-        let two_qubit_depth = two_qubit_depth(&self.operations);
-        let operation_count = operation_count(&self.operations);
         AbstractTrialQuality {
             swap_count: self.swap_count,
-            two_qubit_depth,
-            operation_count,
-            two_qubit_operation_count: two_qubit_operation_count(&self.operations),
+            two_qubit_depth: 0,
+            operation_count: self.operation_count,
+            two_qubit_operation_count: self.two_qubit_operation_count,
         }
     }
 
-    pub(crate) fn finalize(
-        self,
-        abstract_quality: AbstractTrialQuality,
+    fn materialize_operations(
+        &self,
         target: &RoutingTarget,
-    ) -> Result<TrialResult, CompilerError> {
-        let quality = trial_quality(&self.operations, abstract_quality, target)?;
+    ) -> Result<Vec<Operation>, CompilerError> {
+        self.plan.materialize(target)
+    }
+
+    fn append_swaps(
+        &mut self,
+        target: &RoutingTarget,
+        swaps: impl IntoIterator<Item = [PhysicalQubit; 2]>,
+    ) -> Result<(), CompilerError> {
+        for swap in swaps {
+            self.plan.push_swap(swap);
+            self.swap_count = self.swap_count.saturating_add(1);
+            self.operation_count = self.operation_count.saturating_add(1);
+            self.two_qubit_operation_count = self.two_qubit_operation_count.saturating_add(1);
+            if target.native_cost_enabled {
+                self.native_cost.append_gate(target.swap_cost(swap)?);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RankedTrial {
+    trial: UnscoredTrial,
+    abstract_quality: AbstractTrialQuality,
+    native_two_qubit_ops: usize,
+    native_total_ops: usize,
+    unknown_loop_count: usize,
+    native_two_qubit_depth: Option<usize>,
+    native_total_depth: Option<usize>,
+    materialized_operations: Option<Vec<Operation>>,
+}
+
+impl RankedTrial {
+    fn from_unscored(trial: UnscoredTrial, target: &RoutingTarget) -> Result<Self, CompilerError> {
+        let abstract_quality = trial.abstract_quality();
+        let (native_two_qubit_ops, native_total_ops, unknown_loop_count) =
+            if target.native_cost_enabled {
+                let static_native = trial.native_cost.static_native.unwrap_or_default();
+                (
+                    static_native.native_two_qubit_ops as usize,
+                    static_native.native_total_ops as usize,
+                    trial.native_cost.path.unknown_loop_count,
+                )
+            } else {
+                (
+                    abstract_quality.two_qubit_operation_count,
+                    abstract_quality.operation_count,
+                    0,
+                )
+            };
+        Ok(Self {
+            trial,
+            abstract_quality,
+            native_two_qubit_ops,
+            native_total_ops,
+            unknown_loop_count,
+            native_two_qubit_depth: None,
+            native_total_depth: None,
+            materialized_operations: None,
+        })
+    }
+
+    fn ensure_materialized_operations(
+        &mut self,
+        target: &RoutingTarget,
+    ) -> Result<&[Operation], CompilerError> {
+        if self.materialized_operations.is_none() {
+            self.materialized_operations = Some(self.trial.materialize_operations(target)?);
+        }
+        Ok(self
+            .materialized_operations
+            .as_deref()
+            .expect("materialized route operations were initialized"))
+    }
+
+    fn ensure_abstract_two_qubit_depth(
+        &mut self,
+        target: &RoutingTarget,
+    ) -> Result<usize, CompilerError> {
+        if self.abstract_quality.two_qubit_depth == 0
+            && self.abstract_quality.two_qubit_operation_count != 0
+        {
+            self.abstract_quality.two_qubit_depth =
+                two_qubit_depth(self.ensure_materialized_operations(target)?);
+        }
+        Ok(self.abstract_quality.two_qubit_depth)
+    }
+
+    fn ensure_native_two_qubit_depth(
+        &mut self,
+        target: &RoutingTarget,
+    ) -> Result<usize, CompilerError> {
+        if let Some(depth) = self.native_two_qubit_depth {
+            return Ok(depth);
+        }
+        let depth = if target.native_cost_enabled {
+            self.ensure_materialized_operations(target)?;
+            native_two_qubit_depth(
+                self.materialized_operations
+                    .as_deref()
+                    .expect("materialized route operations were initialized"),
+                target,
+            )?
+        } else {
+            self.ensure_abstract_two_qubit_depth(target)?
+        };
+        self.native_two_qubit_depth = Some(depth);
+        Ok(depth)
+    }
+
+    fn ensure_native_total_depth(
+        &mut self,
+        target: &RoutingTarget,
+    ) -> Result<usize, CompilerError> {
+        if let Some(depth) = self.native_total_depth {
+            return Ok(depth);
+        }
+        let depth = if target.native_cost_enabled {
+            self.ensure_materialized_operations(target)?;
+            native_total_depth(
+                self.materialized_operations
+                    .as_deref()
+                    .expect("materialized route operations were initialized"),
+                target,
+            )?
+        } else {
+            self.abstract_quality.operation_count
+        };
+        self.native_total_depth = Some(depth);
+        Ok(depth)
+    }
+
+    pub(crate) fn swap_count(&self) -> usize {
+        self.trial.swap_count
+    }
+
+    pub(crate) fn finish(mut self, target: &RoutingTarget) -> Result<TrialResult, CompilerError> {
+        let abstract_two_qubit_depth = self.ensure_abstract_two_qubit_depth(target)?;
+        let native_two_qubit_depth = self.ensure_native_two_qubit_depth(target)?;
+        let native_total_depth = self.ensure_native_total_depth(target)?;
+        self.ensure_materialized_operations(target)?;
+        let operations = self
+            .materialized_operations
+            .take()
+            .expect("materialized route operations were initialized");
+        self.abstract_quality.two_qubit_depth = abstract_two_qubit_depth;
+        let quality = TrialQuality {
+            abstract_quality: self.abstract_quality,
+            native_two_qubit_ops: self.native_two_qubit_ops,
+            native_two_qubit_depth,
+            native_total_depth,
+            native_total_ops: self.native_total_ops,
+            unknown_loop_count: self.unknown_loop_count,
+        };
+        let trial = self.trial;
         Ok(TrialResult {
-            operations: self.operations,
-            final_layout: self.final_layout,
-            swap_count: self.swap_count,
-            fallback_count: self.fallback_count,
-            control_flow_blocks_routed: self.control_flow_blocks_routed,
-            lazy_pair_l1_lookup_count: self.lazy_pair_l1_lookup_count,
-            lazy_pair_l1_hit_count: self.lazy_pair_l1_hit_count,
-            lazy_pair_l1_cached_count: self.lazy_pair_l1_cached_count,
+            operations,
+            final_layout: trial.final_layout,
+            swap_count: trial.swap_count,
+            fallback_count: trial.fallback_count,
+            control_flow_blocks_routed: trial.control_flow_blocks_routed,
+            lazy_pair_l1_lookup_count: trial.lazy_pair_l1_lookup_count,
+            lazy_pair_l1_hit_count: trial.lazy_pair_l1_hit_count,
+            lazy_pair_l1_cached_count: trial.lazy_pair_l1_cached_count,
             quality,
         })
     }
@@ -181,10 +407,8 @@ pub(crate) struct TrialQuality {
     pub(crate) abstract_quality: AbstractTrialQuality,
     pub(crate) native_two_qubit_ops: usize,
     pub(crate) native_two_qubit_depth: usize,
+    pub(crate) native_total_depth: usize,
     pub(crate) native_total_ops: usize,
-    pub(crate) error: Option<RobustErrorKey>,
-    pub(crate) duration: Option<RobustDurationKey>,
-    pub(crate) makespan: Option<f64>,
     pub(crate) unknown_loop_count: usize,
 }
 
@@ -232,74 +456,96 @@ pub(crate) fn sabre_route_prepared(
         .collect::<Vec<_>>();
     let initial_layout =
         normalize_initial_layout_for_target(&logical_qubits, target, initial_layout)?;
-    validate_reachable_interactions_for_target(sabre, target, &initial_layout)?;
+    validate_reachable_interactions_for_target_with_metadata(
+        sabre,
+        target,
+        metadata,
+        &initial_layout,
+    )?;
     // Trials share the normalized layout and DAG but use independent seeds for
     // tie-breaking. Selection stays deterministic for a configured seed because
     // result comparison falls back to the trial index.
-    let unscored_trials = trial_seeds(config.seed, config.routing_trials)
+    let (best_index, best) = trial_seeds(config.seed, config.routing_trials)
         .into_par_iter()
         .enumerate()
-        .map(|(index, seed)| {
-            let heuristic = trial_heuristic_profile(&config.heuristic, index);
-            route_unscored_trial_with_metadata(
-                sabre,
-                target,
-                metadata,
-                &initial_layout,
-                &heuristic,
-                seed,
-            )
-            .map(|result| (index, result))
-        })
-        .collect::<Result<Vec<_>, CompilerError>>()?;
-    unscored_trials
-        .par_iter()
-        .try_for_each(|(_, trial)| validate_native_trial_operations(&trial.operations, target))?;
-    let swap_limit = config.trial_objective.swap_limit(
-        config.swap_regret_ratio,
-        unscored_trials.iter().map(|(_, result)| result.swap_count),
-    );
-    let (best_index, best) =
-        if config.trial_objective == SabreTrialObjective::NativeQualityWithinSwapBudget {
-            unscored_trials
-                .into_par_iter()
-                .filter(|(_, trial)| trial.swap_count <= swap_limit)
-                .map(|(index, trial)| {
-                    let abstract_quality = trial.abstract_quality();
-                    trial
-                        .finalize(abstract_quality, target)
-                        .map(|trial| (index, trial))
-                })
-                .collect::<Result<Vec<_>, CompilerError>>()?
-                .into_iter()
-                .min_by(|(left_index, left), (right_index, right)| {
-                    config.trial_objective.compare(
-                        left.quality,
-                        *left_index,
-                        right.quality,
-                        *right_index,
-                    )
-                })
-                .expect("routing_trials is validated to be non-zero")
-        } else {
-            let (index, trial, abstract_quality) = unscored_trials
-                .into_iter()
-                .map(|(index, trial)| {
-                    let abstract_quality = trial.abstract_quality();
-                    (index, trial, abstract_quality)
-                })
-                .min_by(|(left_index, _, left), (right_index, _, right)| {
-                    config.trial_objective.compare(
-                        TrialQuality::from_abstract(*left),
-                        *left_index,
-                        TrialQuality::from_abstract(*right),
-                        *right_index,
-                    )
-                })
-                .expect("routing_trials is validated to be non-zero");
-            (index, trial.finalize(abstract_quality, target)?)
-        };
+        .try_fold(
+            || None,
+            |best, (index, seed)| {
+                let trial = route_ranked_trial_with_metadata(
+                    sabre,
+                    target,
+                    metadata,
+                    &initial_layout,
+                    &config.heuristic,
+                    seed,
+                )?;
+                select_ranked_trial(best, Some((index, trial)), target)
+            },
+        )
+        .try_reduce(
+            || None,
+            |left, right| select_ranked_trial(left, right, target),
+        )?
+        .expect("routing_trials is validated to be non-zero");
 
+    let best = best.finish(target)?;
+    finish_sabre_route(
+        circuit,
+        target,
+        initial_layout,
+        best,
+        best_index,
+        config.routing_trials,
+    )
+}
+
+fn select_ranked_trial(
+    left: Option<(usize, RankedTrial)>,
+    right: Option<(usize, RankedTrial)>,
+    target: &RoutingTarget,
+) -> Result<Option<(usize, RankedTrial)>, CompilerError> {
+    match (left, right) {
+        (Some(mut left), Some(mut right)) => {
+            if compare_ranked_trials(&mut left.1, (0, left.0), &mut right.1, (0, right.0), target)?
+                .is_le()
+            {
+                Ok(Some(left))
+            } else {
+                Ok(Some(right))
+            }
+        }
+        (Some(trial), None) | (None, Some(trial)) => Ok(Some(trial)),
+        (None, None) => Ok(None),
+    }
+}
+
+pub(crate) fn route_ranked_trial_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    initial_layout: &Layout,
+    heuristic: &SabreHeuristicConfig,
+    seed: u64,
+) -> Result<RankedTrial, CompilerError> {
+    let trial = route_unscored_trial_with_metadata(
+        sabre,
+        target,
+        metadata,
+        initial_layout,
+        heuristic,
+        seed,
+    )?;
+    RankedTrial::from_unscored(trial, target)
+}
+
+pub(crate) fn finish_sabre_route(
+    circuit: &Circuit,
+    target: &RoutingTarget,
+    initial_layout: Layout,
+    mut best: TrialResult,
+    best_index: usize,
+    trials_evaluated: usize,
+) -> Result<SabreRoutingResult, CompilerError> {
     // Routing rewrites operation qubits but keeps symbolic parameters by index.
     // Rebuild the routed circuit's parameter table in first-use order, then
     // remap nested control-flow bodies to the new table.
@@ -329,15 +575,11 @@ pub(crate) fn sabre_route_prepared(
                 as u32
         })
         .collect::<Vec<_>>();
-    let mapped_operations = best
-        .operations
-        .iter()
-        .map(|operation| remap_parameter_indices(operation, &parameter_indices))
-        .collect::<Result<Vec<_>, _>>()?;
-    let routed_operations = mapped_operations
-        .iter()
+    let routed_operations = std::mem::take(&mut best.operations)
+        .into_iter()
         .map(|operation| {
-            storage_operation_to_value(operation.clone(), &|param| match param {
+            let operation = remap_parameter_indices(operation, &parameter_indices)?;
+            storage_operation_to_value(operation, &|param| match param {
                 CircuitParam::Fixed(value) => Ok((*value).into()),
                 CircuitParam::Index(index) => parameter_order
                     .get_index(*index as usize)
@@ -345,8 +587,9 @@ pub(crate) fn sabre_route_prepared(
                     .map(Into::into)
                     .ok_or(crate::circuit::CircuitError::InvalidParameterIndex(*index)),
             })
+            .map_err(CompilerError::Circuit)
         })
-        .collect::<Result<Vec<_>, crate::circuit::CircuitError>>()?;
+        .collect::<Result<Vec<_>, CompilerError>>()?;
     let mut routed = Circuit::from_operations(
         target
             .physical_qubits
@@ -368,7 +611,7 @@ pub(crate) fn sabre_route_prepared(
         final_layout: best.final_layout,
         swap_count: best.swap_count,
         diagnostics: SabreRoutingDiagnostics {
-            trials_evaluated: config.routing_trials,
+            trials_evaluated,
             selected_trial_index: best_index,
             fallback_count: best.fallback_count,
             control_flow_blocks_routed: best.control_flow_blocks_routed,
@@ -376,12 +619,8 @@ pub(crate) fn sabre_route_prepared(
             operation_count: best.quality.abstract_quality.operation_count,
             native_two_qubit_count: best.quality.native_two_qubit_ops,
             native_two_qubit_depth: best.quality.native_two_qubit_depth,
+            native_total_depth: best.quality.native_total_depth,
             native_operation_count: best.quality.native_total_ops,
-            predicted_log_error: best.quality.error.map(|key| key.log_error),
-            unavailable_error_count: best.quality.error.map_or(0, |key| key.unavailable_count),
-            imputed_error_count: best.quality.error.map_or(0, |key| key.imputed_count),
-            duration_work: best.quality.duration.map(|key| key.duration_work),
-            predicted_makespan: best.quality.makespan,
             unknown_loop_count: best.quality.unknown_loop_count,
             requirement_signature_count: target.requirements.len(),
             eager_pair_state_count: target.eager_pair_state_count,
@@ -392,28 +631,6 @@ pub(crate) fn sabre_route_prepared(
     })
 }
 
-fn route_unscored_trial(
-    sabre: &SabreDag,
-    target: &RoutingTarget,
-    initial_layout: &Layout,
-    heuristic: &SabreHeuristicConfig,
-    seed: u64,
-) -> Result<UnscoredTrial, CompilerError> {
-    validate_reachable_interactions_for_target(sabre, target, initial_layout)?;
-    route_unscored_trial_unchecked(sabre, target, initial_layout, heuristic, seed)
-}
-
-pub(crate) fn route_unscored_trial_unchecked(
-    sabre: &SabreDag,
-    target: &RoutingTarget,
-    initial_layout: &Layout,
-    heuristic: &SabreHeuristicConfig,
-    seed: u64,
-) -> Result<UnscoredTrial, CompilerError> {
-    let metadata = PreparedRouteMetadata::new(sabre, target)?;
-    route_unscored_trial_with_metadata(sabre, target, &metadata, initial_layout, heuristic, seed)
-}
-
 pub(crate) fn route_unscored_trial_with_metadata(
     sabre: &SabreDag,
     target: &RoutingTarget,
@@ -422,27 +639,61 @@ pub(crate) fn route_unscored_trial_with_metadata(
     heuristic: &SabreHeuristicConfig,
     seed: u64,
 ) -> Result<UnscoredTrial, CompilerError> {
-    let mut output = TrialOutput::new(seed);
-    let mut state = RoutingState::new(
+    route_trial_with_metadata(
         sabre,
         target,
         metadata,
-        initial_layout.clone(),
+        initial_layout,
         heuristic,
         seed,
-    );
+        true,
+    )
+}
+
+pub(crate) fn refine_layout_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    initial_layout: &Layout,
+    heuristic: &SabreHeuristicConfig,
+    seed: u64,
+) -> Result<Layout, CompilerError> {
+    route_trial_with_metadata(
+        sabre,
+        target,
+        metadata,
+        initial_layout,
+        heuristic,
+        seed,
+        false,
+    )
+    .map(|trial| trial.final_layout)
+}
+
+fn route_trial_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    initial_layout: &Layout,
+    heuristic: &SabreHeuristicConfig,
+    seed: u64,
+    emit_operations: bool,
+) -> Result<UnscoredTrial, CompilerError> {
+    let mut output = TrialOutput::new(seed, emit_operations);
+    let mut state = RoutingState::new(sabre, target, metadata, initial_layout, heuristic, seed)?;
 
     // Initial operations are dependency-free one-qubit or non-quantum work.
     // They can be emitted immediately under the starting layout.
-    for operation in &sabre.initial {
-        output
-            .operations
-            .push(map_operation(operation, &state.layout)?);
+    if output.emit_operations {
+        for operation in &sabre.initial {
+            output.push_mapped_operation(operation, &state.layout, target)?;
+        }
     }
 
     state.update_route(
         sabre,
         target,
+        metadata,
         heuristic,
         &mut output,
         &sabre.first_layer,
@@ -451,10 +702,12 @@ pub(crate) fn route_unscored_trial_with_metadata(
     state.populate_extended_set(sabre, target)?;
 
     let mut routable_nodes = Vec::with_capacity(2);
+    let mut current_swaps = Vec::new();
+    let mut mapping_cycles = MappingCycleDetector::new(state.layout_hash);
     let mut search_steps_since_decay_reset = 0usize;
     while !state.front_layer.is_empty() {
-        let mut current_swaps = Vec::new();
-        let mut mapping_cycles = MappingCycleDetector::new(&state.layout, target);
+        current_swaps.clear();
+        mapping_cycles.reset(state.layout_hash);
         let mut repeated_mapping = false;
         // Search accumulates speculative SWAPs until at least one front-layer
         // node becomes adjacent. Those SWAPs are emitted only when the routed
@@ -467,8 +720,7 @@ pub(crate) fn route_unscored_trial_with_metadata(
                 state.choose_best_swap(target, heuristic, current_swaps.last().copied())?;
             state.apply_swap(best_swap.physical, target)?;
             current_swaps.push(best_swap.emitted);
-            repeated_mapping =
-                mapping_cycles.record_swap(&state.layout, target, best_swap.indices)?;
+            repeated_mapping = mapping_cycles.record_hash(state.layout_hash);
             let executable =
                 |requirement, placement| target.terminal_cost_for(requirement, placement).is_some();
             for candidate in best_swap
@@ -516,25 +768,28 @@ pub(crate) fn route_unscored_trial_with_metadata(
         state.update_route(
             sabre,
             target,
+            metadata,
             heuristic,
             &mut output,
             &routable_nodes,
-            Some(current_swaps),
+            Some(&mut current_swaps),
         )?;
-        state.lookahead_layers.iter_mut().for_each(Layer::clear);
         state.populate_extended_set(sabre, target)?;
-        if heuristic.decay_increment.is_some() {
-            for value in &mut state.decay {
-                *value = 1.0;
-            }
+        if metadata.high_pair_reuse
+            && state.front_layer.len().saturating_mul(WIDE_FRONT_FRACTION)
+                >= target.physical_qubits.len()
+            && heuristic.decay_increment.is_some()
+        {
+            state.decay.fill(1.0);
+            search_steps_since_decay_reset = 0;
         }
         routable_nodes.clear();
     }
 
     let own_lazy_stats = state.lower_bound_cache.stats();
     Ok(UnscoredTrial {
-        operations: output.operations,
-        final_layout: state.layout,
+        plan: output.plan,
+        final_layout: state.layout.to_layout(&target.physical_qubits)?,
         swap_count: output.swap_count,
         fallback_count: output.fallback_count,
         control_flow_blocks_routed: output.control_flow_blocks_routed,
@@ -547,87 +802,27 @@ pub(crate) fn route_unscored_trial_with_metadata(
         lazy_pair_l1_cached_count: output
             .lazy_pair_l1_cached_count
             .saturating_add(own_lazy_stats.cached_count),
+        native_cost: output.native_cost,
+        two_qubit_operation_count: output.two_qubit_operation_count,
+        operation_count: output.operation_count,
     })
-}
-
-impl TrialQuality {
-    pub(crate) fn from_abstract(abstract_quality: AbstractTrialQuality) -> Self {
-        Self {
-            abstract_quality,
-            native_two_qubit_ops: abstract_quality.two_qubit_operation_count,
-            native_two_qubit_depth: abstract_quality.two_qubit_depth,
-            native_total_ops: abstract_quality.operation_count,
-            ..Self::default()
-        }
-    }
-
-    fn compare_duration(self, other: Self) -> Ordering {
-        match (self.duration, other.duration) {
-            (Some(left_duration), Some(right_duration)) => left_duration
-                .unavailable_count
-                .cmp(&right_duration.unavailable_count)
-                .then_with(|| {
-                    left_duration
-                        .imputed_count
-                        .cmp(&right_duration.imputed_count)
-                })
-                .then_with(|| match (self.makespan, other.makespan) {
-                    (Some(left), Some(right)) => left.total_cmp(&right),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                })
-                .then_with(|| {
-                    left_duration
-                        .duration_work
-                        .total_cmp(&right_duration.duration_work)
-                }),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        }
-    }
 }
 
 /// Derives per-trial seeds from an optional workflow seed.
 ///
-/// A configured seed seeds the seed generator, not every trial directly. This
-/// gives reproducible but distinct tie-breaking streams per trial.
+/// A configured seed is the stable base for index-derived trial streams. This
+/// gives reproducible but distinct tie-breaking streams without depending on
+/// execution order. When no seed is configured, a random base is chosen.
 pub(crate) fn trial_seeds(seed: Option<u64>, count: usize) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(seed.unwrap_or_else(rand::random));
-    (0..count).map(|_| rng.random()).collect()
-}
-
-/// Produces deterministic, bounded heuristic diversity across routing trials.
-///
-/// Seed-only trials explore near-ties but share the same blind spots. These
-/// profiles vary lookahead and decay without changing the common routing
-/// engine or final constrained quality objective.
-pub(crate) fn trial_heuristic_profile(
-    base: &SabreHeuristicConfig,
-    trial_index: usize,
-) -> SabreHeuristicConfig {
-    let mut profile = base.clone();
-    match trial_index % 4 {
-        0 => {}
-        1 => {
-            profile.decay_increment = None;
-        }
-        2 => {
-            for weight in &mut profile.lookahead_weights {
-                *weight *= 0.5;
-            }
-        }
-        _ => {
-            for weight in &mut profile.lookahead_weights {
-                *weight *= 1.5;
-            }
-            if let Some(increment) = &mut profile.decay_increment {
-                *increment *= 2.0;
-            }
-        }
-    }
-    profile
+    let base = seed.unwrap_or_else(rand::random);
+    (0..count)
+        .map(|index| {
+            let mut value = base ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
+        })
+        .collect()
 }
 
 /// Normalizes an initial layout against a device's usable physical topology.
@@ -698,13 +893,13 @@ pub fn validate_reachable_interactions(
     validate_reachable_interactions_for_target(&sabre, &target, &initial_layout)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct InteractionOperation {
     instruction: KnowledgeInstructionKey,
     qarg_roles: SmallVec<[u8; 2]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum InteractionSignature {
     /// Layout refinement DAGs deliberately omit concrete operations.
     GenericPair,
@@ -722,6 +917,33 @@ enum RequirementTable {
         terminals: BTreeMap<[usize; 2], NativePlanCost>,
         lower_bounds: Option<PairStateTable<RouteLowerBound>>,
     },
+}
+
+#[derive(Debug, Clone, Default)]
+struct StructuralNativePlan {
+    cost: NativePlanCost,
+    leaves: Vec<SmallVec<[PhysicalQubit; 2]>>,
+}
+
+impl StructuralNativePlan {
+    fn from_summary(summary: &NativePlanSummary) -> Self {
+        Self {
+            cost: structural_native_cost(summary),
+            leaves: summary
+                .leaves
+                .iter()
+                .map(|leaf| leaf.ordered_qargs.clone())
+                .collect(),
+        }
+    }
+}
+
+fn structural_native_cost(summary: &NativePlanSummary) -> NativePlanCost {
+    NativePlanCost {
+        native_two_qubit_ops: summary.native_two_qubit_ops,
+        native_total_ops: summary.native_total_ops,
+        ..NativePlanCost::default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -920,12 +1142,6 @@ struct MovementEdge {
     swap: VerifiedSwap,
 }
 
-#[derive(Debug, Clone)]
-struct TimedNativeLeaf {
-    ordered_qargs: SmallVec<[PhysicalQubit; 2]>,
-    duration: f64,
-}
-
 impl RouteLowerBound {
     fn with_swap(self, swap: NativePlanCost) -> Self {
         Self {
@@ -942,9 +1158,8 @@ impl RouteLowerBound {
     }
 
     fn compare(self, other: Self) -> Ordering {
-        self.remaining_swaps
-            .cmp(&other.remaining_swaps)
-            .then_with(|| compare_optional_native_cost(Some(self.native), Some(other.native)))
+        compare_optional_native_cost(Some(self.native), Some(other.native))
+            .then_with(|| self.remaining_swaps.cmp(&other.remaining_swaps))
     }
 }
 
@@ -956,30 +1171,31 @@ pub(crate) struct RoutingTarget {
     neighbors_by_index: Vec<Vec<MovementNeighbor>>,
     interaction_ids: HashMap<InteractionSignature, usize>,
     requirements: Vec<RequirementTable>,
-    native_costs: HashMap<DeviceGateState, NativePlanCost>,
-    native_timings: HashMap<DeviceGateState, Option<Vec<TimedNativeLeaf>>>,
+    native_plans: HashMap<DeviceGateState, StructuralNativePlan>,
     native_unsupported: HashMap<DeviceGateState, DeviceLoweringFailure>,
     native_cost_enabled: bool,
-    native_duration_enabled: bool,
     eager_pair_state_count: usize,
     lazy_pair_cache: Arc<Mutex<LazyPairCache>>,
     graph: UnGraph<(), ()>,
     graph_index: BTreeMap<PhysicalQubit, NodeIndex>,
     physical_by_index: Vec<PhysicalQubit>,
+    topology_distance_values: Box<[u32]>,
 }
 
 struct PreparedRoutingParts {
     movement_edges: Vec<MovementEdge>,
     interaction_ids: HashMap<InteractionSignature, usize>,
     requirements: Vec<RequirementTable>,
-    native_costs: HashMap<DeviceGateState, NativePlanCost>,
-    native_timings: HashMap<DeviceGateState, Option<Vec<TimedNativeLeaf>>>,
+    native_plans: HashMap<DeviceGateState, StructuralNativePlan>,
     native_unsupported: HashMap<DeviceGateState, DeviceLoweringFailure>,
     native_cost_enabled: bool,
-    native_duration_enabled: bool,
 }
 
 impl RoutingTarget {
+    pub(crate) fn uses_native_costs(&self) -> bool {
+        self.native_cost_enabled
+    }
+
     /// Builds the indexed routing view used by SABRE scoring.
     ///
     /// The target keeps both semantic physical-qubit ids and dense indices.
@@ -987,7 +1203,6 @@ impl RoutingTarget {
     /// and emitted SWAP operations stable.
     pub(crate) fn from_physical(physical: &PhysicalLayoutGraph) -> Result<Self, CompilerError> {
         let edges = undirected_topology_edges(physical);
-        let count = physical.physical_qubits().len();
         let movement_edges = edges
             .iter()
             .copied()
@@ -999,31 +1214,23 @@ impl RoutingTarget {
                 },
             })
             .collect::<Vec<_>>();
-        let neighbors = movement_adjacency(count, &movement_edges);
         let mut generic_terminals = BTreeMap::new();
         for &(left, right) in &edges {
             generic_terminals.insert([left, right], NativePlanCost::default());
             generic_terminals.insert([right, left], NativePlanCost::default());
         }
-        let mut pair_state_budget = EAGER_PAIR_STATE_BUDGET;
         Self::from_prepared_parts(
             physical,
             PreparedRoutingParts {
                 movement_edges,
                 interaction_ids: HashMap::from([(InteractionSignature::GenericPair, 0)]),
                 requirements: vec![RequirementTable::Pair {
-                    lower_bounds: eager_pair_route_lower_bounds(
-                        &neighbors,
-                        &generic_terminals,
-                        &mut pair_state_budget,
-                    ),
+                    lower_bounds: None,
                     terminals: generic_terminals,
                 }],
-                native_costs: HashMap::new(),
-                native_timings: HashMap::new(),
+                native_plans: HashMap::new(),
                 native_unsupported: HashMap::new(),
                 native_cost_enabled: false,
-                native_duration_enabled: false,
             },
         )
     }
@@ -1072,27 +1279,10 @@ impl RoutingTarget {
         let roots = collect_device_plan_roots(physical_qubits, &topology_edges, &signatures);
 
         let catalog = NativePlanCatalog::build(device, roots)?;
-        let estimator = CalibrationEstimator::from_device(device, physical_qubits);
-        let native_identity = estimator.identity_cost();
-        let native_costs = catalog
+        let native_identity = NativePlanCost::default();
+        let native_plans = catalog
             .iter()
-            .map(|(state, summary)| (state.clone(), estimator.cost(summary)))
-            .collect();
-        let native_timings = catalog
-            .iter()
-            .map(|(state, summary)| {
-                let leaves = summary
-                    .leaves
-                    .iter()
-                    .map(|leaf| {
-                        Some(TimedNativeLeaf {
-                            ordered_qargs: leaf.ordered_qargs.clone(),
-                            duration: estimator.leaf_duration(leaf)?,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>();
-                (state.clone(), leaves)
-            })
+            .map(|(state, summary)| (state.clone(), StructuralNativePlan::from_summary(summary)))
             .collect();
         let native_unsupported = catalog
             .iter_availability()
@@ -1118,7 +1308,7 @@ impl RoutingTarget {
                     );
                     catalog.summary(&state).map(|summary| VerifiedSwap {
                         emitted_indices,
-                        cost: estimator.cost(summary),
+                        cost: structural_native_cost(summary),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1146,7 +1336,6 @@ impl RoutingTarget {
                 movement_edges: &movement_edges,
                 neighbors: &neighbors,
                 catalog: &catalog,
-                estimator: &estimator,
                 native_identity,
             },
             &mut pair_state_budget,
@@ -1158,11 +1347,9 @@ impl RoutingTarget {
                 movement_edges,
                 interaction_ids,
                 requirements,
-                native_costs,
-                native_timings,
+                native_plans,
                 native_unsupported,
                 native_cost_enabled: true,
-                native_duration_enabled: estimator.duration_enabled(),
             },
         )
     }
@@ -1175,11 +1362,9 @@ impl RoutingTarget {
             movement_edges,
             interaction_ids,
             requirements,
-            native_costs,
-            native_timings,
+            native_plans,
             native_unsupported,
             native_cost_enabled,
-            native_duration_enabled,
         } = parts;
         let physical_qubits = physical.physical_qubits().to_vec();
         let physical_set = physical_qubits.iter().copied().collect::<BTreeSet<_>>();
@@ -1228,6 +1413,16 @@ impl RoutingTarget {
             })
             .sum();
 
+        let topology_distances = physical.distances().clone();
+        let topology_distance_values = (0..physical_qubits.len())
+            .flat_map(|left| {
+                let distances = &topology_distances;
+                (0..physical_qubits.len())
+                    .map(move |right| distances.distance_by_index(left, right).unwrap_or(u32::MAX))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
         Ok(Self {
             physical_qubits,
             physical_set,
@@ -1235,16 +1430,15 @@ impl RoutingTarget {
             neighbors_by_index,
             interaction_ids,
             requirements,
-            native_costs,
-            native_timings,
+            native_plans,
             native_unsupported,
             native_cost_enabled,
-            native_duration_enabled,
             eager_pair_state_count,
             lazy_pair_cache: Arc::new(Mutex::new(LazyPairCache::default())),
             graph,
             graph_index,
             physical_by_index,
+            topology_distance_values,
         })
     }
 
@@ -1265,12 +1459,26 @@ impl RoutingTarget {
         })
     }
 
+    #[inline(always)]
     fn distance_for_cached(
         &self,
         requirement: usize,
         placement: RequirementPlacement,
         cache: Option<&TrialPairCache>,
     ) -> Result<f64, CompilerError> {
+        if !self.native_cost_enabled {
+            return match placement {
+                RequirementPlacement::Unary(_) => Ok(1.0),
+                RequirementPlacement::Pair([left, right]) => {
+                    let distance = self.topology_distance(left, right).ok_or_else(|| {
+                            CompilerError::InvalidInput(format!(
+                                "routing requirement {requirement} at {placement:?} cannot reach an executable terminal using lowerable SWAPs"
+                            ))
+                        })?;
+                    Ok(f64::from(distance))
+                }
+            };
+        }
         self.route_lower_bound_for_cached(requirement, placement, cache)
             .map(|bound| f64::from(bound.remaining_swaps) + 1.0)
             .ok_or_else(|| {
@@ -1278,6 +1486,16 @@ impl RoutingTarget {
                     "routing requirement {requirement} at {placement:?} cannot reach an executable terminal using lowerable SWAPs"
                 ))
             })
+    }
+
+    #[inline(always)]
+    fn topology_distance(&self, left: usize, right: usize) -> Option<u32> {
+        let width = self.physical_qubits.len();
+        left.checked_mul(width)
+            .and_then(|offset| offset.checked_add(right))
+            .and_then(|index| self.topology_distance_values.get(index))
+            .copied()
+            .filter(|distance| *distance != u32::MAX)
     }
 
     fn terminal_cost_for(
@@ -1297,7 +1515,10 @@ impl RoutingTarget {
         }
     }
 
-    fn swap_operation(&self, swap: [PhysicalQubit; 2]) -> Result<Operation, CompilerError> {
+    fn verified_swap(
+        &self,
+        swap: [PhysicalQubit; 2],
+    ) -> Result<([PhysicalQubit; 2], VerifiedSwap), CompilerError> {
         let left = self.physical_index(swap[0])?;
         let right = self.physical_index(swap[1])?;
         let verified = self.neighbors_by_index[left]
@@ -1313,10 +1534,20 @@ impl RoutingTarget {
         let emitted = verified
             .emitted_indices
             .map(|index| self.physical_qubits[index]);
+        Ok((emitted, verified))
+    }
+
+    fn swap_cost(&self, swap: [PhysicalQubit; 2]) -> Result<NativePlanCost, CompilerError> {
+        let (_, verified) = self.verified_swap(swap)?;
+        Ok(verified.cost)
+    }
+
+    fn swap_operation(&self, swap: [PhysicalQubit; 2]) -> Result<Operation, CompilerError> {
+        let (emitted, _) = self.verified_swap(swap)?;
         if self.native_cost_enabled {
             let state =
                 DeviceGateState::standard(StandardGate::SWAP, SmallVec::from_slice(&emitted));
-            if !self.native_costs.contains_key(&state) {
+            if !self.native_plans.contains_key(&state) {
                 let detail = self.native_unsupported.get(&state).map_or_else(
                     || "native SWAP plan was not prepared".to_string(),
                     ToString::to_string,
@@ -1355,6 +1586,20 @@ impl RoutingTarget {
         placement: RequirementPlacement,
         cache: Option<&TrialPairCache>,
     ) -> Option<RouteLowerBound> {
+        if !self.native_cost_enabled {
+            let remaining_swaps = match placement {
+                RequirementPlacement::Unary(physical) => {
+                    (physical < self.physical_qubits.len()).then_some(0)?
+                }
+                RequirementPlacement::Pair([left, right]) => {
+                    self.topology_distance(left, right)?.checked_sub(1)?
+                }
+            };
+            return Some(RouteLowerBound {
+                remaining_swaps,
+                native: NativePlanCost::default(),
+            });
+        }
         match (self.requirements.get(requirement)?, placement) {
             (
                 RequirementTable::Unary { lower_bounds, .. },
@@ -1422,11 +1667,11 @@ impl RoutingTarget {
     }
 
     fn native_cost(&self, state: &DeviceGateState) -> Option<NativePlanCost> {
-        self.native_costs.get(state).copied()
+        self.native_plans.get(state).map(|plan| plan.cost)
     }
 
-    fn native_timing(&self, state: &DeviceGateState) -> Option<&Option<Vec<TimedNativeLeaf>>> {
-        self.native_timings.get(state)
+    fn native_plan(&self, state: &DeviceGateState) -> Option<&StructuralNativePlan> {
+        self.native_plans.get(state)
     }
 
     fn unsupported_native_plan(&self, state: &DeviceGateState) -> Option<&DeviceLoweringFailure> {
@@ -1633,7 +1878,7 @@ impl SabreDag {
         let mut signatures = HashSet::from([InteractionSignature::GenericPair]);
         self.collect_interaction_signatures(&mut signatures)?;
         let mut signatures = signatures.into_iter().collect::<Vec<_>>();
-        signatures.sort_by_key(|signature| format!("{signature:?}"));
+        signatures.sort();
         if let Some(position) = signatures
             .iter()
             .position(|signature| matches!(signature, InteractionSignature::GenericPair))
@@ -1663,13 +1908,12 @@ fn states_for_requirement(
 
 fn combined_catalog_cost(
     catalog: &NativePlanCatalog,
-    estimator: &CalibrationEstimator,
     states: Vec<DeviceGateState>,
 ) -> Option<NativePlanCost> {
     let mut cost = None;
     for state in states {
         let summary = catalog.summary(&state)?;
-        let next = estimator.cost(summary);
+        let next = structural_native_cost(summary);
         cost = Some(cost.map_or(next, |current: NativePlanCost| current.combine(next)));
     }
     Some(cost.unwrap_or_default())
@@ -1680,7 +1924,7 @@ fn prepare_topology_only_parts(
     topology_edges: Vec<(usize, usize)>,
     interaction_ids: HashMap<InteractionSignature, usize>,
     signatures: &[InteractionSignature],
-    pair_state_budget: &mut usize,
+    _pair_state_budget: &mut usize,
 ) -> PreparedRoutingParts {
     let movement_edges = topology_edges
         .iter()
@@ -1715,11 +1959,7 @@ fn prepare_topology_only_parts(
                     terminals.insert([right, left], NativePlanCost::default());
                 }
                 RequirementTable::Pair {
-                    lower_bounds: eager_pair_route_lower_bounds(
-                        &neighbors,
-                        &terminals,
-                        pair_state_budget,
-                    ),
+                    lower_bounds: None,
                     terminals,
                 }
             }
@@ -1731,11 +1971,9 @@ fn prepare_topology_only_parts(
         movement_edges,
         interaction_ids,
         requirements,
-        native_costs: HashMap::new(),
-        native_timings: HashMap::new(),
+        native_plans: HashMap::new(),
         native_unsupported: HashMap::new(),
         native_cost_enabled: false,
-        native_duration_enabled: false,
     }
 }
 
@@ -1779,7 +2017,6 @@ struct DeviceRequirementInputs<'a> {
     movement_edges: &'a [MovementEdge],
     neighbors: &'a [Vec<MovementNeighbor>],
     catalog: &'a NativePlanCatalog,
-    estimator: &'a CalibrationEstimator,
     native_identity: NativePlanCost,
 }
 
@@ -1799,7 +2036,6 @@ fn build_device_requirement_tables(
         movement_edges,
         neighbors,
         catalog,
-        estimator,
         native_identity,
     } = inputs;
     let count = physical_qubits.len();
@@ -1819,7 +2055,7 @@ fn build_device_requirement_tables(
                 let mut terminals = vec![None; count];
                 for (physical_index, physical) in physical_qubits.iter().copied().enumerate() {
                     let states = states_for_requirement(operations, &[physical]);
-                    if let Some(cost) = combined_catalog_cost(catalog, estimator, states) {
+                    if let Some(cost) = combined_catalog_cost(catalog, states) {
                         terminals[physical_index] = Some(cost);
                     }
                 }
@@ -1831,7 +2067,7 @@ fn build_device_requirement_tables(
                     for (source, target) in [(left_index, right_index), (right_index, left_index)] {
                         let ordered = [physical_qubits[source], physical_qubits[target]];
                         let states = states_for_requirement(operations, &ordered);
-                        if let Some(cost) = combined_catalog_cost(catalog, estimator, states) {
+                        if let Some(cost) = combined_catalog_cost(catalog, states) {
                             terminals.insert([source, target], cost);
                         }
                     }
@@ -2016,77 +2252,59 @@ fn pair_route_lower_bound_from_state(
 ) -> Option<RouteLowerBound> {
     let count = swap_neighbors.len();
     PairStateTable::<RouteLowerBound>::index(count, start[0], start[1])?;
-    let mut visited_depth = BTreeMap::from([(start, 0_u32)]);
-    let mut layers = vec![vec![start]];
-    let terminal_depth = loop {
-        let depth = layers.len() - 1;
-        if layers[depth]
-            .iter()
-            .any(|placement| terminals.contains_key(placement))
-        {
-            break depth;
+    let mut bounds = BTreeMap::<[usize; 2], RouteLowerBound>::new();
+    let mut queue = BinaryHeap::new();
+    for (&placement, &native) in terminals {
+        if PairStateTable::<RouteLowerBound>::index(count, placement[0], placement[1]).is_none() {
+            continue;
         }
-        let next_depth = u32::try_from(depth).ok()?.saturating_add(1);
-        let mut next = BTreeSet::new();
-        for &placement in &layers[depth] {
-            for endpoint in placement {
-                for &neighbor in &swap_neighbors[endpoint] {
-                    let next_placement = pair_after_swap(placement, [endpoint, neighbor.index]);
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        visited_depth.entry(next_placement)
-                    {
-                        entry.insert(next_depth);
-                        next.insert(next_placement);
-                    }
-                }
-            }
-        }
-        if next.is_empty() {
-            return None;
-        }
-        layers.push(next.into_iter().collect());
-    };
+        let bound = RouteLowerBound {
+            remaining_swaps: 0,
+            native,
+        };
+        bounds.insert(placement, bound);
+        queue.push(Reverse((native.native_two_qubit_ops, 0_u32, placement)));
+    }
 
-    let mut native_from_state = layers[terminal_depth]
-        .iter()
-        .filter_map(|placement| terminals.get(placement).map(|cost| (*placement, *cost)))
-        .collect::<BTreeMap<_, _>>();
-    for depth in (0..terminal_depth).rev() {
-        let next_depth = u32::try_from(depth).ok()?.saturating_add(1);
-        for &placement in &layers[depth] {
-            let mut best = None;
-            for endpoint in placement {
-                for &neighbor in &swap_neighbors[endpoint] {
-                    let next_placement = pair_after_swap(placement, [endpoint, neighbor.index]);
-                    if visited_depth.get(&next_placement) != Some(&next_depth) {
-                        continue;
-                    }
-                    let Some(next_cost) = native_from_state.get(&next_placement).copied() else {
-                        continue;
-                    };
-                    let candidate = neighbor.swap.cost.combine(next_cost);
-                    if best.is_none_or(|current| {
-                        compare_optional_native_cost(Some(candidate), Some(current)).is_lt()
-                    }) {
-                        best = Some(candidate);
-                    }
+    while let Some(Reverse((native_two_qubit_ops, remaining_swaps, placement))) = queue.pop() {
+        let current = bounds.get(&placement).copied()?;
+        if current.native.native_two_qubit_ops != native_two_qubit_ops
+            || current.remaining_swaps != remaining_swaps
+        {
+            continue;
+        }
+        if placement == start {
+            return Some(current);
+        }
+        for endpoint in placement {
+            for &neighbor in &swap_neighbors[endpoint] {
+                let predecessor = pair_after_swap(placement, [endpoint, neighbor.index]);
+                let candidate = current.with_swap(neighbor.swap.cost);
+                if bounds
+                    .get(&predecessor)
+                    .is_none_or(|previous| candidate.compare(*previous).is_lt())
+                {
+                    bounds.insert(predecessor, candidate);
+                    queue.push(Reverse((
+                        candidate.native.native_two_qubit_ops,
+                        candidate.remaining_swaps,
+                        predecessor,
+                    )));
                 }
-            }
-            if let Some(best) = best {
-                native_from_state.insert(placement, best);
             }
         }
     }
-    Some(RouteLowerBound {
-        remaining_swaps: u32::try_from(terminal_depth).ok()?,
-        native: native_from_state.get(&start).copied()?,
-    })
+    None
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRouteMetadata {
     required_predecessors: Vec<u32>,
     requirement_ids: Vec<Option<usize>>,
+    /// Prepared metadata for control-flow bodies, indexed by parent DAG node.
+    /// Bodies use `SabreControlFlow::bodies` canonical traversal order.
+    nested: Vec<Vec<PreparedRouteMetadata>>,
+    high_pair_reuse: bool,
 }
 
 impl PreparedRouteMetadata {
@@ -2105,22 +2323,62 @@ impl PreparedRouteMetadata {
                 SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => Ok(None),
             })
             .collect::<Result<Vec<_>, CompilerError>>()?;
+        let nested = sabre
+            .graph
+            .node_indices()
+            .map(|node| match &sabre.graph[node].kind {
+                SabreNodeKind::ControlFlow(flow) => flow
+                    .bodies()
+                    .into_iter()
+                    .map(|body| Self::new(body, target))
+                    .collect(),
+                _ => Ok(Vec::new()),
+            })
+            .collect::<Result<Vec<_>, CompilerError>>()?;
+        let mut two_qubit_count = 0usize;
+        let mut unique_pairs = HashSet::new();
+        for node in sabre.graph.node_weights() {
+            if let SabreNodeKind::TwoQ([left, right]) = &node.kind {
+                two_qubit_count += 1;
+                let pair = if left <= right {
+                    (*left, *right)
+                } else {
+                    (*right, *left)
+                };
+                unique_pairs.insert(pair);
+            }
+        }
+        let high_pair_reuse = !unique_pairs.is_empty()
+            && two_qubit_count >= unique_pairs.len().saturating_mul(HIGH_PAIR_REUSE_FACTOR);
         Ok(Self {
             required_predecessors,
             requirement_ids,
+            nested,
+            high_pair_reuse,
         })
     }
 }
 
 #[derive(Debug)]
 struct RoutingState {
-    layout: Layout,
+    layout: DenseRoutingLayout,
+    layout_hash: u64,
     front_layer: Layer,
     lookahead_layers: Vec<Layer>,
     required_predecessors: Vec<u32>,
     requirement_ids: Vec<Option<usize>>,
     lower_bound_cache: TrialPairCache,
     decay: Vec<f64>,
+    active_marks: Vec<u32>,
+    active_generation: u32,
+    active_index_scratch: Vec<usize>,
+    candidate_scratch: Vec<SwapChoice>,
+    scored_scratch: Vec<ScoredCandidate>,
+    eligible_scratch: Vec<ScoredCandidate>,
+    lookahead_next_scratch: Vec<NodeIndex>,
+    lookahead_visit_scratch: Vec<NodeIndex>,
+    lookahead_decrements: Vec<u32>,
+    lookahead_touched_scratch: Vec<usize>,
     rng: StdRng,
 }
 
@@ -2135,7 +2393,7 @@ struct SwapChoice {
 #[derive(Debug, Clone, Copy)]
 struct ScoredCandidate {
     choice: SwapChoice,
-    topology_score: f64,
+    adjusted_score: f64,
     /// `None` means the exact native route cost has not been queried yet.
     /// `Some(None)` records an unreachable candidate and must be cached too.
     route_cost: Option<Option<RouteLowerBound>>,
@@ -2183,12 +2441,15 @@ impl RoutingState {
         sabre: &SabreDag,
         target: &RoutingTarget,
         metadata: &PreparedRouteMetadata,
-        layout: Layout,
+        layout: &Layout,
         heuristic: &SabreHeuristicConfig,
         seed: u64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CompilerError> {
+        let layout = DenseRoutingLayout::from_layout(layout, &target.physical_qubits)?;
+        let layout_hash = MappingCycleDetector::mapping_hash(layout.signature());
+        Ok(Self {
             layout,
+            layout_hash,
             front_layer: Layer::new(sabre.graph.node_count(), target.physical_qubits.len()),
             lookahead_layers: vec![
                 Layer::new(
@@ -2201,8 +2462,18 @@ impl RoutingState {
             requirement_ids: metadata.requirement_ids.clone(),
             lower_bound_cache: TrialPairCache::default(),
             decay: vec![1.0; target.physical_qubits.len()],
+            active_marks: vec![0; target.physical_qubits.len()],
+            active_generation: 0,
+            active_index_scratch: Vec::new(),
+            candidate_scratch: Vec::new(),
+            scored_scratch: Vec::new(),
+            eligible_scratch: Vec::new(),
+            lookahead_next_scratch: Vec::new(),
+            lookahead_visit_scratch: Vec::new(),
+            lookahead_decrements: vec![0; sabre.graph.node_count()],
+            lookahead_touched_scratch: Vec::new(),
             rng: StdRng::seed_from_u64(seed),
-        }
+        })
     }
 
     /// Applies a physical SWAP to the layout and all cached layer scores.
@@ -2218,30 +2489,46 @@ impl RoutingState {
             target.physical_index(swap[0])?,
             target.physical_index(swap[1])?,
         ];
-        let distance = |requirement, placement| {
-            target.distance_for_cached(requirement, placement, Some(&self.lower_bound_cache))
-        };
-        self.front_layer.apply_swap(swap_indices, &distance)?;
-        for layer in &mut self.lookahead_layers {
-            layer.apply_swap(swap_indices, &distance)?;
+        let before_left = self.layout.signature()[swap_indices[0]];
+        let before_right = self.layout.signature()[swap_indices[1]];
+        if target.native_cost_enabled {
+            let distance = |requirement, placement| {
+                target.distance_for_cached(requirement, placement, Some(&self.lower_bound_cache))
+            };
+            self.front_layer.apply_swap(swap_indices, &distance)?;
+            for layer in &mut self.lookahead_layers {
+                layer.apply_swap(swap_indices, &distance)?;
+            }
+        } else {
+            let distances = target.topology_distance_values.as_ref();
+            let width = target.physical_qubits.len();
+            self.front_layer
+                .apply_topology_swap(swap_indices, distances, width)?;
+            for layer in &mut self.lookahead_layers {
+                layer.apply_topology_swap(swap_indices, distances, width)?;
+            }
         }
         self.layout
-            .swap_physical(swap[0], swap[1])
-            .map_err(|error| {
-                CompilerError::InvariantViolation(format!(
-                    "sabre attempted an invalid physical swap {swap:?}: {error}"
-                ))
-            })
+            .swap_physical_indices(swap_indices[0], swap_indices[1]);
+        self.layout_hash = MappingCycleDetector::hash_after_swap(
+            self.layout_hash,
+            swap_indices,
+            before_left,
+            before_right,
+        );
+        Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_route(
         &mut self,
         sabre: &SabreDag,
         target: &RoutingTarget,
+        metadata: &PreparedRouteMetadata,
         heuristic: &SabreHeuristicConfig,
         output: &mut TrialOutput,
         nodes: &[NodeIndex],
-        initial_swaps: Option<Vec<[PhysicalQubit; 2]>>,
+        initial_swaps: Option<&mut Vec<[PhysicalQubit; 2]>>,
     ) -> Result<(), CompilerError> {
         let mut to_visit = nodes.iter().copied().collect::<VecDeque<_>>();
         let mut pending_swaps = initial_swaps;
@@ -2250,10 +2537,10 @@ impl RoutingState {
             let node = &sabre.graph[node_id];
             match &node.kind {
                 SabreNodeKind::Unary(logical) => {
-                    let physical = physical_for(&self.layout, *logical)?;
+                    let physical_index = self.layout.physical_index(*logical)?;
                     let requirement =
                         Self::prepared_requirement_id(&self.requirement_ids, node_id)?;
-                    let placement = RequirementPlacement::Unary(target.physical_index(physical)?);
+                    let placement = RequirementPlacement::Unary(physical_index);
                     if target.terminal_cost_for(requirement, placement).is_none() {
                         let distance = |requirement, placement| {
                             target.distance_for_cached(
@@ -2267,10 +2554,10 @@ impl RoutingState {
                         continue;
                     }
                     output.apply_pending_swaps(target, pending_swaps.take())?;
-                    for operation in &node.operations {
-                        output
-                            .operations
-                            .push(map_operation(operation, &self.layout)?);
+                    if output.emit_operations {
+                        for operation in &node.operations {
+                            output.push_mapped_operation(operation, &self.layout, target)?;
+                        }
                     }
                 }
                 SabreNodeKind::TwoQ(pair) => {
@@ -2278,8 +2565,8 @@ impl RoutingState {
                     // of the front layer. Adjacent nodes flush any pending
                     // SWAPs and are emitted under the current layout.
                     let physical = [
-                        physical_for(&self.layout, pair[0])?,
-                        physical_for(&self.layout, pair[1])?,
+                        target.physical_at(self.layout.physical_index(pair[0])?)?,
+                        target.physical_at(self.layout.physical_index(pair[1])?)?,
                     ];
                     let interaction =
                         Self::prepared_requirement_id(&self.requirement_ids, node_id)?;
@@ -2310,10 +2597,10 @@ impl RoutingState {
                         continue;
                     }
                     output.apply_pending_swaps(target, pending_swaps.take())?;
-                    for operation in &node.operations {
-                        output
-                            .operations
-                            .push(map_operation(operation, &self.layout)?);
+                    if output.emit_operations {
+                        for operation in &node.operations {
+                            output.push_mapped_operation(operation, &self.layout, target)?;
+                        }
                     }
                 }
                 SabreNodeKind::Synchronize => {
@@ -2321,10 +2608,10 @@ impl RoutingState {
                     // classical or barrier-like effects but do not add an
                     // adjacency constraint of their own.
                     output.apply_pending_swaps(target, pending_swaps.take())?;
-                    for operation in &node.operations {
-                        output
-                            .operations
-                            .push(map_operation(operation, &self.layout)?);
+                    if output.emit_operations {
+                        for operation in &node.operations {
+                            output.push_mapped_operation(operation, &self.layout, target)?;
+                        }
                     }
                 }
                 SabreNodeKind::ControlFlow(flow) => {
@@ -2335,6 +2622,12 @@ impl RoutingState {
                     self.route_control_flow_node(
                         flow,
                         &node.operations,
+                        metadata.nested.get(node_id.index()).ok_or_else(|| {
+                            CompilerError::InvariantViolation(format!(
+                                "routing node {} has no prepared nested metadata slot",
+                                node_id.index()
+                            ))
+                        })?,
                         target,
                         heuristic,
                         output,
@@ -2362,7 +2655,8 @@ impl RoutingState {
     fn route_control_flow_node(
         &mut self,
         flow: &SabreControlFlow,
-        operations: &[Operation],
+        operations: &[Arc<Operation>],
+        body_metadata: &[PreparedRouteMetadata],
         target: &RoutingTarget,
         heuristic: &SabreHeuristicConfig,
         output: &mut TrialOutput,
@@ -2370,10 +2664,13 @@ impl RoutingState {
         let Some((first, rest)) = operations.split_first() else {
             return Ok(());
         };
+        let entry_layout = self.layout.to_layout(&target.physical_qubits)?;
         // The SABRE DAG keeps the representative control-flow operation first
         // and may attach additional bookkeeping operations after it. Rebuild the
         // first operation with routed bodies, then map the remaining operations
         // through the unchanged parent layout.
+        let emit_operations = output.emit_operations;
+        let mut metadata = body_metadata.iter();
         let routed = match flow {
             SabreControlFlow::If {
                 condition,
@@ -2383,9 +2680,13 @@ impl RoutingState {
                 let then_result = route_control_flow_body(
                     then_body,
                     target,
-                    &self.layout,
+                    metadata
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("if then"))?,
+                    &entry_layout,
                     heuristic,
                     output.next_nested_seed(),
+                    emit_operations,
                 )?;
                 let else_result = else_body
                     .as_ref()
@@ -2393,9 +2694,13 @@ impl RoutingState {
                         route_control_flow_body(
                             body,
                             target,
-                            &self.layout,
+                            metadata
+                                .next()
+                                .ok_or_else(|| missing_nested_metadata("if else"))?,
+                            &entry_layout,
                             heuristic,
                             output.next_nested_seed(),
+                            emit_operations,
                         )
                     })
                     .transpose()?;
@@ -2403,10 +2708,15 @@ impl RoutingState {
                 if let Some(result) = &else_result {
                     output.merge_nested(result);
                 }
+                let then_operations = then_result.materialize_operations(target)?;
+                let else_operations = else_result
+                    .as_ref()
+                    .map(|result| result.materialize_operations(target))
+                    .transpose()?;
                 let flow = ClassicalControlOp::If(IfOp::new(
                     condition.clone(),
-                    ControlBody::new(then_result.operations),
-                    else_result.map(|result| ControlBody::new(result.operations)),
+                    ControlBody::new(then_operations),
+                    else_operations.map(ControlBody::new),
                 )?);
                 let qubits = flow.used_qubits().into_iter().collect();
                 Operation {
@@ -2420,14 +2730,19 @@ impl RoutingState {
                 let body_result = route_control_flow_body(
                     body,
                     target,
-                    &self.layout,
+                    metadata
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("while"))?,
+                    &entry_layout,
                     heuristic,
                     output.next_nested_seed(),
+                    emit_operations,
                 )?;
                 output.merge_nested(&body_result);
+                let body_operations = body_result.materialize_operations(target)?;
                 let flow = ClassicalControlOp::While(WhileOp::new(
                     condition.clone(),
-                    ControlBody::new(body_result.operations),
+                    ControlBody::new(body_operations),
                 )?);
                 let qubits = flow.used_qubits().into_iter().collect();
                 Operation {
@@ -2447,17 +2762,22 @@ impl RoutingState {
                 let body_result = route_control_flow_body(
                     body,
                     target,
-                    &self.layout,
+                    metadata
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("for"))?,
+                    &entry_layout,
                     heuristic,
                     output.next_nested_seed(),
+                    emit_operations,
                 )?;
                 output.merge_nested(&body_result);
+                let body_operations = body_result.materialize_operations(target)?;
                 let flow = ClassicalControlOp::For(ForOp::new(
                     *var,
                     start.clone(),
                     stop.clone(),
                     step.clone(),
-                    ControlBody::new(body_result.operations),
+                    ControlBody::new(body_operations),
                 )?);
                 let qubits = flow.used_qubits().into_iter().collect();
                 Operation {
@@ -2477,14 +2797,18 @@ impl RoutingState {
                     let result = route_control_flow_body(
                         &case.body,
                         target,
-                        &self.layout,
+                        metadata
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("switch case"))?,
+                        &entry_layout,
                         heuristic,
                         output.next_nested_seed(),
+                        emit_operations,
                     )?;
                     output.merge_nested(&result);
                     routed_cases.push(SwitchCase::new(
                         case.value,
-                        ControlBody::new(result.operations),
+                        ControlBody::new(result.materialize_operations(target)?),
                     ));
                 }
                 let routed_default = default
@@ -2493,19 +2817,27 @@ impl RoutingState {
                         route_control_flow_body(
                             body,
                             target,
-                            &self.layout,
+                            metadata
+                                .next()
+                                .ok_or_else(|| missing_nested_metadata("switch default"))?,
+                            &entry_layout,
                             heuristic,
                             output.next_nested_seed(),
+                            emit_operations,
                         )
                     })
                     .transpose()?;
                 if let Some(result) = &routed_default {
                     output.merge_nested(result);
                 }
+                let default_operations = routed_default
+                    .as_ref()
+                    .map(|result| result.materialize_operations(target))
+                    .transpose()?;
                 let flow = ClassicalControlOp::Switch(SwitchOp::new(
                     switch_target.clone(),
                     routed_cases,
-                    routed_default.map(|result| ControlBody::new(result.operations)),
+                    default_operations.map(ControlBody::new),
                 )?);
                 let qubits = flow.used_qubits().into_iter().collect();
                 Operation {
@@ -2516,11 +2848,11 @@ impl RoutingState {
                 }
             }
         };
-        output.operations.push(routed);
-        for operation in rest {
-            output
-                .operations
-                .push(map_operation(operation, &self.layout)?);
+        if output.emit_operations {
+            output.push_operation(routed, target)?;
+            for operation in rest {
+                output.push_mapped_operation(operation, &self.layout, target)?;
+            }
         }
         Ok(())
     }
@@ -2530,23 +2862,34 @@ impl RoutingState {
         sabre: &SabreDag,
         target: &RoutingTarget,
     ) -> Result<(), CompilerError> {
-        // Build fixed-depth lookahead layers from the current front layer. Synchronize
-        // and control-flow nodes are transparent for depth counting because they do
-        // not add a parent-level two-qubit adjacency constraint.
-        let mut next_visit = self.front_layer.iter_nodes().collect::<Vec<_>>();
-        let mut to_visit = Vec::new();
-        let mut decremented = BTreeMap::<NodeIndex, u32>::new();
+        // Reuse a dense shadow of the readiness counters and visit buffers.
+        // Exploration touches only successors of the current front, while the
+        // real scheduler counters are restored before returning.
+        let mut next_visit = std::mem::take(&mut self.lookahead_next_scratch);
+        let mut to_visit = std::mem::take(&mut self.lookahead_visit_scratch);
+        let mut touched = std::mem::take(&mut self.lookahead_touched_scratch);
+        next_visit.clear();
+        to_visit.clear();
+        touched.clear();
+        next_visit.extend(self.front_layer.iter_nodes());
+        self.lookahead_layers.iter_mut().for_each(Layer::clear);
+
+        let layout = &self.layout;
+        let requirement_ids = &self.requirement_ids;
+        let cache = &self.lower_bound_cache;
+        let required_predecessors = &mut self.required_predecessors;
+        let decrements = &mut self.lookahead_decrements;
 
         for layer in &mut self.lookahead_layers {
             for node in next_visit.drain(..) {
-                for edge in sabre.graph.edges_directed(node, Direction::Outgoing) {
-                    let successor = edge.target();
-                    *decremented.entry(successor).or_insert(0) += 1;
-                    self.required_predecessors[successor.index()] -= 1;
-                    if self.required_predecessors[successor.index()] == 0 {
-                        to_visit.push(successor);
-                    }
-                }
+                release_shadow_successors(
+                    sabre,
+                    node,
+                    required_predecessors,
+                    decrements,
+                    &mut touched,
+                    &mut to_visit,
+                );
             }
 
             let mut index = 0;
@@ -2554,63 +2897,52 @@ impl RoutingState {
                 let node = to_visit[index];
                 match &sabre.graph[node].kind {
                     SabreNodeKind::Unary(logical) => {
-                        if let Ok(physical) = physical_for(&self.layout, *logical) {
-                            let requirement =
-                                Self::prepared_requirement_id(&self.requirement_ids, node)?;
-                            let distance = |requirement, placement| {
-                                target.distance_for_cached(
-                                    requirement,
-                                    placement,
-                                    Some(&self.lower_bound_cache),
-                                )
-                            };
-                            layer.insert(
+                        if !target.native_cost_enabled {
+                            // Topology-only unary requirements are executable
+                            // at every usable physical position. They do not
+                            // consume routing horizon: release their successors
+                            // in the same shadow layer, matching the scheduler.
+                            release_shadow_successors(
+                                sabre,
                                 node,
-                                requirement,
-                                RequirementPlacement::Unary(target.physical_index(physical)?),
-                                &distance,
-                            )?;
+                                required_predecessors,
+                                decrements,
+                                &mut touched,
+                                &mut to_visit,
+                            );
+                        } else if let Ok(physical_index) = layout.physical_index(*logical) {
+                            let requirement = Self::prepared_requirement_id(requirement_ids, node)?;
+                            let placement = RequirementPlacement::Unary(physical_index);
+                            let distance = |requirement, placement| {
+                                target.distance_for_cached(requirement, placement, Some(cache))
+                            };
+                            layer.insert(node, requirement, placement, &distance)?;
                             next_visit.push(node);
                         }
                     }
                     SabreNodeKind::TwoQ(pair) => {
                         if let (Ok(left), Ok(right)) = (
-                            physical_for(&self.layout, pair[0]),
-                            physical_for(&self.layout, pair[1]),
+                            layout.physical_index(pair[0]),
+                            layout.physical_index(pair[1]),
                         ) {
-                            let interaction =
-                                Self::prepared_requirement_id(&self.requirement_ids, node)?;
+                            let interaction = Self::prepared_requirement_id(requirement_ids, node)?;
+                            let placement = RequirementPlacement::Pair([left, right]);
                             let distance = |requirement, placement| {
-                                target.distance_for_cached(
-                                    requirement,
-                                    placement,
-                                    Some(&self.lower_bound_cache),
-                                )
+                                target.distance_for_cached(requirement, placement, Some(cache))
                             };
-                            layer.insert(
-                                node,
-                                interaction,
-                                RequirementPlacement::Pair([
-                                    target.physical_index(left)?,
-                                    target.physical_index(right)?,
-                                ]),
-                                &distance,
-                            )?;
+                            layer.insert(node, interaction, placement, &distance)?;
                             next_visit.push(node);
                         }
-                        // Missing physical mappings are ignored defensively here.
-                        // Normal routing entrypoints normalize complete layouts before
-                        // creating state, so this only affects future partial-layout use.
                     }
                     SabreNodeKind::Synchronize | SabreNodeKind::ControlFlow(_) => {
-                        for edge in sabre.graph.edges_directed(node, Direction::Outgoing) {
-                            let successor = edge.target();
-                            *decremented.entry(successor).or_insert(0) += 1;
-                            self.required_predecessors[successor.index()] -= 1;
-                            if self.required_predecessors[successor.index()] == 0 {
-                                to_visit.push(successor);
-                            }
-                        }
+                        release_shadow_successors(
+                            sabre,
+                            node,
+                            required_predecessors,
+                            decrements,
+                            &mut touched,
+                            &mut to_visit,
+                        );
                     }
                 }
                 index += 1;
@@ -2618,11 +2950,13 @@ impl RoutingState {
             to_visit.clear();
         }
 
-        // Lookahead exploration temporarily relaxes predecessor counts; restore
-        // them before the real routing state advances.
-        for (node, amount) in decremented {
-            self.required_predecessors[node.index()] += amount;
+        for index in touched.iter().copied() {
+            required_predecessors[index] += decrements[index];
+            decrements[index] = 0;
         }
+        self.lookahead_next_scratch = next_visit;
+        self.lookahead_visit_scratch = to_visit;
+        self.lookahead_touched_scratch = touched;
         Ok(())
     }
 
@@ -2637,14 +2971,34 @@ impl RoutingState {
                 "sabre cannot select a SWAP for an empty front layer".to_string(),
             ));
         }
-        let mut active_indices = self.front_layer.active_indices().collect::<Vec<_>>();
-        active_indices.sort_unstable_by_key(|index| target.physical_qubits[*index]);
-        active_indices.dedup();
-        let mut candidates = Vec::new();
-        for active_index in active_indices {
+        self.active_generation = self.active_generation.wrapping_add(1);
+        if self.active_generation == 0 {
+            self.active_marks.fill(0);
+            self.active_generation = 1;
+        }
+        let mut active_indices = std::mem::take(&mut self.active_index_scratch);
+        active_indices.clear();
+        for active_index in self.front_layer.active_indices() {
+            if self.active_marks[active_index] != self.active_generation {
+                self.active_marks[active_index] = self.active_generation;
+                active_indices.push(active_index);
+            }
+        }
+        // Preserve the candidate order of the previous full physical-table
+        // scan so seeded tie-breaking remains bit-for-bit deterministic.
+        active_indices.sort_unstable();
+
+        let mut candidates = std::mem::take(&mut self.candidate_scratch);
+        candidates.clear();
+        for &active_index in &active_indices {
             let active = target.physical_at(active_index)?;
             for &movement_neighbor in &target.neighbors_by_index[active_index] {
                 let neighbor_index = movement_neighbor.index;
+                if neighbor_index < active_index
+                    && self.active_marks[neighbor_index] == self.active_generation
+                {
+                    continue;
+                }
                 let neighbor = target.physical_at(neighbor_index)?;
                 candidates.push(if active <= neighbor {
                     SwapChoice {
@@ -2669,8 +3023,6 @@ impl RoutingState {
                 });
             }
         }
-        candidates.sort_unstable_by_key(|candidate| candidate.physical);
-        candidates.dedup_by(|left, right| left.physical == right.physical);
         if candidates.len() > 1
             && let Some(previous_swap) = previous_swap
         {
@@ -2688,56 +3040,58 @@ impl RoutingState {
             });
         }
 
-        // Select topology-tied candidates, then prefer the cheapest exact
-        // native route cost.
-        let distance = |requirement, placement| {
-            target.distance_for_cached(requirement, placement, Some(&self.lower_bound_cache))
-        };
         let mut best_score = f64::INFINITY;
-        let mut scored = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let decay = if heuristic.decay_increment.is_some() {
-                self.decay[candidate.indices[0]].max(self.decay[candidate.indices[1]])
+        let mut scored = std::mem::take(&mut self.scored_scratch);
+        scored.clear();
+        scored.reserve(candidates.len().saturating_sub(scored.capacity()));
+        for candidate in candidates.drain(..) {
+            let structural_score = if target.native_cost_enabled {
+                let distance = |requirement, placement| {
+                    target.distance_for_cached(
+                        requirement,
+                        placement,
+                        Some(&self.lower_bound_cache),
+                    )
+                };
+                heuristic_score_after_swap(
+                    &self.front_layer,
+                    &self.lookahead_layers,
+                    heuristic,
+                    candidate.indices,
+                    &distance,
+                )?
             } else {
-                1.0
+                heuristic_topology_score_after_swap(
+                    &self.front_layer,
+                    &self.lookahead_layers,
+                    heuristic,
+                    candidate.indices,
+                    target.topology_distance_values.as_ref(),
+                    target.physical_qubits.len(),
+                )
             };
-            let score = heuristic_score_after_swap(
-                &self.front_layer,
-                &self.lookahead_layers,
-                heuristic,
-                candidate.indices,
-                &distance,
-                decay,
-                target.physical_qubits.len(),
-            )?;
+            let score = if heuristic.decay_increment.is_some() {
+                structural_score
+                    * self.decay[candidate.indices[0]].max(self.decay[candidate.indices[1]])
+            } else {
+                structural_score
+            };
 
             best_score = best_score.min(score);
             scored.push(ScoredCandidate {
                 choice: candidate,
-                topology_score: score,
+                adjusted_score: score,
                 route_cost: None,
             });
         }
 
-        let mut has_native_cost = false;
+        let mut eligible = std::mem::take(&mut self.eligible_scratch);
+        eligible.clear();
+        let candidate_window = 0.25 * heuristic.basic_weight;
+        eligible.extend(scored.drain(..).filter(|candidate| {
+            candidate.adjusted_score <= best_score + candidate_window + heuristic.best_epsilon
+        }));
         if target.native_cost_enabled {
-            // Preserve the former pre-epsilon, short-circuiting query order.
-            // The stored tri-state prevents later sort/retain passes from
-            // repeating the front-layer traversal for the same candidate.
-            for candidate in &mut scored {
-                let cost = candidate
-                    .cached_route_cost(|choice| self.route_cost_after_swap(target, choice));
-                if cost.is_some() {
-                    has_native_cost = true;
-                    break;
-                }
-            }
-        }
-        let mut eligible = scored
-            .into_iter()
-            .filter(|candidate| candidate.topology_score <= best_score + heuristic.best_epsilon)
-            .collect::<Vec<_>>();
-        if has_native_cost {
             for candidate in &mut eligible {
                 candidate.cached_route_cost(|choice| self.route_cost_after_swap(target, choice));
             }
@@ -2746,6 +3100,7 @@ impl RoutingState {
                     left.prepared_route_cost(),
                     right.prepared_route_cost(),
                 )
+                .then_with(|| left.adjusted_score.total_cmp(&right.adjusted_score))
                 .then_with(|| left.choice.physical.cmp(&right.choice.physical))
             });
             if let Some(best) = eligible.first().copied() {
@@ -2756,13 +3111,27 @@ impl RoutingState {
                 });
             }
         }
-
+        let best_adjusted = eligible
+            .iter()
+            .map(|candidate| candidate.adjusted_score)
+            .min_by(f64::total_cmp)
+            .unwrap_or(best_score);
         eligible
+            .retain(|candidate| candidate.adjusted_score <= best_adjusted + heuristic.best_epsilon);
+        let selected = eligible
             .choose(&mut self.rng)
             .map(|candidate| candidate.choice)
             .ok_or_else(|| {
                 CompilerError::InvariantViolation("sabre found no best SWAP".to_string())
-            })
+            })?;
+        candidates.clear();
+        scored.clear();
+        eligible.clear();
+        self.candidate_scratch = candidates;
+        self.active_index_scratch = active_indices;
+        self.scored_scratch = scored;
+        self.eligible_scratch = eligible;
+        Ok(selected)
     }
 
     fn route_cost_after_swap(
@@ -2887,72 +3256,87 @@ impl RoutingState {
     }
 }
 
-/// Detects exact mapping cycles without copying the full mapping after every
-/// speculative SWAP. Hash matches are verified against a replayed mapping, so
-/// a hash collision cannot trigger a false cycle.
+fn release_shadow_successors(
+    sabre: &SabreDag,
+    node: NodeIndex,
+    required_predecessors: &mut [u32],
+    decrements: &mut [u32],
+    touched: &mut Vec<usize>,
+    to_visit: &mut Vec<NodeIndex>,
+) {
+    for edge in sabre.graph.edges_directed(node, Direction::Outgoing) {
+        let successor = edge.target();
+        let successor_index = successor.index();
+        if decrements[successor_index] == 0 {
+            touched.push(successor_index);
+        }
+        decrements[successor_index] += 1;
+        required_predecessors[successor_index] -= 1;
+        if required_predecessors[successor_index] == 0 {
+            to_visit.push(successor);
+        }
+    }
+}
+
+/// Detects recent mapping cycles with an incrementally maintained hash.
+///
+/// A hit is only a search signal: routing rolls back and takes the guaranteed
+/// progress fallback. Therefore a theoretical hash collision cannot invalidate
+/// the routed circuit.
 struct MappingCycleDetector {
-    initial: Vec<Option<LogicalQubit>>,
     current_hash: u64,
-    history: Vec<[usize; 2]>,
-    seen_steps: HashMap<u64, SmallVec<[usize; 1]>>,
+    recent: VecDeque<u64>,
+    seen: HashSet<u64>,
 }
 
 impl MappingCycleDetector {
-    fn new(layout: &Layout, target: &RoutingTarget) -> Self {
-        let initial = Self::signature(layout, target);
-        let current_hash = Self::mapping_hash(&initial);
+    const WINDOW: usize = 32;
+
+    fn new(current_hash: u64) -> Self {
         Self {
-            initial,
             current_hash,
-            history: Vec::new(),
-            seen_steps: HashMap::from([(current_hash, smallvec![0])]),
+            recent: VecDeque::from([current_hash]),
+            seen: HashSet::from([current_hash]),
         }
     }
 
-    fn record_swap(
-        &mut self,
-        layout: &Layout,
-        target: &RoutingTarget,
-        swap: [usize; 2],
-    ) -> Result<bool, CompilerError> {
-        let [left, right] = swap;
-        let after_left = layout.get_logical(target.physical_at(left)?);
-        let after_right = layout.get_logical(target.physical_at(right)?);
-        self.current_hash ^= Self::entry_hash(left, after_right)
-            ^ Self::entry_hash(right, after_left)
-            ^ Self::entry_hash(left, after_left)
-            ^ Self::entry_hash(right, after_right);
-        self.history.push(swap);
+    fn reset(&mut self, current_hash: u64) {
+        self.current_hash = current_hash;
+        self.recent.clear();
+        self.recent.push_back(current_hash);
+        self.seen.clear();
+        self.seen.insert(current_hash);
+    }
 
-        let step = self.history.len();
-        let Some(previous_steps) = self.seen_steps.get_mut(&self.current_hash) else {
-            self.seen_steps.insert(self.current_hash, smallvec![step]);
-            return Ok(false);
-        };
-
-        let current = Self::signature(layout, target);
-        for &previous_step in previous_steps.iter() {
-            let mut previous = self.initial.clone();
-            for &[previous_left, previous_right] in &self.history[..previous_step] {
-                previous.swap(previous_left, previous_right);
-            }
-            if previous == current {
-                return Ok(true);
-            }
+    fn record_hash(&mut self, current_hash: u64) -> bool {
+        self.current_hash = current_hash;
+        if self.seen.contains(&self.current_hash) {
+            return true;
         }
-        previous_steps.push(step);
-        Ok(false)
+        self.recent.push_back(self.current_hash);
+        self.seen.insert(self.current_hash);
+        if self.recent.len() > Self::WINDOW
+            && let Some(expired) = self.recent.pop_front()
+        {
+            self.seen.remove(&expired);
+        }
+        false
     }
 
-    fn signature(layout: &Layout, target: &RoutingTarget) -> Vec<Option<LogicalQubit>> {
-        target
-            .physical_qubits
-            .iter()
-            .map(|physical| layout.get_logical(*physical))
-            .collect()
+    fn hash_after_swap(
+        current_hash: u64,
+        [left, right]: [usize; 2],
+        before_left: Option<usize>,
+        before_right: Option<usize>,
+    ) -> u64 {
+        current_hash
+            ^ Self::entry_hash(left, before_left)
+            ^ Self::entry_hash(right, before_right)
+            ^ Self::entry_hash(left, before_right)
+            ^ Self::entry_hash(right, before_left)
     }
 
-    fn mapping_hash(mapping: &[Option<LogicalQubit>]) -> u64 {
+    fn mapping_hash(mapping: &[Option<usize>]) -> u64 {
         mapping
             .iter()
             .copied()
@@ -2962,8 +3346,8 @@ impl MappingCycleDetector {
             })
     }
 
-    fn entry_hash(physical: usize, logical: Option<LogicalQubit>) -> u64 {
-        let logical = logical.map_or(0, |logical| u64::from(logical.id()) + 1);
+    fn entry_hash(physical: usize, logical: Option<usize>) -> u64 {
+        let logical = logical.map_or(0, |logical| logical as u64 + 1);
         let mut value = (physical as u64)
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(logical);
@@ -2977,32 +3361,16 @@ fn compare_optional_native_cost(
     left: Option<NativePlanCost>,
     right: Option<NativePlanCost>,
 ) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left
-            .native_two_qubit_ops
-            .cmp(&right.native_two_qubit_ops)
-            .then_with(|| left.error.compare_by(right.error, RobustErrorKey::compare))
-            .then_with(|| {
-                left.duration
-                    .compare_by(right.duration, RobustDurationKey::compare)
-            })
-            .then_with(|| left.native_total_ops.cmp(&right.native_total_ops)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
+    compare_some_first_by(left, right, |left, right| {
+        left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops)
+    })
 }
 
 fn compare_optional_route_bound(
     left: Option<RouteLowerBound>,
     right: Option<RouteLowerBound>,
 ) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.compare(right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
+    compare_some_first_by(left, right, |left, right| left.compare(right))
 }
 
 fn heuristic_score_after_swap(
@@ -3011,23 +3379,42 @@ fn heuristic_score_after_swap(
     heuristic: &SabreHeuristicConfig,
     swap: [usize; 2],
     distances: &impl Fn(usize, RequirementPlacement) -> Result<f64, CompilerError>,
-    decay: f64,
-    device_width: usize,
 ) -> Result<f64, CompilerError> {
     let mut score = heuristic.basic_weight * front_layer.total_score_after_swap(swap, distances)?;
-    let lookahead_scale = device_width.max(1) as f64;
     for (layer, weight) in lookahead_layers
         .iter()
         .zip(heuristic.lookahead_weights.iter().copied())
     {
-        score += weight * layer.total_score_after_swap(swap, distances)? / lookahead_scale;
+        score +=
+            weight * layer.total_score_after_swap(swap, distances)? / layer.len().max(1) as f64;
     }
-    Ok(score + (decay - 1.0).max(0.0))
+    Ok(score)
+}
+
+fn heuristic_topology_score_after_swap(
+    front_layer: &Layer,
+    lookahead_layers: &[Layer],
+    heuristic: &SabreHeuristicConfig,
+    swap: [usize; 2],
+    distances: &[u32],
+    width: usize,
+) -> f64 {
+    let mut score = heuristic.basic_weight
+        * front_layer.total_topology_score_after_swap(swap, distances, width);
+    for (layer, weight) in lookahead_layers
+        .iter()
+        .zip(heuristic.lookahead_weights.iter().copied())
+    {
+        score += weight * layer.total_topology_score_after_swap(swap, distances, width)
+            / layer.len().max(1) as f64;
+    }
+    score
 }
 
 #[derive(Debug, Default)]
 struct TrialOutput {
-    operations: Vec<Operation>,
+    plan: CompactRoutePlan,
+    emit_operations: bool,
     swap_count: usize,
     fallback_count: usize,
     control_flow_blocks_routed: usize,
@@ -3035,29 +3422,85 @@ struct TrialOutput {
     lazy_pair_l1_hit_count: usize,
     lazy_pair_l1_cached_count: usize,
     nested_seed_counter: u64,
+    native_cost: NativeCircuitCost,
+    two_qubit_operation_count: usize,
+    operation_count: usize,
 }
 
 impl TrialOutput {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, emit_operations: bool) -> Self {
         Self {
             nested_seed_counter: seed,
+            emit_operations,
             ..Self::default()
         }
+    }
+
+    fn push_operation(
+        &mut self,
+        operation: Operation,
+        target: &RoutingTarget,
+    ) -> Result<(), CompilerError> {
+        debug_assert!(self.emit_operations);
+        self.two_qubit_operation_count = self
+            .two_qubit_operation_count
+            .saturating_add(two_qubit_operation_count(std::slice::from_ref(&operation)));
+        self.operation_count = self
+            .operation_count
+            .saturating_add(operation_count(std::slice::from_ref(&operation)));
+        if target.native_cost_enabled {
+            self.native_cost
+                .append_sequence(native_plan_cost_for_operations(
+                    std::slice::from_ref(&operation),
+                    target,
+                )?);
+        }
+        self.plan.push_operation(operation);
+        Ok(())
+    }
+
+    fn push_mapped_operation(
+        &mut self,
+        operation: &Arc<Operation>,
+        layout: &DenseRoutingLayout,
+        target: &RoutingTarget,
+    ) -> Result<(), CompilerError> {
+        debug_assert!(self.emit_operations);
+        if target.native_cost_enabled {
+            let mapped = map_operation_dense(operation, layout, target)?;
+            return self.push_operation(mapped, target);
+        }
+
+        let qubits = map_operation_qubits_dense(operation, layout, target)?;
+        self.operation_count = self.operation_count.saturating_add(1);
+        if qubits.len() == 2 {
+            self.two_qubit_operation_count = self.two_qubit_operation_count.saturating_add(1);
+        }
+        self.plan
+            .push_mapped_operation(Arc::clone(operation), qubits);
+        Ok(())
     }
 
     fn apply_pending_swaps(
         &mut self,
         target: &RoutingTarget,
-        swaps: Option<Vec<[PhysicalQubit; 2]>>,
+        swaps: Option<&mut Vec<[PhysicalQubit; 2]>>,
     ) -> Result<(), CompilerError> {
         if let Some(swaps) = swaps {
             self.swap_count += swaps.len();
-            self.operations.extend(
-                swaps
-                    .into_iter()
-                    .map(|swap| target.swap_operation(swap))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            if self.emit_operations {
+                for swap in swaps.drain(..) {
+                    self.plan.push_swap(swap);
+                    self.operation_count = self.operation_count.saturating_add(1);
+                    self.two_qubit_operation_count =
+                        self.two_qubit_operation_count.saturating_add(1);
+                    if target.native_cost_enabled {
+                        self.native_cost.append_gate(target.swap_cost(swap)?);
+                    }
+                }
+            } else {
+                swaps.clear();
+            }
         }
         Ok(())
     }
@@ -3092,11 +3535,21 @@ impl TrialOutput {
 fn route_control_flow_body(
     sabre: &SabreDag,
     target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
     entry_layout: &Layout,
     heuristic: &SabreHeuristicConfig,
     seed: u64,
+    emit_operations: bool,
 ) -> Result<UnscoredTrial, CompilerError> {
-    let mut result = route_unscored_trial(sabre, target, entry_layout, heuristic, seed)?;
+    let mut result = route_trial_with_metadata(
+        sabre,
+        target,
+        metadata,
+        entry_layout,
+        heuristic,
+        seed,
+        emit_operations,
+    )?;
     let epilogue_swaps = restore_layout_swaps(target, &result.final_layout, entry_layout, seed)?;
     let mut layout = result.final_layout.clone();
     for swap in &epilogue_swaps {
@@ -3106,29 +3559,29 @@ fn route_control_flow_body(
             ))
         })?;
     }
-    let ends_with_control_transfer = matches!(
-        result
-            .operations
-            .last()
-            .map(|operation| &operation.instruction),
-        Some(Instruction::ClassicalControl(
-            ClassicalControlOp::Break | ClassicalControlOp::Continue
-        ))
-    );
+    let ends_with_control_transfer = emit_operations
+        && matches!(
+            result
+                .plan
+                .last_operation()
+                .map(|operation| &operation.instruction),
+            Some(Instruction::ClassicalControl(
+                ClassicalControlOp::Break | ClassicalControlOp::Continue
+            ))
+        );
     let control_transfer = if ends_with_control_transfer {
-        result.operations.pop()
+        result.plan.pop_last_operation()
     } else {
         None
     };
-    result.operations.extend(
-        epilogue_swaps
-            .iter()
-            .copied()
-            .map(|swap| target.swap_operation(swap))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    result.operations.extend(control_transfer);
-    result.swap_count += epilogue_swaps.len();
+    if emit_operations {
+        result.append_swaps(target, epilogue_swaps.iter().copied())?;
+        if let Some(control_transfer) = control_transfer {
+            result.plan.push_operation(control_transfer);
+        }
+    } else {
+        result.swap_count = result.swap_count.saturating_add(epilogue_swaps.len());
+    }
     result.final_layout = layout;
     if result.final_layout.l2p_map() != entry_layout.l2p_map() {
         return Err(CompilerError::InvariantViolation(
@@ -3136,6 +3589,12 @@ fn route_control_flow_body(
         ));
     }
     Ok(result)
+}
+
+fn missing_nested_metadata(body: &str) -> CompilerError {
+    CompilerError::InvariantViolation(format!(
+        "control-flow {body} body has no prepared routing metadata"
+    ))
 }
 
 /// Computes SWAPs that restore one layout to another on the target graph.
@@ -3199,20 +3658,34 @@ fn restore_layout_swaps(
         .collect()
 }
 
-fn map_operation(operation: &Operation, layout: &Layout) -> Result<Operation, CompilerError> {
+fn map_operation_dense(
+    operation: &Operation,
+    layout: &DenseRoutingLayout,
+    target: &RoutingTarget,
+) -> Result<Operation, CompilerError> {
     Ok(Operation {
         instruction: operation.instruction.clone(),
-        qubits: operation
-            .qubits
-            .iter()
-            .copied()
-            .map(|qubit| {
-                physical_for(layout, LogicalQubit::from_qubit(qubit)).map(PhysicalQubit::qubit)
-            })
-            .collect::<Result<SmallVec<[Qubit; 3]>, _>>()?,
+        qubits: map_operation_qubits_dense(operation, layout, target)?,
         params: operation.params.clone(),
         label: operation.label.clone(),
     })
+}
+
+#[inline]
+fn map_operation_qubits_dense(
+    operation: &Operation,
+    layout: &DenseRoutingLayout,
+    target: &RoutingTarget,
+) -> Result<SmallVec<[Qubit; 3]>, CompilerError> {
+    operation
+        .qubits
+        .iter()
+        .copied()
+        .map(|qubit| {
+            let physical_index = layout.physical_index(LogicalQubit::from_qubit(qubit))?;
+            target.physical_at(physical_index).map(PhysicalQubit::qubit)
+        })
+        .collect()
 }
 
 /// Remaps operation parameter indices into the routed circuit's parameter table.
@@ -3221,23 +3694,23 @@ fn map_operation(operation: &Operation, layout: &Layout) -> Result<Operation, Co
 /// operations are rebuilt before the final table exists. This function walks
 /// recursively so every body points at the reordered routed table.
 fn remap_parameter_indices(
-    operation: &Operation,
+    mut operation: Operation,
     parameter_indices: &[u32],
 ) -> Result<Operation, CompilerError> {
-    let mut mapped = operation.clone();
-    for param in &mut mapped.params {
+    for param in &mut operation.params {
         if let CircuitParam::Index(index) = param {
             *index = *parameter_indices
                 .get(*index as usize)
                 .ok_or(crate::circuit::CircuitError::InvalidParameterIndex(*index))?;
         }
     }
-    mapped.instruction = match &operation.instruction {
+    operation.instruction = match &operation.instruction {
         Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
             let then_body = op
                 .then_body()
                 .operations()
                 .iter()
+                .cloned()
                 .map(|operation| remap_parameter_indices(operation, parameter_indices))
                 .collect::<Result<Vec<_>, _>>()?;
             let else_body = op
@@ -3245,6 +3718,7 @@ fn remap_parameter_indices(
                 .map(|body| {
                     body.operations()
                         .iter()
+                        .cloned()
                         .map(|operation| remap_parameter_indices(operation, parameter_indices))
                         .collect::<Result<Vec<_>, _>>()
                         .map(ControlBody::new)
@@ -3261,6 +3735,7 @@ fn remap_parameter_indices(
                 .body()
                 .operations()
                 .iter()
+                .cloned()
                 .map(|operation| remap_parameter_indices(operation, parameter_indices))
                 .collect::<Result<Vec<_>, _>>()?;
             Instruction::ClassicalControl(ClassicalControlOp::While(WhileOp::new(
@@ -3273,6 +3748,7 @@ fn remap_parameter_indices(
                 .body()
                 .operations()
                 .iter()
+                .cloned()
                 .map(|operation| remap_parameter_indices(operation, parameter_indices))
                 .collect::<Result<Vec<_>, _>>()?;
             Instruction::ClassicalControl(ClassicalControlOp::For(ForOp::new(
@@ -3292,6 +3768,7 @@ fn remap_parameter_indices(
                         .body()
                         .operations()
                         .iter()
+                        .cloned()
                         .map(|operation| remap_parameter_indices(operation, parameter_indices))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(SwitchCase::new(case.value(), ControlBody::new(body)))
@@ -3302,6 +3779,7 @@ fn remap_parameter_indices(
                 .map(|body| {
                     body.operations()
                         .iter()
+                        .cloned()
                         .map(|operation| remap_parameter_indices(operation, parameter_indices))
                         .collect::<Result<Vec<_>, _>>()
                         .map(ControlBody::new)
@@ -3315,7 +3793,7 @@ fn remap_parameter_indices(
         }
         _ => operation.instruction.clone(),
     };
-    Ok(mapped)
+    Ok(operation)
 }
 
 fn physical_for(layout: &Layout, logical: LogicalQubit) -> Result<PhysicalQubit, CompilerError> {
@@ -3792,6 +4270,45 @@ pub(crate) fn validate_reachable_interactions_for_target(
     }
 }
 
+pub(crate) fn validate_reachable_interactions_for_target_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    layout: &Layout,
+) -> Result<(), CompilerError> {
+    match interaction_reachability_for_target_with_metadata(sabre, target, metadata, layout)? {
+        InteractionReachability::Reachable => Ok(()),
+        InteractionReachability::UnreachableUnary {
+            logical,
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutableUnaryTerminal { logical },
+        )),
+        InteractionReachability::UnreachableUnary {
+            logical,
+            physical,
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachableUnaryPlacement { logical, physical },
+        )),
+        InteractionReachability::UnreachablePair {
+            logical,
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::NoExecutablePairTerminal { logical },
+        )),
+        InteractionReachability::UnreachablePair {
+            logical,
+            physical,
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+        } => Err(CompilerError::SabreRoutingFailed(
+            SabreRoutingFailure::UnreachablePairPlacement { logical, physical },
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InteractionReachability {
     Reachable,
@@ -3818,13 +4335,46 @@ pub(crate) fn interaction_reachability_for_target(
     target: &RoutingTarget,
     layout: &Layout,
 ) -> Result<InteractionReachability, CompilerError> {
+    let metadata = PreparedRouteMetadata::new(sabre, target)?;
+    interaction_reachability_for_target_with_metadata(sabre, target, &metadata, layout)
+}
+
+pub(crate) fn interaction_reachability_for_target_with_metadata(
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    metadata: &PreparedRouteMetadata,
+    layout: &Layout,
+) -> Result<InteractionReachability, CompilerError> {
     for node_index in sabre.graph.node_indices() {
         let node = &sabre.graph[node_index];
+        let requirement = || {
+            metadata
+                .requirement_ids
+                .get(node_index.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "reachability node {} has no prepared requirement id",
+                        node_index.index()
+                    ))
+                })
+        };
+        let mut nested = metadata
+            .nested
+            .get(node_index.index())
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "reachability node {} has no prepared nested metadata slot",
+                    node_index.index()
+                ))
+            })?
+            .iter();
         match &node.kind {
             SabreNodeKind::Unary(logical) => {
                 let physical = physical_for(layout, *logical)?;
                 let physical_index = target.physical_index(physical)?;
-                let requirement = target.interaction_id_for_node(sabre, node_index)?;
+                let requirement = requirement()?;
                 if target
                     .distance_steps_for(requirement, RequirementPlacement::Unary(physical_index))
                     .is_none()
@@ -3845,7 +4395,7 @@ pub(crate) fn interaction_reachability_for_target(
                 let right = physical_for(layout, pair[1])?;
                 let left_index = target.physical_index(left)?;
                 let right_index = target.physical_index(right)?;
-                let interaction = target.interaction_id_for_node(sabre, node_index)?;
+                let interaction = requirement()?;
                 if target
                     .distance_steps_for(
                         interaction,
@@ -3869,12 +4419,26 @@ pub(crate) fn interaction_reachability_for_target(
                 else_body,
                 ..
             }) => {
-                let reachable = interaction_reachability_for_target(then_body, target, layout)?;
+                let reachable = interaction_reachability_for_target_with_metadata(
+                    then_body,
+                    target,
+                    nested
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("if then"))?,
+                    layout,
+                )?;
                 if reachable != InteractionReachability::Reachable {
                     return Ok(reachable);
                 }
                 if let Some(else_body) = else_body {
-                    let reachable = interaction_reachability_for_target(else_body, target, layout)?;
+                    let reachable = interaction_reachability_for_target_with_metadata(
+                        else_body,
+                        target,
+                        nested
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("if else"))?,
+                        layout,
+                    )?;
                     if reachable != InteractionReachability::Reachable {
                         return Ok(reachable);
                     }
@@ -3883,21 +4447,41 @@ pub(crate) fn interaction_reachability_for_target(
             SabreNodeKind::ControlFlow(
                 SabreControlFlow::While { body, .. } | SabreControlFlow::For { body, .. },
             ) => {
-                let reachable = interaction_reachability_for_target(body, target, layout)?;
+                let reachable = interaction_reachability_for_target_with_metadata(
+                    body,
+                    target,
+                    nested
+                        .next()
+                        .ok_or_else(|| missing_nested_metadata("loop"))?,
+                    layout,
+                )?;
                 if reachable != InteractionReachability::Reachable {
                     return Ok(reachable);
                 }
             }
             SabreNodeKind::ControlFlow(SabreControlFlow::Switch { cases, default, .. }) => {
                 for case in cases {
-                    let reachable =
-                        interaction_reachability_for_target(&case.body, target, layout)?;
+                    let reachable = interaction_reachability_for_target_with_metadata(
+                        &case.body,
+                        target,
+                        nested
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("switch case"))?,
+                        layout,
+                    )?;
                     if reachable != InteractionReachability::Reachable {
                         return Ok(reachable);
                     }
                 }
                 if let Some(default) = default {
-                    let reachable = interaction_reachability_for_target(default, target, layout)?;
+                    let reachable = interaction_reachability_for_target_with_metadata(
+                        default,
+                        target,
+                        nested
+                            .next()
+                            .ok_or_else(|| missing_nested_metadata("switch default"))?,
+                        layout,
+                    )?;
                     if reachable != InteractionReachability::Reachable {
                         return Ok(reachable);
                     }
@@ -3918,167 +4502,29 @@ fn swap_operation(swap: [PhysicalQubit; 2]) -> Operation {
     }
 }
 
-impl SabreTrialObjective {
-    pub(crate) fn compare(
-        self,
-        left: TrialQuality,
-        left_index: usize,
-        right: TrialQuality,
-        right_index: usize,
-    ) -> Ordering {
-        match self {
-            SabreTrialObjective::SwapCount => left
-                .abstract_quality
-                .swap_count
-                .cmp(&right.abstract_quality.swap_count)
-                .then_with(|| left_index.cmp(&right_index)),
-            SabreTrialObjective::Depth => left
-                .abstract_quality
-                .two_qubit_depth
-                .cmp(&right.abstract_quality.two_qubit_depth)
-                .then_with(|| left_index.cmp(&right_index)),
-            SabreTrialObjective::NativeQualityWithinSwapBudget => left
-                .native_two_qubit_ops
-                .cmp(&right.native_two_qubit_ops)
-                .then_with(|| {
-                    left.native_two_qubit_depth
-                        .cmp(&right.native_two_qubit_depth)
-                })
-                .then_with(|| match (left.error, right.error) {
-                    (Some(left), Some(right)) => left.compare(right),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                })
-                .then_with(|| left.compare_duration(right))
-                .then_with(|| left.native_total_ops.cmp(&right.native_total_ops))
-                .then_with(|| {
-                    left.abstract_quality
-                        .swap_count
-                        .cmp(&right.abstract_quality.swap_count)
-                })
-                .then_with(|| {
-                    left.abstract_quality
-                        .two_qubit_depth
-                        .cmp(&right.abstract_quality.two_qubit_depth)
-                })
-                .then_with(|| {
-                    left.abstract_quality
-                        .operation_count
-                        .cmp(&right.abstract_quality.operation_count)
-                })
-                .then_with(|| left_index.cmp(&right_index)),
-            SabreTrialObjective::DepthThenSwap => left
-                .abstract_quality
-                .two_qubit_depth
-                .cmp(&right.abstract_quality.two_qubit_depth)
-                .then_with(|| {
-                    left.abstract_quality
-                        .swap_count
-                        .cmp(&right.abstract_quality.swap_count)
-                })
-                .then_with(|| {
-                    left.abstract_quality
-                        .operation_count
-                        .cmp(&right.abstract_quality.operation_count)
-                })
-                .then_with(|| left_index.cmp(&right_index)),
-        }
-    }
-
-    pub(crate) fn swap_limit(
-        self,
-        swap_regret_ratio: f64,
-        swap_counts: impl Iterator<Item = usize>,
-    ) -> usize {
-        if self != SabreTrialObjective::NativeQualityWithinSwapBudget {
-            return usize::MAX;
-        }
-        let best = swap_counts.min().unwrap_or(0);
-        let regret = ((best as f64) * swap_regret_ratio).ceil();
-        let regret = if regret >= usize::MAX as f64 {
-            usize::MAX
-        } else {
-            regret as usize
-        };
-        best.saturating_add(regret)
-    }
-}
-
-fn trial_quality(
-    operations: &[Operation],
-    abstract_quality: AbstractTrialQuality,
+pub(crate) fn compare_ranked_trials(
+    left: &mut RankedTrial,
+    left_index: (usize, usize),
+    right: &mut RankedTrial,
+    right_index: (usize, usize),
     target: &RoutingTarget,
-) -> Result<TrialQuality, CompilerError> {
-    if !target.native_cost_enabled {
-        return Ok(TrialQuality::from_abstract(abstract_quality));
+) -> Result<Ordering, CompilerError> {
+    let count_order = left.native_two_qubit_ops.cmp(&right.native_two_qubit_ops);
+    if !count_order.is_eq() {
+        return Ok(count_order);
     }
 
-    let native = native_plan_cost_for_operations(operations, target)?;
-    let static_native = native.static_native.unwrap_or_default();
-    Ok(TrialQuality {
-        abstract_quality,
-        native_two_qubit_ops: static_native.native_two_qubit_ops as usize,
-        native_two_qubit_depth: native_two_qubit_depth(operations, target)?,
-        native_total_ops: static_native.native_total_ops as usize,
-        error: native.path.error,
-        duration: native.path.duration,
-        makespan: native_makespan(operations, target)?,
-        unknown_loop_count: native.path.unknown_loop_count,
-    })
-}
+    let depth_order = left
+        .ensure_native_two_qubit_depth(target)?
+        .cmp(&right.ensure_native_two_qubit_depth(target)?);
+    if !depth_order.is_eq() {
+        return Ok(depth_order);
+    }
 
-/// Verifies exact-qargs native-plan availability for every routed operation.
-///
-/// Trial selection intentionally delays expensive depth, duration, and error
-/// aggregation. This pass preserves the stronger invariant that every trial,
-/// including one later removed by the SWAP budget, is structurally lowerable.
-pub(crate) fn validate_native_trial_operations(
-    operations: &[Operation],
-    target: &RoutingTarget,
-) -> Result<(), CompilerError> {
-    if !target.native_cost_enabled {
-        return Ok(());
-    }
-    for operation in operations {
-        match &operation.instruction {
-            Instruction::Standard(StandardGate::GPhase) => {}
-            Instruction::Standard(_) | Instruction::McGate(_) => {
-                native_cost_for_routed_operation(operation, target)?;
-            }
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    validate_native_trial_operations(op.then_body().operations(), target)?;
-                    if let Some(body) = op.else_body() {
-                        validate_native_trial_operations(body.operations(), target)?;
-                    }
-                }
-                ClassicalControlOp::While(op) => {
-                    validate_native_trial_operations(op.body().operations(), target)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    validate_native_trial_operations(op.body().operations(), target)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        validate_native_trial_operations(case.body().operations(), target)?;
-                    }
-                    if let Some(body) = op.default() {
-                        validate_native_trial_operations(body.operations(), target)?;
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
-            Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => {}
-            Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
-                return Err(CompilerError::InvariantViolation(format!(
-                    "unlowerable routed operation {} reached native trial validation",
-                    operation.instruction
-                )));
-            }
-        }
-    }
-    Ok(())
+    Ok(left
+        .ensure_native_total_depth(target)?
+        .cmp(&right.ensure_native_total_depth(target)?)
+        .then_with(|| left_index.cmp(&right_index)))
 }
 
 fn native_cost_for_routed_operation(
@@ -4122,24 +4568,16 @@ struct NativeCircuitCost {
 struct ExecutionPathCost {
     native_two_qubit_ops: u32,
     native_total_ops: u32,
-    error: Option<RobustErrorKey>,
-    duration: Option<RobustDurationKey>,
     unknown_loop_count: usize,
 }
 
 impl NativeCircuitCost {
-    fn append_gate(&mut self, cost: NativePlanCost) -> Result<(), CompilerError> {
-        if cost.error.is_inconsistent() || cost.duration.is_inconsistent() {
-            return Err(CompilerError::InvariantViolation(
-                "native plan cost mixes enabled and disabled calibration metrics".to_string(),
-            ));
-        }
+    fn append_gate(&mut self, cost: NativePlanCost) {
         self.static_native = Some(match self.static_native {
             Some(current) => current.combine(cost),
             None => cost,
         });
         self.path.append_gate(cost);
-        Ok(())
     }
 
     fn append_sequence(&mut self, other: Self) {
@@ -4162,8 +4600,6 @@ impl ExecutionPathCost {
             .native_two_qubit_ops
             .saturating_add(cost.native_two_qubit_ops);
         self.native_total_ops = self.native_total_ops.saturating_add(cost.native_total_ops);
-        self.error = combine_error_identity(self.error, cost.error.value());
-        self.duration = combine_duration_identity(self.duration, cost.duration.value());
     }
 
     fn append_sequence(&mut self, other: Self) {
@@ -4171,8 +4607,6 @@ impl ExecutionPathCost {
             .native_two_qubit_ops
             .saturating_add(other.native_two_qubit_ops);
         self.native_total_ops = self.native_total_ops.saturating_add(other.native_total_ops);
-        self.error = combine_error_identity(self.error, other.error);
-        self.duration = combine_duration_identity(self.duration, other.duration);
         self.unknown_loop_count = self
             .unknown_loop_count
             .saturating_add(other.unknown_loop_count);
@@ -4183,20 +4617,6 @@ impl ExecutionPathCost {
             (u128::from(self.native_two_qubit_ops) * count).min(u128::from(u32::MAX)) as u32;
         self.native_total_ops =
             (u128::from(self.native_total_ops) * count).min(u128::from(u32::MAX)) as u32;
-        self.error = self.error.map(|value| RobustErrorKey {
-            unavailable_count: (u128::from(value.unavailable_count) * count)
-                .min(u128::from(u32::MAX)) as u32,
-            imputed_count: (u128::from(value.imputed_count) * count).min(u128::from(u32::MAX))
-                as u32,
-            log_error: value.log_error * count as f64,
-        });
-        self.duration = self.duration.map(|value| RobustDurationKey {
-            unavailable_count: (u128::from(value.unavailable_count) * count)
-                .min(u128::from(u32::MAX)) as u32,
-            imputed_count: (u128::from(value.imputed_count) * count).min(u128::from(u32::MAX))
-                as u32,
-            duration_work: value.duration_work * count as f64,
-        });
         self.unknown_loop_count = (self.unknown_loop_count as u128)
             .saturating_mul(count)
             .min(usize::MAX as u128) as usize;
@@ -4215,14 +4635,6 @@ impl ExecutionPathCost {
         self.unknown_loop_count
             .cmp(&other.unknown_loop_count)
             .then_with(|| self.native_two_qubit_ops.cmp(&other.native_two_qubit_ops))
-            .then_with(|| match (self.error, other.error) {
-                (Some(left), Some(right)) => left.compare(right),
-                _ => Ordering::Equal,
-            })
-            .then_with(|| match (self.duration, other.duration) {
-                (Some(left), Some(right)) => left.compare(right),
-                _ => Ordering::Equal,
-            })
             .then_with(|| self.native_total_ops.cmp(&other.native_total_ops))
     }
 }
@@ -4231,28 +4643,6 @@ fn combine_optional_native_cost(
     left: Option<NativePlanCost>,
     right: Option<NativePlanCost>,
 ) -> Option<NativePlanCost> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.combine(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-fn combine_error_identity(
-    left: Option<RobustErrorKey>,
-    right: Option<RobustErrorKey>,
-) -> Option<RobustErrorKey> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.combine(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-fn combine_duration_identity(
-    left: Option<RobustDurationKey>,
-    right: Option<RobustDurationKey>,
-) -> Option<RobustDurationKey> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.combine(right)),
         (Some(value), None) | (None, Some(value)) => Some(value),
@@ -4270,7 +4660,7 @@ fn native_plan_cost_for_operations(
             Instruction::Standard(StandardGate::GPhase) => {}
             Instruction::Standard(_) | Instruction::McGate(_) => {
                 let cost = native_cost_for_routed_operation(operation, target)?;
-                total.append_gate(cost)?;
+                total.append_gate(cost);
             }
             Instruction::ClassicalControl(control) => match control {
                 ClassicalControlOp::If(op) => {
@@ -4292,11 +4682,15 @@ fn native_plan_cost_for_operations(
                 }
                 ClassicalControlOp::For(op) => {
                     let mut body = native_plan_cost_for_operations(op.body().operations(), target)?;
-                    total.add_static_branch(body);
                     if let Some(iterations) = op.static_iteration_count() {
+                        total.static_native = combine_optional_native_cost(
+                            total.static_native,
+                            repeat_native_cost(body.static_native, iterations),
+                        );
                         body.static_native = None;
                         body.path = body.path.repeated(iterations);
                     } else {
+                        total.add_static_branch(body);
                         body.static_native = None;
                         body.path.unknown_loop_count =
                             body.path.unknown_loop_count.saturating_add(1);
@@ -4338,161 +4732,14 @@ fn native_plan_cost_for_operations(
     Ok(total)
 }
 
-fn native_makespan(
-    operations: &[Operation],
-    target: &RoutingTarget,
-) -> Result<Option<f64>, CompilerError> {
-    if !target.native_duration_enabled {
-        return Ok(None);
-    }
-    let mut ready = BTreeMap::<Qubit, f64>::new();
-    if !schedule_native_operations(operations, target, &mut ready)? {
-        return Ok(None);
-    }
-    Ok(Some(ready.values().copied().fold(0.0_f64, f64::max)))
-}
-
-fn schedule_native_operations(
-    operations: &[Operation],
-    target: &RoutingTarget,
-    ready: &mut BTreeMap<Qubit, f64>,
-) -> Result<bool, CompilerError> {
-    for operation in operations {
-        match &operation.instruction {
-            Instruction::Standard(StandardGate::GPhase) => {}
-            Instruction::Standard(_) | Instruction::McGate(_) => {
-                let state = DeviceGateState::from_instruction(
-                    &operation.instruction,
-                    operation
-                        .qubits
-                        .iter()
-                        .copied()
-                        .map(PhysicalQubit::from_qubit)
-                        .collect(),
-                )
-                .ok_or_else(|| {
-                    CompilerError::InvariantViolation(format!(
-                        "missing native-duration key for routed operation {}",
-                        operation.instruction
-                    ))
-                })?;
-                let Some(timing) = target.native_timing(&state) else {
-                    if let Some(failure) = target.unsupported_native_plan(&state) {
-                        return Err(CompilerError::DeviceLoweringFailed(failure.clone()));
-                    }
-                    return Err(CompilerError::InvariantViolation(format!(
-                        "routed operation {} on {:?} was not prepared for native duration",
-                        operation.instruction, state.ordered_qargs
-                    )));
-                };
-                let Some(leaves) = timing else {
-                    return Ok(false);
-                };
-                for leaf in leaves {
-                    let qargs = leaf
-                        .ordered_qargs
-                        .iter()
-                        .copied()
-                        .map(PhysicalQubit::qubit)
-                        .collect::<SmallVec<[Qubit; 2]>>();
-                    schedule_atomic_duration(&qargs, leaf.duration, ready);
-                }
-            }
-            Instruction::ClassicalControl(control) => {
-                let Some(duration) = native_control_flow_duration(control, target)? else {
-                    return Ok(false);
-                };
-                schedule_atomic_duration(&operation.qubits, duration, ready);
-            }
-            Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => {
-                schedule_atomic_duration(&operation.qubits, 0.0, ready);
-            }
-            Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
-                return Err(CompilerError::InvariantViolation(format!(
-                    "unlowerable routed operation {} reached native makespan scoring",
-                    operation.instruction
-                )));
-            }
-        }
-    }
-    Ok(true)
-}
-
-fn native_control_flow_duration(
-    control: &ClassicalControlOp,
-    target: &RoutingTarget,
-) -> Result<Option<f64>, CompilerError> {
-    match control {
-        ClassicalControlOp::If(op) => {
-            let Some(then_duration) =
-                native_sequence_duration(op.then_body().operations(), target)?
-            else {
-                return Ok(None);
-            };
-            let else_duration = if let Some(body) = op.else_body() {
-                let Some(duration) = native_sequence_duration(body.operations(), target)? else {
-                    return Ok(None);
-                };
-                duration
-            } else {
-                0.0
-            };
-            Ok(Some(then_duration.max(else_duration)))
-        }
-        ClassicalControlOp::While(op) => {
-            let duration = native_sequence_duration(op.body().operations(), target)?;
-            Ok(duration.filter(|duration| *duration == 0.0))
-        }
-        ClassicalControlOp::For(op) => {
-            let Some(duration) = native_sequence_duration(op.body().operations(), target)? else {
-                return Ok(None);
-            };
-            let Some(iterations) = op.static_iteration_count() else {
-                return Ok((duration == 0.0).then_some(0.0));
-            };
-            Ok(Some(duration * iterations as f64))
-        }
-        ClassicalControlOp::Switch(op) => {
-            let mut duration = 0.0_f64;
-            for case in op.cases() {
-                let Some(branch) = native_sequence_duration(case.body().operations(), target)?
-                else {
-                    return Ok(None);
-                };
-                duration = duration.max(branch);
-            }
-            if let Some(body) = op.default() {
-                let Some(branch) = native_sequence_duration(body.operations(), target)? else {
-                    return Ok(None);
-                };
-                duration = duration.max(branch);
-            }
-            Ok(Some(duration))
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => Ok(Some(0.0)),
-    }
-}
-
-fn native_sequence_duration(
-    operations: &[Operation],
-    target: &RoutingTarget,
-) -> Result<Option<f64>, CompilerError> {
-    let mut ready = BTreeMap::new();
-    if !schedule_native_operations(operations, target, &mut ready)? {
-        return Ok(None);
-    }
-    Ok(Some(ready.values().copied().fold(0.0_f64, f64::max)))
-}
-
-fn schedule_atomic_duration(qargs: &[Qubit], duration: f64, ready: &mut BTreeMap<Qubit, f64>) {
-    let start = qargs
-        .iter()
-        .filter_map(|qubit| ready.get(qubit).copied())
-        .fold(0.0_f64, f64::max);
-    let finish = start + duration;
-    for qubit in qargs {
-        ready.insert(*qubit, finish);
-    }
+fn repeat_native_cost(cost: Option<NativePlanCost>, count: u128) -> Option<NativePlanCost> {
+    cost.map(|cost| NativePlanCost {
+        native_two_qubit_ops: (u128::from(cost.native_two_qubit_ops) * count)
+            .min(u128::from(u32::MAX)) as u32,
+        native_total_ops: (u128::from(cost.native_total_ops) * count).min(u128::from(u32::MAX))
+            as u32,
+        ..NativePlanCost::default()
+    })
 }
 
 fn native_two_qubit_depth(
@@ -4513,6 +4760,32 @@ fn native_two_qubit_depth(
             .max()
             .unwrap_or(0);
         let depth = base + local_depth;
+        for qubit in &operation.qubits {
+            qubit_depths.insert(*qubit, depth);
+        }
+        max_depth = max_depth.max(depth);
+    }
+    Ok(max_depth)
+}
+
+fn native_total_depth(
+    operations: &[Operation],
+    target: &RoutingTarget,
+) -> Result<usize, CompilerError> {
+    let mut qubit_depths = BTreeMap::<Qubit, usize>::new();
+    let mut max_depth = 0;
+    for operation in operations {
+        let local_depth = operation_local_native_total_depth(operation, target)?;
+        if local_depth == 0 {
+            continue;
+        }
+        let base = operation
+            .qubits
+            .iter()
+            .map(|qubit| qubit_depths.get(qubit).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let depth = base.saturating_add(local_depth);
         for qubit in &operation.qubits {
             qubit_depths.insert(*qubit, depth);
         }
@@ -4543,8 +4816,8 @@ fn operation_local_native_two_qubit_depth(
                     operation.instruction
                 ))
             })?;
-            match target.native_cost(&state) {
-                Some(cost) => Ok(cost.native_two_qubit_ops as usize),
+            match target.native_plan(&state) {
+                Some(plan) => Ok(structural_plan_depth(plan, true)),
                 None => {
                     if let Some(failure) = target.unsupported_native_plan(&state) {
                         return Err(CompilerError::DeviceLoweringFailed(failure.clone()));
@@ -4588,6 +4861,105 @@ fn operation_local_native_two_qubit_depth(
         }
         _ => Ok(0),
     }
+}
+
+fn operation_local_native_total_depth(
+    operation: &Operation,
+    target: &RoutingTarget,
+) -> Result<usize, CompilerError> {
+    match &operation.instruction {
+        Instruction::Standard(StandardGate::GPhase) => Ok(0),
+        Instruction::Standard(_) | Instruction::McGate(_) => {
+            let state = DeviceGateState::from_instruction(
+                &operation.instruction,
+                operation
+                    .qubits
+                    .iter()
+                    .copied()
+                    .map(PhysicalQubit::from_qubit)
+                    .collect(),
+            )
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "missing native-total-depth key for routed operation {}",
+                    operation.instruction
+                ))
+            })?;
+            match target.native_plan(&state) {
+                Some(plan) => Ok(structural_plan_depth(plan, false)),
+                None => {
+                    if let Some(failure) = target.unsupported_native_plan(&state) {
+                        return Err(CompilerError::DeviceLoweringFailed(failure.clone()));
+                    }
+                    Err(CompilerError::InvariantViolation(format!(
+                        "routed operation {} on {:?} was not prepared in the native plan catalog",
+                        operation.instruction, state.ordered_qargs
+                    )))
+                }
+            }
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
+            let then_depth = native_total_depth(op.then_body().operations(), target)?;
+            let else_depth = op
+                .else_body()
+                .map(|body| native_total_depth(body.operations(), target))
+                .transpose()?
+                .unwrap_or(0);
+            Ok(then_depth.max(else_depth))
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::While(op)) => {
+            native_total_depth(op.body().operations(), target)
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
+            let body_depth = native_total_depth(op.body().operations(), target)?;
+            let iterations = op
+                .static_iteration_count()
+                .unwrap_or(1)
+                .min(usize::MAX as u128) as usize;
+            Ok(body_depth.saturating_mul(iterations))
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => {
+            let mut depth = 0;
+            for case in op.cases() {
+                depth = depth.max(native_total_depth(case.body().operations(), target)?);
+            }
+            if let Some(body) = op.default() {
+                depth = depth.max(native_total_depth(body.operations(), target)?);
+            }
+            Ok(depth)
+        }
+        Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => Ok(0),
+        Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+            Err(CompilerError::InvariantViolation(format!(
+                "unlowerable routed operation {} reached native depth scoring",
+                operation.instruction
+            )))
+        }
+        Instruction::ClassicalControl(ClassicalControlOp::Break | ClassicalControlOp::Continue) => {
+            Ok(0)
+        }
+    }
+}
+
+fn structural_plan_depth(plan: &StructuralNativePlan, two_qubit_only: bool) -> usize {
+    let mut qubit_depths = BTreeMap::<PhysicalQubit, usize>::new();
+    let mut max_depth = 0;
+    for qargs in &plan.leaves {
+        if qargs.is_empty() || (two_qubit_only && qargs.len() != 2) {
+            continue;
+        }
+        let depth = qargs
+            .iter()
+            .map(|qubit| qubit_depths.get(qubit).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for qubit in qargs {
+            qubit_depths.insert(*qubit, depth);
+        }
+        max_depth = max_depth.max(depth);
+    }
+    max_depth
 }
 
 fn two_qubit_operation_count(operations: &[Operation]) -> usize {
@@ -4652,6 +5024,7 @@ fn two_qubit_depth(operations: &[Operation]) -> usize {
 
 fn operation_local_two_qubit_depth(operation: &Operation) -> usize {
     match &operation.instruction {
+        Instruction::Standard(StandardGate::SWAP) => 3,
         Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
             let then_depth = two_qubit_depth(op.then_body().operations());
             let else_depth = op

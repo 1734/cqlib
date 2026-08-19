@@ -14,6 +14,7 @@ use super::{compiler_error, into_py_operations};
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit};
 use crate::circuit::operation::extract_parameter_value;
 use crate::circuit::{PyStandardGate, PyValueOperation};
+use crate::utils::hash_value;
 use cqlib_core::circuit::{ParameterValue, Qubit};
 use cqlib_core::compile::transform::decompose::mc_gate::{
     Su2RotationAxis, decompose_mc_su2_n_clean, decompose_mc_su2_no_aux,
@@ -76,12 +77,8 @@ impl PySu2RotationAxis {
         self.inner == other.inner
     }
 
-    fn __hash__(&self) -> u8 {
-        match self.inner {
-            Su2RotationAxis::X => 0,
-            Su2RotationAxis::Y => 1,
-            Su2RotationAxis::Z => 2,
-        }
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {

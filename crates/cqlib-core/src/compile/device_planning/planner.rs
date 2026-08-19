@@ -363,7 +363,7 @@ impl<'a> DevicePlanner<'a> {
                         .map_err(DevicePlannerError::Invariant)?,
                     leaves,
                     derivation_steps: 0,
-                    stable_key: format!("native:{}", state.stable_sort_key()),
+                    stable_key: "native".to_string(),
                     ancestry,
                 })?;
             }

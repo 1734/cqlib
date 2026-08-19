@@ -141,7 +141,6 @@
 
 mod canonicalizer;
 mod config;
-mod equivalence;
 mod ops;
 mod verify;
 

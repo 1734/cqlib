@@ -1245,7 +1245,7 @@ fn test_apply_circuit_measure_bits_result_order() {
         panic!("expected BitVec measurement result");
     };
     assert_eq!(*width, 3);
-    assert_eq!(bits.to_string(*width as usize), "101");
+    assert_eq!(bits.to_bitstring(*width as usize), "101");
     assert!(bits.is_one(0), "first measured qubit maps to bit 0");
     assert!(!bits.is_one(1));
     assert!(bits.is_one(2));

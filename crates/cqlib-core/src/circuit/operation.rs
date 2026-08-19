@@ -69,6 +69,24 @@ pub struct Operation {
     pub label: Option<Box<str>>,
 }
 
+impl PartialEq for Operation {
+    /// Compares the storage-level structure of two operations.
+    ///
+    /// Parameters compare in their circuit-local storage form (see
+    /// [`CircuitParam`]), and classical handles embedded in
+    /// [`Instruction::ClassicalData`]/[`Instruction::ClassicalControl`]
+    /// carry the owning circuit's process-local identity, so operations
+    /// originating from different circuits are generally unequal unless
+    /// remapped first (as [`Circuit`](crate::circuit::Circuit)'s own
+    /// equality does internally).
+    fn eq(&self, other: &Self) -> bool {
+        self.instruction == other.instruction
+            && self.qubits == other.qubits
+            && self.params == other.params
+            && self.label == other.label
+    }
+}
+
 impl Operation {
     /// Returns the standard gate represented directly by this operation.
     pub fn standard_gate(&self) -> Option<StandardGate> {
@@ -128,6 +146,24 @@ pub struct ValueOperation {
     pub params: SmallVec<[ParameterValue; 1]>,
     /// Optional metadata label.
     pub label: Option<Box<str>>,
+}
+
+impl PartialEq for ValueOperation {
+    /// Compares the construction-level structure of two operations.
+    ///
+    /// Parameters compare in their construction form (see
+    /// [`ParameterValue`]), and classical handles embedded in
+    /// [`Instruction::ClassicalData`]/[`Instruction::ClassicalControl`]
+    /// carry the owning circuit's process-local identity, so operations
+    /// originating from different circuits are generally unequal unless
+    /// remapped first (as [`Circuit`](crate::circuit::Circuit)'s own
+    /// equality does internally).
+    fn eq(&self, other: &Self) -> bool {
+        self.instruction == other.instruction
+            && self.qubits == other.qubits
+            && self.params == other.params
+            && self.label == other.label
+    }
 }
 
 impl ValueOperation {
@@ -267,5 +303,63 @@ mod tests {
         assert!(operation.is_standard());
         assert!(!operation.is_directive());
         assert!(!operation.is_classical_control());
+    }
+
+    #[test]
+    fn value_operation_compares_structurally() {
+        let make = || {
+            ValueOperation::from_standard(
+                StandardGate::RX,
+                [Qubit::new(0)],
+                [ParameterValue::Fixed(0.5)],
+            )
+        };
+        assert_eq!(make(), make());
+
+        let different_param = ValueOperation::from_standard(
+            StandardGate::RX,
+            [Qubit::new(0)],
+            [ParameterValue::Fixed(1.5)],
+        );
+        assert_ne!(make(), different_param);
+
+        let different_qubit = ValueOperation::from_standard(
+            StandardGate::RX,
+            [Qubit::new(1)],
+            [ParameterValue::Fixed(0.5)],
+        );
+        assert_ne!(make(), different_qubit);
+
+        let labeled = ValueOperation {
+            label: Some("tagged".into()),
+            ..make()
+        };
+        assert_ne!(make(), labeled);
+    }
+
+    #[test]
+    fn value_operation_parameter_forms_do_not_cross_compare() {
+        let symbolic = ValueOperation::from_standard(
+            StandardGate::RX,
+            [Qubit::new(0)],
+            [ParameterValue::Param(crate::circuit::Parameter::symbol(
+                "theta",
+            ))],
+        );
+        let symbolic_again = ValueOperation::from_standard(
+            StandardGate::RX,
+            [Qubit::new(0)],
+            [ParameterValue::Param(crate::circuit::Parameter::symbol(
+                "theta",
+            ))],
+        );
+        let fixed = ValueOperation::from_standard(
+            StandardGate::RX,
+            [Qubit::new(0)],
+            [ParameterValue::Fixed(0.5)],
+        );
+
+        assert_eq!(symbolic, symbolic_again);
+        assert_ne!(symbolic, fixed);
     }
 }

@@ -18,23 +18,16 @@ use crate::circuit::classical::{PyClassicalType, PyClassicalValue, PyClassicalVa
 use crate::circuit::error::CircuitError as PyCircuitError;
 use crate::circuit::operation::PyValueOperation;
 use crate::circuit::parameter::PyParameter;
+use crate::utils::hash_value;
 use cqlib_core::circuit::circuit_param::{CircuitParam, ParameterValue};
 use cqlib_core::circuit::value_instruction::storage_operation_to_value;
 use cqlib_core::circuit::{CircuitDag, CircuitError, DagControlFlow, DagSwitchCase, DagWire};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rustworkx_core::petgraph::prelude::NodeIndex;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 fn py_error(error: CircuitError) -> PyErr {
     PyCircuitError::new_err(error.to_string())
-}
-
-fn hash_value(value: impl Hash) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn node_index(node: usize) -> NodeIndex {
@@ -164,7 +157,7 @@ impl PyDagWire {
     }
 
     fn __hash__(&self) -> u64 {
-        hash_value(self.inner)
+        hash_value(&self.inner)
     }
 }
 

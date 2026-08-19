@@ -23,8 +23,8 @@ use crate::circuit::classical_expr::PyClassicalExpr;
 use crate::circuit::error::CircuitError as PyCircuitError;
 use crate::circuit::operation::PyValueOperation;
 use cqlib_core::circuit::{
-    CircuitError, ClassicalType, ControlBody, ControlBodyTransaction, ExternalControlScope,
-    SwitchCase, ValueClassicalControlOp, ValueControlBody, ValueSwitchCase,
+    ControlBody, ControlBodyTransaction, ExternalControlScope, SwitchCase, ValueClassicalControlOp,
+    ValueControlBody, ValueSwitchCase,
 };
 use pyo3::prelude::*;
 
@@ -264,40 +264,21 @@ impl PyClassicalControlOp {
         then_body: PyValueControlBody,
         else_body: Option<PyValueControlBody>,
     ) -> PyResult<Self> {
-        if condition.inner.ty() != ClassicalType::Bool {
-            return Err(PyCircuitError::new_err(
-                CircuitError::InvalidOperation(format!(
-                    "if condition must be Bool, got {:?}",
-                    condition.inner.ty()
-                ))
-                .to_string(),
-            ));
-        }
         Ok(Self {
-            inner: ValueClassicalControlOp::If {
-                condition: condition.inner,
-                then_body: then_body.inner,
-                else_body: else_body.map(|body| body.inner),
-            },
+            inner: ValueClassicalControlOp::new_if(
+                condition.inner,
+                then_body.inner,
+                else_body.map(|body| body.inner),
+            )
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?,
         })
     }
 
     #[staticmethod]
     fn while_(condition: PyClassicalExpr, body: PyValueControlBody) -> PyResult<Self> {
-        if condition.inner.ty() != ClassicalType::Bool {
-            return Err(PyCircuitError::new_err(
-                CircuitError::InvalidOperation(format!(
-                    "while condition must be Bool, got {:?}",
-                    condition.inner.ty()
-                ))
-                .to_string(),
-            ));
-        }
         Ok(Self {
-            inner: ValueClassicalControlOp::While {
-                condition: condition.inner,
-                body: body.inner,
-            },
+            inner: ValueClassicalControlOp::new_while(condition.inner, body.inner)
+                .map_err(|error| PyCircuitError::new_err(error.to_string()))?,
         })
     }
 
@@ -309,33 +290,15 @@ impl PyClassicalControlOp {
         step: PyClassicalExpr,
         body: PyValueControlBody,
     ) -> PyResult<Self> {
-        if !matches!(var.inner.ty(), ClassicalType::UInt(_)) {
-            return Err(PyCircuitError::new_err(
-                CircuitError::InvalidOperation(format!(
-                    "for loop variable must be UInt, got {:?}",
-                    var.inner.ty()
-                ))
-                .to_string(),
-            ));
-        }
-        if start.inner.ty() != var.inner.ty() {
-            return Err(PyCircuitError::new_err(
-                CircuitError::InvalidOperation(format!(
-                    "for start type must match loop variable {:?}, got {:?}",
-                    var.inner.ty(),
-                    start.inner.ty()
-                ))
-                .to_string(),
-            ));
-        }
         Ok(Self {
-            inner: ValueClassicalControlOp::For {
-                var: var.inner,
-                start: start.inner,
-                stop: stop.inner,
-                step: step.inner,
-                body: body.inner,
-            },
+            inner: ValueClassicalControlOp::new_for(
+                var.inner,
+                start.inner,
+                stop.inner,
+                step.inner,
+                body.inner,
+            )
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?,
         })
     }
 
@@ -346,21 +309,13 @@ impl PyClassicalControlOp {
         cases: Vec<PyValueSwitchCase>,
         default: Option<PyValueControlBody>,
     ) -> PyResult<Self> {
-        if !matches!(target.inner.ty(), ClassicalType::UInt(_)) {
-            return Err(PyCircuitError::new_err(
-                CircuitError::InvalidOperation(format!(
-                    "switch target must be UInt, got {:?}",
-                    target.inner.ty()
-                ))
-                .to_string(),
-            ));
-        }
         Ok(Self {
-            inner: ValueClassicalControlOp::Switch {
-                target: target.inner,
-                cases: cases.into_iter().map(|case| case.inner).collect(),
-                default: default.map(|body| body.inner),
-            },
+            inner: ValueClassicalControlOp::new_switch(
+                target.inner,
+                cases.into_iter().map(|case| case.inner).collect(),
+                default.map(|body| body.inner),
+            )
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?,
         })
     }
 

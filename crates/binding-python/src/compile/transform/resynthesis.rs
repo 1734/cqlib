@@ -13,10 +13,16 @@
 //! Python bindings for numeric two-qubit block resynthesis.
 
 use super::PyTransformResult;
-use super::decompose::config::{PyTwoQubitUnitaryDecomposeBasis, target_for_basis};
-use crate::circuit::PyCircuit;
+use super::decompose::config::{
+    PyTwoQubitUnitaryDecomposeBasis, format_target_basis_repr, target_for_basis,
+};
+use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::commutation::PyCommutationConfig;
 use crate::compile::error::compiler_error_to_py_err;
+use crate::compile::target_basis_item::PyTargetBasisItem;
+use crate::utils::python_bool;
+use cqlib_core::circuit::Instruction;
+use cqlib_core::compile::CompilerError;
 use cqlib_core::compile::transform::{
     ResynthesizeTwoQubitBlocks, Transformer, TwoQubitBlockResynthesisConfig,
     resynthesize_two_qubit_blocks,
@@ -51,7 +57,8 @@ pub(crate) fn register_resynthesis_module(parent: &Bound<'_, PyModule>) -> PyRes
 #[derive(Clone, Debug)]
 pub struct PyTwoQubitBlockResynthesisConfig {
     pub(crate) inner: TwoQubitBlockResynthesisConfig,
-    two_qubit_basis: PyTwoQubitUnitaryDecomposeBasis,
+    two_qubit_basis: Option<PyTwoQubitUnitaryDecomposeBasis>,
+    target_basis: Option<Vec<Instruction>>,
 }
 
 #[pymethods]
@@ -59,9 +66,11 @@ impl PyTwoQubitBlockResynthesisConfig {
     /// Creates a bounded numeric resynthesis configuration.
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (*, two_qubit_basis=None, enhanced=false, max_block_ops=None, max_crossed_ops=None, max_scan_span=None, skip_labeled_ops=true, recurse_control_flow=true, commutation=None))]
+    #[pyo3(signature = (*, two_qubit_basis=None, target_basis=None, enhanced=false, max_block_ops=None, max_crossed_ops=None, max_scan_span=None, skip_labeled_ops=true, recurse_control_flow=true, commutation=None))]
     fn new(
+        py: Python<'_>,
         two_qubit_basis: Option<PyTwoQubitUnitaryDecomposeBasis>,
+        target_basis: Option<Vec<PyTargetBasisItem>>,
         enhanced: bool,
         max_block_ops: Option<usize>,
         max_crossed_ops: Option<usize>,
@@ -69,11 +78,37 @@ impl PyTwoQubitBlockResynthesisConfig {
         skip_labeled_ops: bool,
         recurse_control_flow: bool,
         commutation: Option<PyCommutationConfig>,
-    ) -> Self {
-        let two_qubit_basis = two_qubit_basis.unwrap_or(PyTwoQubitUnitaryDecomposeBasis {
-            inner: cqlib_core::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis::PauliRotations,
-        });
-        let target = target_for_basis(two_qubit_basis.inner);
+    ) -> PyResult<Self> {
+        if two_qubit_basis.is_some() && target_basis.is_some() {
+            return Err(compiler_error_to_py_err(CompilerError::InvalidInput(
+                "two_qubit_basis and target_basis are mutually exclusive".to_string(),
+            )));
+        }
+        // `None` selects the core default (unconstrained) synthesis target so
+        // that `TwoQubitBlockResynthesisConfig()` matches the core `Default`.
+        // `target_basis` mirrors the compiler workflow path via
+        // `TwoQubitSynthesisTarget::from_instructions`; legacy Pauli-rotation
+        // output is still available via
+        // `TwoQubitUnitaryDecomposeBasis.pauli_rotations()`.
+        let target_basis = target_basis
+            .map(|basis| {
+                basis
+                    .into_iter()
+                    .map(PyTargetBasisItem::into_instruction)
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
+        let target = match &target_basis {
+            Some(basis) => py
+                .detach(|| {
+                    cqlib_core::compile::transform::decompose::unitary::TwoQubitSynthesisTarget::from_instructions(Some(basis))
+                })
+                .map_err(compiler_error_to_py_err)?,
+            None => two_qubit_basis.map_or_else(
+                cqlib_core::compile::transform::decompose::unitary::TwoQubitSynthesisTarget::default,
+                |basis| target_for_basis(basis.inner),
+            ),
+        };
         let mut inner = if enhanced {
             TwoQubitBlockResynthesisConfig::enhanced(target)
         } else {
@@ -93,15 +128,23 @@ impl PyTwoQubitBlockResynthesisConfig {
         if let Some(value) = commutation {
             inner.commutation = value.inner;
         }
-        Self {
+        Ok(Self {
             inner,
             two_qubit_basis,
-        }
+            target_basis,
+        })
     }
 
     #[getter]
-    fn two_qubit_basis(&self) -> PyTwoQubitUnitaryDecomposeBasis {
+    fn two_qubit_basis(&self) -> Option<PyTwoQubitUnitaryDecomposeBasis> {
         self.two_qubit_basis
+    }
+
+    #[getter]
+    fn target_basis(&self) -> Option<Vec<PyInstruction>> {
+        self.target_basis
+            .as_ref()
+            .map(|basis| basis.iter().cloned().map(Into::into).collect::<Vec<_>>())
     }
 
     #[getter]
@@ -135,15 +178,21 @@ impl PyTwoQubitBlockResynthesisConfig {
     }
 
     fn __repr__(&self) -> String {
+        let two_qubit_basis = self
+            .two_qubit_basis
+            .map_or("None", |basis| basis.repr_value());
+        let target_basis = format_target_basis_repr(&self.target_basis);
+        let commutation = PyCommutationConfig::from(self.inner.commutation.clone()).repr_value();
         format!(
-            "TwoQubitBlockResynthesisConfig(two_qubit_basis={}, max_block_ops={}, max_crossed_ops={}, max_scan_span={}, skip_labeled_ops={}, recurse_control_flow={}, commutation={:?})",
-            self.two_qubit_basis.repr_value(),
+            "TwoQubitBlockResynthesisConfig(two_qubit_basis={}, target_basis={}, max_block_ops={}, max_crossed_ops={}, max_scan_span={}, skip_labeled_ops={}, recurse_control_flow={}, commutation={})",
+            two_qubit_basis,
+            target_basis,
             self.inner.max_block_ops,
             self.inner.max_crossed_ops,
             self.inner.max_scan_span,
-            self.inner.skip_labeled_ops,
-            self.inner.recurse_control_flow,
-            self.inner.commutation,
+            python_bool(self.inner.skip_labeled_ops),
+            python_bool(self.inner.recurse_control_flow),
+            commutation,
         )
     }
 
@@ -175,12 +224,13 @@ pub struct PyResynthesizeTwoQubitBlocks {
 impl PyResynthesizeTwoQubitBlocks {
     #[new]
     #[pyo3(signature = (config=None))]
-    fn new(config: Option<PyTwoQubitBlockResynthesisConfig>) -> Self {
+    fn new(py: Python<'_>, config: Option<PyTwoQubitBlockResynthesisConfig>) -> Self {
         Self {
             config: config.unwrap_or_else(|| {
                 PyTwoQubitBlockResynthesisConfig::new(
-                    None, false, None, None, None, true, true, None,
+                    py, None, None, false, None, None, None, true, true, None,
                 )
+                .expect("default resynthesis config must be valid")
             }),
         }
     }
@@ -232,8 +282,11 @@ fn py_resynthesize_two_qubit_blocks(
     let circuit = circuit.inner.clone();
     let config = config.map_or_else(
         || {
-            PyTwoQubitBlockResynthesisConfig::new(None, false, None, None, None, true, true, None)
-                .inner
+            PyTwoQubitBlockResynthesisConfig::new(
+                py, None, None, false, None, None, None, true, true, None,
+            )
+            .expect("default resynthesis config must be valid")
+            .inner
         },
         |value| value.inner,
     );

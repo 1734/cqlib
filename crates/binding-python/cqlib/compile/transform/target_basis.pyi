@@ -22,12 +22,15 @@ _QubitLike = int | Qubit
 class TargetBasisLowerer:
     """Lower circuits deterministically to an explicit instruction basis."""
 
-    def __init__(self, target_basis: Sequence[Instruction]) -> None:
+    def __init__(self, target_basis: Sequence[Instruction | str]) -> None:
         """Create lowering plans for a non-empty gate-like basis.
 
+        Basis entries are case-insensitive standard-gate names (e.g. ``'H'``,
+        ``'X2P'``) or ``Instruction`` objects for multi-controlled gates.
+
         Raises:
-            CompilerConfigError: If the basis is empty, unsupported, or cannot
-                lower all required gates.
+            CompilerConfigError: If the basis is empty, contains an unknown
+                gate name, or cannot lower all required gates.
             CompilerInternalError: If the built-in rule library is invalid.
         """
         ...
@@ -78,17 +81,23 @@ class TargetBasisCost:
 class TargetBasisCostModel:
     """Reusable exact target-basis cost evaluator."""
 
-    def __init__(self, target_basis: Sequence[Instruction]) -> None:
+    def __init__(self, target_basis: Sequence[Instruction | str]) -> None:
         """Build an evaluator for a non-empty standard-instruction basis.
 
+        Basis entries are case-insensitive standard-gate names (e.g. ``'H'``,
+        ``'X2P'``) or ``Instruction`` objects; the basis must contain only
+        standard instructions.
+
         Raises:
-            CompilerConfigError: If the basis is empty or contains a
-                non-standard instruction.
+            CompilerConfigError: If the basis is empty, contains an unknown
+                gate name, or contains a non-standard instruction.
             CompilerInternalError: If the built-in rule library is invalid.
         """
         ...
     @property
     def signature(self) -> TargetBasisSignature: ...
+    @property
+    def target_basis(self) -> list[Instruction]: ...
     def cost_of_fixed_operations(
         self,
         qubits: Sequence[_QubitLike],
@@ -107,4 +116,9 @@ class TargetBasisCostModel:
     def __copy__(self) -> TargetBasisCostModel: ...
     def __deepcopy__(self, memo: dict[int, object]) -> TargetBasisCostModel: ...
 
-__all__: list[str]
+__all__ = [
+    "TargetBasisLowerer",
+    "TargetBasisSignature",
+    "TargetBasisCost",
+    "TargetBasisCostModel",
+]

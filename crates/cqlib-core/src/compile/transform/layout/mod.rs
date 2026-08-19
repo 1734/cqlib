@@ -49,6 +49,7 @@
 
 mod analysis;
 mod greedy;
+mod interaction_seed;
 mod objective;
 mod result;
 mod sabre;
@@ -65,6 +66,7 @@ pub(crate) use greedy::{GreedyCandidateOutcome, greedy_layout_candidate_prepared
 pub use greedy::{greedy_layout, greedy_layout_prepared};
 pub use objective::{LayoutObjective, LayoutScore};
 pub use result::{LayoutDiagnostics, LayoutResult};
+pub(crate) use sabre::sabre_route_selection_prepared;
 pub use sabre::{
     PreparedSabreCircuit, PreparedSabreDeviceTarget, prepare_sabre_circuit,
     prepare_sabre_device_target, sabre_layout, sabre_layout_prepared,

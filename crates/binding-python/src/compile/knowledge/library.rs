@@ -14,6 +14,7 @@
 
 use super::rule::PyRule;
 use crate::circuit::PyInstruction;
+use crate::utils::hash_value;
 use cqlib_core::compile::knowledge::library::{
     RuleId, RuleKind, RuleLibrary, RuleLibraryError, RuleMetadata,
 };
@@ -25,8 +26,6 @@ use cqlib_core::compile::knowledge::rule_dsl::load::{
 };
 use pyo3::exceptions::{PyIOError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 fn library_error(error: RuleLibraryError) -> PyErr {
@@ -76,9 +75,7 @@ impl PyRuleId {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -194,9 +191,7 @@ impl PyRuleKind {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -297,7 +292,7 @@ impl PyRuleMetadata {
 )]
 #[derive(Clone, Debug, Default)]
 pub struct PyRuleLibrary {
-    inner: RuleLibrary,
+    pub(crate) inner: RuleLibrary,
 }
 
 #[pymethods]

@@ -129,4 +129,11 @@ def kak_decompose(matrix: ArrayLike) -> KakDecomposition:
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "OneQubitUnitaryDecomposition",
+    "TwoQubitUnitarySynthesisResult",
+    "KakDecomposition",
+    "synthesize_numeric_1q_unitary",
+    "synthesize_numeric_2q_unitary",
+    "kak_decompose",
+]

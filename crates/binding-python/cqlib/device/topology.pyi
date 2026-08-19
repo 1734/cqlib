@@ -48,9 +48,9 @@ class Topology:
         >>> topo.supports_directed_coupling(1, 0)          # False
         >>> topo.supports_coupling_either_direction(0, 1)  # True (1→0 may exist separately)
         >>>
-        >>> topo.successors(1)        # [Qubit(2)]  — outgoing
-        >>> topo.predecessors(1)      # [Qubit(0)]  — incoming
-        >>> topo.neighbors_undirected(1)  # [Qubit(0), Qubit(2)]
+        >>> topo.successors(1)        # [PhysicalQubit(2)]  — outgoing
+        >>> topo.predecessors(1)      # [PhysicalQubit(0)]  — incoming
+        >>> topo.neighbors_undirected(1)  # [PhysicalQubit(0), PhysicalQubit(2)]
         >>>
         >>> topo.out_degree(0)  # 1
         >>> topo.in_degree(2)   # 1
@@ -104,7 +104,7 @@ class Topology:
         """Number of directed coupling edges."""
 
     @property
-    def qubits(self) -> list[Qubit]:
+    def qubits(self) -> list[PhysicalQubit]:
         """All physical qubits in the topology."""
 
     # ---- Mutation methods ----
@@ -180,7 +180,7 @@ class Topology:
 
     # ---- Neighbor queries ----
 
-    def successors(self, qubit: _PhysicalQubitLike) -> list[Qubit]:
+    def successors(self, qubit: _PhysicalQubitLike) -> list[PhysicalQubit]:
         """All qubits reachable via outgoing couplings from ``qubit``.
 
         Args:
@@ -189,17 +189,17 @@ class Topology:
         Example::
 
             >>> topo = Topology([0, 1, 2], [(0, 1, ""), (0, 2, "")])
-            >>> topo.successors(0)  # [Qubit(1), Qubit(2)]
+            >>> topo.successors(0)  # [PhysicalQubit(1), PhysicalQubit(2)]
         """
 
-    def predecessors(self, qubit: _PhysicalQubitLike) -> list[Qubit]:
+    def predecessors(self, qubit: _PhysicalQubitLike) -> list[PhysicalQubit]:
         """All qubits with incoming couplings to ``qubit``.
 
         Args:
             qubit: Target qubit.
         """
 
-    def neighbors_undirected(self, qubit: _PhysicalQubitLike) -> list[Qubit]:
+    def neighbors_undirected(self, qubit: _PhysicalQubitLike) -> list[PhysicalQubit]:
         """All qubits coupled to ``qubit`` in either direction.
 
         Bidirectional couplings are deduplicated.
@@ -208,14 +208,14 @@ class Topology:
             qubit: The qubit to query.
         """
 
-    def undirected_edges(self) -> list[tuple[Qubit, Qubit]]:
+    def undirected_edges(self) -> list[tuple[PhysicalQubit, PhysicalQubit]]:
         """All unique coupling pairs ignoring direction.
 
         Pairs are ordered by qubit ID. Bidirectional couplings collapse
         to a single pair.
 
         Returns:
-            List of unique ``(Qubit, Qubit)`` pairs.
+            List of unique ``(PhysicalQubit, PhysicalQubit)`` pairs.
         """
 
     # ---- Metadata queries ----

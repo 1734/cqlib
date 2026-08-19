@@ -160,9 +160,12 @@ class CircuitGate:
         inferred from the backing circuit's live symbols. An explicit
         signature may contain declared but unused parameters.
 
+        The backing circuit may contain directives (e.g. measure or
+        reset); they are accepted here and only rejected later, when a
+        unitary matrix or the inverse is requested.
+
         Raises:
-            CircuitError: If *circuit* contains non-gate operations
-                (e.g. directives), if a live symbol is undeclared, or if the
+            CircuitError: If a live symbol is undeclared, or if the
                 explicit signature contains duplicate names.
         """
         ...
@@ -234,7 +237,6 @@ class CircuitGate:
         """
         ...
 
-    def __hash__(self) -> int: ...
     def __copy__(self) -> CircuitGate: ...
     def __deepcopy__(self, memo: dict) -> CircuitGate: ...
     def __repr__(self) -> str: ...

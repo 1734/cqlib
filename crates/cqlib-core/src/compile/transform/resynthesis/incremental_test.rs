@@ -272,3 +272,16 @@ fn config_change_invalidates_all_cached_anchor_collections() {
     assert_eq!(second.anchors_recomputed - first.anchors_recomputed, 6);
     assert_eq!(second.scopes_full_scan - first.scopes_full_scan, 1);
 }
+
+#[test]
+fn equal_operation_snapshots_have_equal_fast_hashes() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+    let operation = &circuit.operations()[0];
+
+    let left = OperationSnapshot::new(&circuit, operation).unwrap();
+    let right = OperationSnapshot::new(&circuit, &operation.clone()).unwrap();
+
+    assert_eq!(left.fast_hash, right.fast_hash);
+    assert!(left.exact_eq(&right));
+}

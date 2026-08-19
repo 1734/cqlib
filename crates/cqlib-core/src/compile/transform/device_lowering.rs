@@ -95,7 +95,7 @@ impl Transformer for DeviceLowerer<'_> {
             .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
         let scan = collect_root_states(circuit)?;
         let mut roots = scan.states;
-        roots.sort_by_key(DeviceGateState::stable_sort_key);
+        roots.sort();
         roots.dedup();
         // Fused lowering can synthesize buffered one-qubit runs into `RZ` or
         // `U` operations on any circuit qubit that actually carries gates, so
@@ -117,7 +117,7 @@ impl Transformer for DeviceLowerer<'_> {
                 }
             }
         }
-        planner_roots.sort_by_key(DeviceGateState::stable_sort_key);
+        planner_roots.sort();
         planner_roots.dedup();
         let planner = DevicePlanner::build(self.device, library, planner_roots.iter().cloned())
             .map_err(DevicePlannerError::into_compiler_error)?;

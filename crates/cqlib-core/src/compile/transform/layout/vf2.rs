@@ -93,9 +93,10 @@ pub(crate) enum Vf2PreparedOutcome {
 /// Searches for a perfect initial layout using non-induced VF2++ matching.
 ///
 /// A perfect layout maps every required logical interaction onto adjacent
-/// physical qubits. Physical extra edges are allowed, matching Qiskit's
-/// non-induced `VF2Layout` semantics. Coupling direction is not a hard
-/// feasibility constraint; direction mismatch is scored by [`LayoutObjective`].
+/// physical qubits. Physical extra edges are allowed because the logical
+/// interaction graph is matched as a non-induced subgraph. Coupling direction
+/// is not a hard feasibility constraint; direction mismatch is scored by
+/// [`LayoutObjective`].
 /// Logical qubits that do not participate in required interactions are filled
 /// deterministically after the VF2 match is found.
 ///

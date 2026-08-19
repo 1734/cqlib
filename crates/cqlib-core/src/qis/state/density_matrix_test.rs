@@ -951,10 +951,11 @@ fn test_psd_gershgorin_false_negative_equal_superposition() {
         "equal superposition must be Hermitian"
     );
     assert!((dm.trace().re - 1.0).abs() < 1e-10, "trace must be 1");
-    // Gershgorin-based check must NOT reject this valid PSD matrix.
+    // Regression: the old Gershgorin-based check rejected this valid PSD
+    // matrix; the eigenvalue-based check must not.
     assert!(
         dm.is_positive_semidefinite_approx(1e-10),
-        "Gershgorin must not false-negative a PSD equal-superposition pure state"
+        "PSD equal-superposition pure state must pass (old Gershgorin check false-negatived it)"
     );
 }
 

@@ -239,4 +239,14 @@ def compile(
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "CompileMode",
+    "DeviceCompileTarget",
+    "CompileTarget",
+    "CompileConfig",
+    "WorkflowStepReport",
+    "DeviceCompilationMetadata",
+    "CompileResult",
+    "CompilerWorkflow",
+    "compile",
+]

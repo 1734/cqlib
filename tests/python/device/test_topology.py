@@ -12,8 +12,7 @@
 
 """Tests for topology APIs exposed under cqlib.device."""
 
-from cqlib import Qubit
-from cqlib.device import Topology
+from cqlib.device import PhysicalQubit, Topology
 
 
 class TestDeviceTopology:
@@ -24,12 +23,12 @@ class TestDeviceTopology:
         topo = Topology([0, 1, 2], [(0, 1, "G1"), (1, 2, "G2")])
         assert topo.num_qubits == 3
         assert topo.num_couplings == 2
-        assert sorted(topo.qubits) == [Qubit(0), Qubit(1), Qubit(2)]
+        assert sorted(topo.qubits) == [PhysicalQubit(0), PhysicalQubit(1), PhysicalQubit(2)]
 
         assert topo.contains_qubit(1) is True
         assert topo.contains_qubit(99) is False
         # Topology uses directed couplings; neighbors/degree are based on outgoing edges.
-        assert set(topo.successors(1)) == {Qubit(2)}
+        assert set(topo.successors(1)) == {PhysicalQubit(2)}
         assert topo.out_degree(1) == 1
         assert topo.get_coupling_name(1, 2) == "G2"
 

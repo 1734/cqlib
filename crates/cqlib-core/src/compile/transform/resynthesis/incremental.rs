@@ -17,7 +17,6 @@ use super::collector::TwoQubitNumericBlock;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::{AnchorDependencyTrace, DagCollectionContext, is_two_qubit_anchor};
-use crate::circuit::circuit_impl::instructions_equal;
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, Qubit,
 };
@@ -114,11 +113,31 @@ impl OperationSnapshot {
             .collect::<Result<Vec<_>, _>>()?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         match &operation.instruction {
+            Instruction::Standard(gate) => {
+                0_u8.hash(&mut hasher);
+                gate.hash(&mut hasher);
+            }
+            Instruction::McGate(gate) => {
+                1_u8.hash(&mut hasher);
+                gate.hash(&mut hasher);
+            }
+            Instruction::UnitaryGate(gate) => {
+                2_u8.hash(&mut hasher);
+                gate.hash(&mut hasher);
+            }
+            Instruction::CircuitGate(gate) => {
+                3_u8.hash(&mut hasher);
+                gate.name.hash(&mut hasher);
+                gate.num_qubits().hash(&mut hasher);
+                gate.num_params().hash(&mut hasher);
+            }
+            Instruction::Directive(_) => 4_u8.hash(&mut hasher),
+            Instruction::ClassicalData(_) => 5_u8.hash(&mut hasher),
             Instruction::ClassicalControl(control) => {
-                0xff_u8.hash(&mut hasher);
+                6_u8.hash(&mut hasher);
                 Self::control_shape(control).hash(&mut hasher);
             }
-            instruction => format!("{instruction:?}").hash(&mut hasher),
+            Instruction::Delay => 7_u8.hash(&mut hasher),
         }
         operation.qubits.hash(&mut hasher);
         for parameter in &params {
@@ -149,7 +168,7 @@ impl OperationSnapshot {
                 (Instruction::ClassicalControl(left), Instruction::ClassicalControl(right)) => {
                     Self::control_shape(left) == Self::control_shape(right)
                 }
-                (left, right) => instructions_equal(left, right),
+                (left, right) => left == right,
             }
             && self.qubits == other.qubits
             && self.params.len() == other.params.len()
@@ -173,16 +192,20 @@ impl OperationSnapshot {
             || self.qubits.len() > 2
     }
 
-    fn control_shape(control: &ClassicalControlOp) -> (u8, usize, bool) {
+    fn control_shape(
+        control: &ClassicalControlOp,
+    ) -> (crate::circuit::ClassicalControlKind, usize, bool) {
         match control {
-            ClassicalControlOp::If(operation) => (0, 1, operation.else_body().is_some()),
-            ClassicalControlOp::While(_) => (1, 1, false),
-            ClassicalControlOp::For(_) => (2, 1, false),
-            ClassicalControlOp::Switch(operation) => {
-                (3, operation.cases().len(), operation.default().is_some())
+            ClassicalControlOp::If(operation) => {
+                (control.kind(), 1, operation.else_body().is_some())
             }
-            ClassicalControlOp::Break => (4, 0, false),
-            ClassicalControlOp::Continue => (5, 0, false),
+            ClassicalControlOp::While(_) | ClassicalControlOp::For(_) => (control.kind(), 1, false),
+            ClassicalControlOp::Switch(operation) => (
+                control.kind(),
+                operation.cases().len(),
+                operation.default().is_some(),
+            ),
+            ClassicalControlOp::Break | ClassicalControlOp::Continue => (control.kind(), 0, false),
         }
     }
 }

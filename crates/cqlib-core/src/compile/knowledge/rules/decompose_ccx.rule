@@ -98,7 +98,7 @@ rule decompose_ccx_to_rz_x2p_cx {
         RZ(π/4) 0, RZ(-π/4) 1,
         CX 0 1,
         RZ(3*π/4) 2, X2P 2, RZ(π/2) 2,
-        GPhase(5*π/8)
+        GPhase(-7*π/8)
     }
 }
 
@@ -227,7 +227,7 @@ rule decompose_ccx_to_rz_x2p_x_rzz {
         RZZ(π/4) 0 2,
         RZ(-π/4) 0, X 0,
         RZ(3*π/4) 2, X2P 2, RZ(π/2) 2,
-        GPhase(5*π/8)
+        GPhase(π/8)
     }
 }
 
@@ -285,6 +285,22 @@ rule decompose_h_ccx_h_to_rx_ry_rzz {
         RZZ(π/4) 0 2,
         RX(π/2) 0, RY(π/4) 0, RX(π/2) 0,
         RX(-π/2) 2, RY(π/4) 2, RX(π/2) 2,
+        GPhase(5*π/8)
+    }
+}
+
+rule decompose_ccx_to_rz_x2p_rzx {
+    match { CCX 0 1 2 }
+    rewrite {
+        RZ(π/2) 2, X2P 2, RZ(π/2) 2,
+        RZ(π/2) 1, X2P 2, RZX(-π/2) 1 2, RZ(-π/4) 2,
+        RZ(π/2) 0, X2P 2, RZX(-π/2) 0 2, RZ(π/4) 2,
+        RZ(π/2) 1, X2P 2, RZX(-π/2) 1 2, RZ(π/4) 1, RZ(-π/4) 2,
+        RZ(π/2) 0, X2P 2, RZX(-π/2) 0 2,
+        RZ(π/2) 0, X2P 1, RZX(-π/2) 0 1,
+        RZ(π/4) 0, RZ(-π/4) 1,
+        RZ(π/2) 0, X2P 1, RZX(-π/2) 0 1,
+        RZ(3*π/4) 2, X2P 2, RZ(π/2) 2,
         GPhase(5*π/8)
     }
 }

@@ -15,9 +15,11 @@ import sys
 import threading
 import time
 
+import numpy as np
 import pytest
 
 from cqlib.circuit import Circuit, Instruction, StandardGate, UnitaryGate
+from cqlib.circuit.gates import MCGate
 from cqlib.compile import CompilerConfigError
 from cqlib.compile.commutation import CommutationConfig
 from cqlib.compile.knowledge import RuleKind
@@ -30,8 +32,11 @@ from cqlib.compile.transform import (
     KnowledgeRewriteStats,
     KnowledgeRewriter,
     LowerToRoutingBasis,
+    OptimizeOneQubitRuns,
     RewriteConfig,
     RewriteMode,
+    TargetBasisCostModel,
+    TargetBasisLowerer,
     TransformResult,
     canonicalize_circuit,
     lower_to_routing_basis,
@@ -40,6 +45,7 @@ from cqlib.compile.transform import (
 from cqlib.compile.transform.decompose import (
     TwoQubitUnitaryDecomposeBasis,
     UnitaryDecomposeConfig,
+    decompose_unitaries,
     expand_definitions,
 )
 from cqlib.compile.transform.result import (
@@ -419,6 +425,160 @@ def test_unitary_decompose_config_preserves_legacy_python_basis() -> None:
     assert repr(config).startswith("UnitaryDecomposeConfig(")
 
 
+def test_unitary_decompose_config_default_matches_omitted_config() -> None:
+    config = UnitaryDecomposeConfig()
+
+    assert config.two_qubit_basis is None
+    assert config.recurse_control_flow is True
+    assert "two_qubit_basis=None" in repr(config)
+
+    matrix = np.array(
+        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]],
+        dtype=np.complex128,
+    )
+    gate = UnitaryGate("cx_matrix", 2).with_matrix(matrix)
+    circuit = Circuit(2)
+    circuit.append_unitary_gate(gate, [0, 1])
+
+    def operation_names(result: TransformResult) -> list[str]:
+        return [
+            operation.instruction.instruction.name
+            for operation in result.circuit.operations
+        ]
+
+    omitted = decompose_unitaries(circuit)
+    explicit = decompose_unitaries(circuit, UnitaryDecomposeConfig())
+
+    assert operation_names(explicit) == operation_names(omitted)
+
+    legacy = decompose_unitaries(
+        circuit,
+        UnitaryDecomposeConfig(
+            two_qubit_basis=TwoQubitUnitaryDecomposeBasis.pauli_rotations()
+        ),
+    )
+    assert legacy.changed is True
+
+
+def test_decompose_configs_reject_conflicting_basis_selection() -> None:
+    target_basis = [Instruction.from_standard_gate(StandardGate.CZ)]
+    with pytest.raises(
+        CompilerConfigError,
+        match="two_qubit_basis and target_basis are mutually exclusive",
+    ):
+        UnitaryDecomposeConfig(
+            two_qubit_basis=TwoQubitUnitaryDecomposeBasis.cx(),
+            target_basis=target_basis,
+        )
+    with pytest.raises(
+        CompilerConfigError,
+        match="two_qubit_basis and target_basis are mutually exclusive",
+    ):
+        TwoQubitBlockResynthesisConfig(
+            two_qubit_basis=TwoQubitUnitaryDecomposeBasis.cx(),
+            target_basis=target_basis,
+        )
+
+
+def test_unitary_decompose_config_accepts_explicit_target_basis() -> None:
+    target_basis = [
+        Instruction.from_standard_gate(StandardGate.RZ),
+        Instruction.from_standard_gate(StandardGate.X2P),
+        Instruction.from_standard_gate(StandardGate.CZ),
+    ]
+    config = UnitaryDecomposeConfig(
+        target_basis=target_basis,
+        recurse_control_flow=False,
+    )
+
+    assert config.two_qubit_basis is None
+    assert [instruction.name for instruction in config.target_basis] == [
+        "RZ",
+        "X2P",
+        "CZ",
+    ]
+    assert config.recurse_control_flow is False
+    assert copy.copy(config) == config
+    assert copy.deepcopy(config) == config
+    assert "target_basis=['RZ', 'X2P', 'CZ']" in repr(config)
+
+
+def test_decompose_configs_reject_invalid_target_basis() -> None:
+    with pytest.raises(
+        CompilerConfigError,
+        match="two-qubit synthesis target requires standard instructions",
+    ):
+        UnitaryDecomposeConfig(target_basis=[Instruction.delay()])
+    with pytest.raises(
+        CompilerConfigError,
+        match="target-basis lowering requires a non-empty target basis",
+    ):
+        UnitaryDecomposeConfig(target_basis=[])
+
+
+def test_decompose_unitaries_targets_qcis_native_basis() -> None:
+    matrix = np.array(
+        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]],
+        dtype=np.complex128,
+    )
+    gate = UnitaryGate("swap_matrix", 2).with_matrix(matrix)
+    circuit = Circuit(2)
+    circuit.append_unitary_gate(gate, [0, 1])
+
+    target_basis = [
+        Instruction.from_standard_gate(StandardGate.RZ),
+        Instruction.from_standard_gate(StandardGate.X2P),
+        Instruction.from_standard_gate(StandardGate.CZ),
+    ]
+    decomposed = decompose_unitaries(
+        circuit, UnitaryDecomposeConfig(target_basis=target_basis)
+    )
+    assert decomposed.changed is True
+    lowered = TargetBasisLowerer(target_basis).run(decomposed.circuit)
+
+    names = [
+        operation.instruction.instruction.name
+        for operation in lowered.circuit.operations
+    ]
+    assert names
+    assert set(names) <= {"RZ", "X2P", "CZ"}
+
+
+def test_two_qubit_block_resynthesis_accepts_target_basis() -> None:
+    circuit = Circuit(2)
+    circuit.h(0)
+    circuit.cz(0, 1)
+    circuit.h(1)
+
+    config = TwoQubitBlockResynthesisConfig(
+        target_basis=[Instruction.from_standard_gate(StandardGate.CZ)],
+        enhanced=True,
+        max_block_ops=20,
+    )
+
+    assert config.two_qubit_basis is None
+    assert [instruction.name for instruction in config.target_basis] == ["CZ"]
+    assert config.max_block_ops == 20
+    assert "target_basis=['CZ']" in repr(config)
+
+    result = resynthesize_two_qubit_blocks(circuit, config)
+
+    names = [
+        operation.instruction.instruction.name
+        for operation in result.circuit.operations
+    ]
+    assert names
+    assert set(names) <= {"H", "CZ", "U"}
+
+
+def test_two_qubit_block_resynthesis_config_default_is_unconstrained() -> None:
+    config = TwoQubitBlockResynthesisConfig()
+
+    assert config.two_qubit_basis is None
+    assert config.recurse_control_flow is True
+    assert "two_qubit_basis=None" in repr(config)
+
+
 def test_two_qubit_block_resynthesis_python_api_preserves_input() -> None:
     circuit = Circuit(2)
     circuit.cx(0, 1)
@@ -436,3 +596,97 @@ def test_two_qubit_block_resynthesis_python_api_preserves_input() -> None:
     assert len(result.circuit.operations) == 0
     assert transformer.config == config
     assert transformer_result == result
+
+
+def test_target_basis_lowerer_accepts_gate_name_strings() -> None:
+    by_names = TargetBasisLowerer(["h", "CZ"])
+    by_instructions = TargetBasisLowerer(
+        [
+            Instruction.from_standard_gate(StandardGate.H),
+            Instruction.from_standard_gate(StandardGate.CZ),
+        ]
+    )
+
+    names = [instruction.name for instruction in by_names.target_basis]
+    assert names == ["H", "CZ"]
+    assert names == [
+        instruction.name for instruction in by_instructions.target_basis
+    ]
+
+    circuit = Circuit(2)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    lowered = by_names.run(circuit)
+    assert {op.instruction.instruction.name for op in lowered.circuit.operations} <= {
+        "H",
+        "CZ",
+    }
+
+
+def test_target_basis_construction_accepts_mixed_entries() -> None:
+    optimizer = OptimizeOneQubitRuns.basis(
+        ["H", Instruction.from_standard_gate(StandardGate.CZ)]
+    )
+
+    assert optimizer.policy == "basis"
+    assert [instruction.name for instruction in optimizer.target_basis] == ["H", "CZ"]
+
+
+def test_target_basis_reprs_round_trip_through_eval() -> None:
+    namespace = {
+        "CommutationConfig": CommutationConfig,
+        "OptimizeOneQubitRuns": OptimizeOneQubitRuns,
+        "TargetBasisCostModel": TargetBasisCostModel,
+        "TargetBasisLowerer": TargetBasisLowerer,
+        "TwoQubitBlockResynthesisConfig": TwoQubitBlockResynthesisConfig,
+        "UnitaryDecomposeConfig": UnitaryDecomposeConfig,
+    }
+    values = [
+        OptimizeOneQubitRuns.logical(),
+        OptimizeOneQubitRuns.basis(["RZ", "X2P", "CZ"]),
+        TargetBasisCostModel(["RZ", "X2P", "CZ"]),
+        TargetBasisLowerer(["RZ", "X2P", "CZ"]),
+        UnitaryDecomposeConfig(target_basis=["RZ", "X2P", "CZ"]),
+        TwoQubitBlockResynthesisConfig(target_basis=["CZ"]),
+    ]
+
+    for value in values:
+        rebuilt = eval(repr(value), dict(namespace))
+        assert repr(rebuilt) == repr(value)
+
+
+def test_target_basis_cost_model_repr_exposes_basis() -> None:
+    model = TargetBasisCostModel(["RZ", "X2P", "CZ"])
+
+    assert repr(model) == "TargetBasisCostModel(target_basis=['RZ', 'X2P', 'CZ'])"
+    assert [instruction.name for instruction in model.target_basis] == [
+        "RZ",
+        "X2P",
+        "CZ",
+    ]
+
+
+def test_target_basis_entries_reject_unknown_gate_names() -> None:
+    factories = (
+        lambda names: OptimizeOneQubitRuns.basis(names),
+        lambda names: TargetBasisCostModel(names),
+        lambda names: TargetBasisLowerer(names),
+        lambda names: UnitaryDecomposeConfig(target_basis=names),
+        lambda names: TwoQubitBlockResynthesisConfig(target_basis=names),
+    )
+
+    for factory in factories:
+        with pytest.raises(CompilerConfigError, match="unknown standard gate"):
+            factory(["H", "not-a-gate"])
+
+
+def test_target_basis_supports_mcgate_instructions_with_name_repr() -> None:
+    basis = [
+        Instruction.from_name("H"),
+        Instruction.from_mc_gate(MCGate(2, StandardGate.X)),
+    ]
+    lowerer = TargetBasisLowerer(basis)
+
+    # MCGate entries print their stable name; the string form is not
+    # eval-reconstructable and must be passed as an Instruction object.
+    assert repr(lowerer) == "TargetBasisLowerer(target_basis=['H', 'C2-X'])"

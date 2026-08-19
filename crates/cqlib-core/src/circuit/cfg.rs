@@ -1344,6 +1344,22 @@ fn control_operation(op: ClassicalControlOp) -> Operation {
     }
 }
 
+impl TryFrom<&Circuit> for CircuitCFG {
+    type Error = CircuitError;
+
+    fn try_from(circuit: &Circuit) -> Result<Self, Self::Error> {
+        Self::from_circuit(circuit)
+    }
+}
+
+impl TryFrom<&CircuitCFG> for Circuit {
+    type Error = CircuitError;
+
+    fn try_from(cfg: &CircuitCFG) -> Result<Self, Self::Error> {
+        cfg.to_circuit()
+    }
+}
+
 #[cfg(test)]
 #[path = "./cfg_test.rs"]
 mod cfg_test;

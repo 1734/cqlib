@@ -178,13 +178,15 @@ pub use circuit_classical::{ControlBodyTransaction, ExternalControlScope};
 pub use circuit_impl::Circuit;
 pub use circuit_param::{CircuitParam, ParameterValue};
 pub use circuit_to_matrix::circuit_to_matrix;
+pub(crate) use circuit_to_matrix::value_operations_to_matrix;
 pub use classical::{CircuitId, ClassicalType, ClassicalValue, ClassicalVar, Measurement};
 pub use classical_expr::{
     ClassicalBinaryOp, ClassicalCast, ClassicalCompareOp, ClassicalExpr, ClassicalExprKind,
     ClassicalExprNode, ClassicalUnaryOp,
 };
 pub use control_flow::{
-    ClassicalControlOp, ControlBody, ForOp, IfOp, SwitchCase, SwitchOp, WhileOp,
+    ClassicalControlKind, ClassicalControlOp, ControlBody, ForOp, IfOp, SwitchCase, SwitchOp,
+    WhileOp,
 };
 pub use dag::{CircuitDag, DagControlFlow, DagNode, DagSwitchCase, DagWire};
 pub use error::CircuitError;

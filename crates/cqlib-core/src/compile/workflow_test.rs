@@ -423,12 +423,10 @@ fn normal_workflow_reports_staged_order() {
 }
 
 #[test]
-fn enhanced_sabre_uses_the_same_objective_with_larger_search_budgets() {
+fn enhanced_sabre_uses_the_same_heuristic_with_larger_search_budgets() {
     let normal = sabre_config_for_mode(CompileMode::Normal, Some(7));
     let enhanced = sabre_config_for_mode(CompileMode::Enhanced, Some(7));
 
-    assert_eq!(enhanced.trial_objective, normal.trial_objective);
-    assert_eq!(enhanced.swap_regret_ratio, normal.swap_regret_ratio);
     assert_eq!(
         enhanced.heuristic.basic_weight,
         normal.heuristic.basic_weight
@@ -446,12 +444,16 @@ fn enhanced_sabre_uses_the_same_objective_with_larger_search_budgets() {
         enhanced.heuristic.best_epsilon,
         normal.heuristic.best_epsilon
     );
+    assert_eq!(
+        enhanced.heuristic.lookahead_weights,
+        normal.heuristic.lookahead_weights
+    );
     assert!(enhanced.layout_trials > normal.layout_trials);
     assert!(enhanced.layout_assignment_budget > normal.layout_assignment_budget);
     assert!(enhanced.refinement_iterations > normal.refinement_iterations);
-    assert!(enhanced.layout_scoring_trials > normal.layout_scoring_trials);
     assert!(enhanced.routing_trials > normal.routing_trials);
-    assert!(enhanced.heuristic.lookahead_weights.len() > normal.heuristic.lookahead_weights.len());
+    assert_eq!(normal.routing_trials, 1);
+    assert_eq!(enhanced.routing_trials, 2);
 }
 
 #[test]

@@ -32,6 +32,17 @@ class Instruction:
     For parameterised operations, use :class:`ValueOperation` factories.
     """
     @staticmethod
+    def from_name(name: str) -> Instruction:
+        """Create from a case-insensitive standard-gate name (e.g. ``'H'``).
+
+        Only standard gates are addressable by name; multi-controlled and
+        custom gates must be built from their own types.
+
+        Raises:
+            ValueError: If ``name`` does not match any standard gate.
+        """
+        ...
+    @staticmethod
     def from_standard_gate(gate: StandardGate) -> Instruction:
         """Create from a :class:`StandardGate` (no bound parameters)."""
         ...

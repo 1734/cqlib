@@ -14,6 +14,8 @@ import copy
 import math
 import sys
 
+import pytest
+
 from cqlib.circuit import (
     Instruction,
     Parameter,
@@ -30,6 +32,7 @@ from cqlib.compile.commutation import (
     algebraic_commutation,
     check_commutation,
 )
+from cqlib.compile.knowledge import RuleKind, RuleLibrary
 
 
 def operation(gate: StandardGate, qubits: list[int]) -> ValueOperation:
@@ -104,3 +107,51 @@ def test_checker_configuration_and_copy_protocols():
     assert proof is not None
     assert copy.copy(proof) == proof
     assert copy.deepcopy(proof) == proof
+
+
+def test_from_library_uses_custom_commute_rules():
+    # U(theta, 0, 0) rotations stay on the X axis, so two of them commute.
+    # The symbolic algebra oracle has no U-gate family, which makes this pair
+    # provable only through the custom rule below once matrix fallback is off.
+    library = RuleLibrary.from_dsl(
+        "rule comm_u_xaxis {"
+        " match { U(p, q, r) 0, U(s, t, v) 0 }"
+        " require { q == 0, t == 0 }"
+        " rewrite { U(s, t, v) 0, U(p, q, r) 0 }"
+        " }",
+        RuleKind.commute(),
+    )
+    config = CommutationConfig(enable_matrix_fallback=False)
+    lhs = operation(StandardGate.U(0.3, 0.0, 0.0), [0])
+    rhs = operation(StandardGate.U(0.7, 0.0, 0.0), [0])
+
+    checker = CommutationChecker.from_library(library, config)
+    assert checker.check(lhs, rhs) == Commutation.exact()
+
+    # Without the custom rule the pair is unproven: the algebra oracle has no
+    # U family and matrix fallback is disabled.
+    assert CommutationChecker.from_library(RuleLibrary(), config).check(lhs, rhs) is None
+    assert CommutationChecker.with_config(config).check(lhs, rhs) is None
+
+    # The rule condition keeps the proof sound for off-axis U rotations.
+    off_axis = operation(StandardGate.U(0.3, 0.5, 0.0), [0])
+    assert checker.check(off_axis, rhs) is None
+
+
+def test_from_library_default_config_matches_builtin():
+    checker = CommutationChecker.from_library(RuleLibrary.builtin())
+
+    assert checker.config == CommutationChecker.builtin().config
+    assert checker.config == CommutationConfig()
+
+    lhs = operation(StandardGate.S, [0])
+    rhs = operation(StandardGate.T, [0])
+    assert checker.check(lhs, rhs) == Commutation.exact()
+    assert checker.check(lhs, rhs) == CommutationChecker.builtin().check(lhs, rhs)
+
+
+def test_from_library_rejects_disabled_rule_oracle():
+    config = CommutationConfig(enable_rule_oracle=False)
+
+    with pytest.raises(ValueError, match="enable_rule_oracle"):
+        CommutationChecker.from_library(RuleLibrary.builtin(), config)

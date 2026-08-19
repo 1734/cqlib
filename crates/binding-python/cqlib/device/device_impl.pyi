@@ -382,7 +382,7 @@ class Device:
         Example::
 
             >>> dev = Device.line_from_qubits("custom", [100, 101, 102, 103])
-            >>> dev.qubits  # [Qubit(100), Qubit(101), Qubit(102), Qubit(103)]
+            >>> dev.qubits  # [PhysicalQubit(100), PhysicalQubit(101), PhysicalQubit(102), PhysicalQubit(103)]
         """
 
     @staticmethod
@@ -458,11 +458,11 @@ class Device:
         """Device name."""
 
     @property
-    def qubits(self) -> list[Qubit]:
+    def qubits(self) -> list[PhysicalQubit]:
         """All registered physical qubits."""
 
     @property
-    def invalid_qubits(self) -> list[Qubit]:
+    def invalid_qubits(self) -> list[PhysicalQubit]:
         """Invalid (offline / faulty) qubits."""
 
     @invalid_qubits.setter
@@ -709,7 +709,7 @@ class Device:
     # ---- Qubit usability queries ----
 
     @property
-    def usable_qubits(self) -> list[Qubit]:
+    def usable_qubits(self) -> list[PhysicalQubit]:
         """All registered physical qubits that are not marked invalid."""
 
     @property

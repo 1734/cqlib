@@ -50,10 +50,9 @@ class TestNoiseChannels:
 
         cp = TwoQubitNoise.correlated_pauli(Pauli.x(), Pauli.z(), 0.05)
         assert cp.kind == "correlated_pauli"
-        # Note: correlated_pauli with invalid probability doesn't raise ValueError immediately
-        # The is_valid() method should be used to check validity
-        invalid_cp = TwoQubitNoise.correlated_pauli(Pauli.x(), Pauli.z(), 1.5)
-        assert invalid_cp.is_valid() is False
+        # The constructor validates probabilities eagerly.
+        with pytest.raises(ValueError):
+            TwoQubitNoise.correlated_pauli(Pauli.x(), Pauli.z(), 1.5)
 
 
 class TestOperationKeyAndNoiseModel:
@@ -102,3 +101,45 @@ class TestOperationKeyAndNoiseModel:
 
         with pytest.raises(ValueError):
             nm.add_single_qubit_error(StandardGate.X, 0, SingleQubitNoise.bit_flip(1.5))
+
+
+class TestNoiseEquality:
+    """Noise wrappers compare by value; f64 channels stay unhashable."""
+
+    def test_single_qubit_noise_value_equality(self):
+        assert SingleQubitNoise.bit_flip(0.1) == SingleQubitNoise.bit_flip(0.1)
+        assert SingleQubitNoise.bit_flip(0.1) != SingleQubitNoise.bit_flip(0.2)
+        assert SingleQubitNoise.bit_flip(0.1) != SingleQubitNoise.phase_flip(0.1)
+        assert SingleQubitNoise.pauli(0.1, 0.2, 0.3) == SingleQubitNoise.pauli(0.1, 0.2, 0.3)
+        assert (SingleQubitNoise.bit_flip(0.1) == 42) is False
+
+    def test_two_qubit_noise_value_equality(self):
+        assert TwoQubitNoise.depolarizing(0.02) == TwoQubitNoise.depolarizing(0.02)
+        assert TwoQubitNoise.depolarizing(0.02) != TwoQubitNoise.depolarizing(0.03)
+        assert TwoQubitNoise.independent(
+            SingleQubitNoise.phase_flip(0.02),
+            SingleQubitNoise.bit_flip(0.03),
+        ) == TwoQubitNoise.independent(
+            SingleQubitNoise.phase_flip(0.02),
+            SingleQubitNoise.bit_flip(0.03),
+        )
+        assert TwoQubitNoise.independent(
+            SingleQubitNoise.phase_flip(0.02),
+            SingleQubitNoise.bit_flip(0.03),
+        ) != TwoQubitNoise.independent(
+            SingleQubitNoise.bit_flip(0.03),
+            SingleQubitNoise.phase_flip(0.02),
+        )
+
+    def test_readout_error_value_equality(self):
+        assert ReadoutError(0.1, 0.2) == ReadoutError(0.1, 0.2)
+        assert ReadoutError(0.1, 0.2) != ReadoutError(0.1, 0.3)
+        assert (ReadoutError(0.1, 0.2) == 42) is False
+
+    def test_noise_channels_are_unhashable(self):
+        with pytest.raises(TypeError):
+            hash(SingleQubitNoise.bit_flip(0.1))
+        with pytest.raises(TypeError):
+            hash(TwoQubitNoise.depolarizing(0.02))
+        with pytest.raises(TypeError):
+            hash(ReadoutError(0.1, 0.2))

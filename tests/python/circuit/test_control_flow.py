@@ -22,6 +22,7 @@ from cqlib.circuit import (
     ClassicalType,
     ValueControlBody,
     ValueOperation,
+    ValueSwitchCase,
 )
 
 
@@ -153,3 +154,69 @@ def test_control_flow_rejects_body_with_unknown_qubit():
     circuit = Circuit(1)
     with pytest.raises(CircuitError):
         circuit.append(ValueOperation.from_classical_control(control))
+
+
+def test_for_uint_factory_rejects_mismatched_stop_type():
+    circuit = Circuit(1)
+    loop_var = circuit.var(ClassicalType.uint(3))
+    with pytest.raises(CircuitError, match="stop type"):
+        ClassicalControlOp.for_uint(
+            loop_var,
+            ClassicalExpr.uint_literal(3, 0),
+            ClassicalExpr.uint_literal(4, 3),
+            ClassicalExpr.uint_literal(3, 1),
+            ValueControlBody([]),
+        )
+
+
+def test_for_uint_factory_rejects_mismatched_step_type():
+    circuit = Circuit(1)
+    loop_var = circuit.var(ClassicalType.uint(3))
+    with pytest.raises(CircuitError, match="step type"):
+        ClassicalControlOp.for_uint(
+            loop_var,
+            ClassicalExpr.uint_literal(3, 0),
+            ClassicalExpr.uint_literal(3, 3),
+            ClassicalExpr.uint_literal(4, 1),
+            ValueControlBody([]),
+        )
+
+
+def test_switch_factory_rejects_case_value_out_of_width():
+    with pytest.raises(CircuitError, match="does not fit"):
+        ClassicalControlOp.switch(
+            ClassicalExpr.uint_literal(3, 0),
+            [ValueSwitchCase(8, ValueControlBody([]))],
+        )
+
+
+def test_switch_factory_rejects_duplicate_case_values():
+    with pytest.raises(CircuitError, match="duplicate switch case value"):
+        ClassicalControlOp.switch(
+            ClassicalExpr.uint_literal(3, 0),
+            [
+                ValueSwitchCase(1, ValueControlBody([])),
+                ValueSwitchCase(1, ValueControlBody([])),
+            ],
+        )
+
+
+def test_control_factories_accept_valid_arguments():
+    circuit = Circuit(1)
+    loop_var = circuit.var(ClassicalType.uint(3))
+    for_op = ClassicalControlOp.for_uint(
+        loop_var,
+        ClassicalExpr.uint_literal(3, 0),
+        ClassicalExpr.uint_literal(3, 3),
+        ClassicalExpr.uint_literal(3, 1),
+        ValueControlBody([]),
+    )
+    assert for_op.kind == "for"
+
+    switch_op = ClassicalControlOp.switch(
+        ClassicalExpr.uint_literal(3, 1),
+        [ValueSwitchCase(1, ValueControlBody([]))],
+        ValueControlBody([]),
+    )
+    assert switch_op.kind == "switch"
+    assert switch_op.cases[0].value == 1

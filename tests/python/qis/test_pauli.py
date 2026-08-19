@@ -726,6 +726,19 @@ class TestPauliAdvancedFeatures:
         z = Pauli.z()
         assert hash(x1) != hash(z)
 
+    def test_pauli_string_is_unhashable(self):
+        """PauliString is mutable, so it must not be hashable."""
+        ps = PauliString.from_str("X")
+        assert PauliString.__hash__ is None
+        with pytest.raises(TypeError):
+            hash(ps)
+        with pytest.raises(TypeError):
+            {ps: 1}
+
+        # Mutation still works after removing __hash__.
+        ps.set_pauli(0, Pauli.z())
+        assert str(ps) == "+Z"
+
     def test_equality_transitivity(self):
         """Test equality is transitive."""
         x1 = Pauli.x()
@@ -799,3 +812,108 @@ class TestPauliAdvancedFeatures:
         # j instead of i for imaginary unit
         ps_j = PauliString.from_str("+jX")
         assert ps_j.phase == Phase.i()
+
+
+class TestPauliStringMatrixAndIteration:
+    """Test PauliString to_matrix, support, and the iteration protocol."""
+
+    def test_to_matrix_little_endian_tensor_order(self):
+        """Test "ZX" expands as Z ⊗ X (qubit 0 = least-significant factor)."""
+        ps = PauliString.from_str("ZX")
+        matrix = ps.to_matrix()
+        assert matrix.shape == (4, 4)
+        assert matrix.dtype == np.complex128
+        expected = np.array(
+            [
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+                [0, 0, 0, -1],
+                [0, 0, -1, 0],
+            ],
+            dtype=complex,
+        )
+        np.testing.assert_array_equal(matrix, expected)
+
+    def test_to_matrix_includes_each_global_phase(self):
+        """Test the global phase multiplies the matrix."""
+        base = Pauli.y().to_matrix()
+        for phase in (Phase.plus(), Phase.i(), Phase.minus(), Phase.minus_i()):
+            ps = PauliString.from_str("Y")
+            ps.phase = phase
+            np.testing.assert_array_equal(ps.to_matrix(), base * phase.to_complex())
+
+    def test_to_matrix_zero_qubits_is_its_phase(self):
+        """Test a zero-qubit PauliString yields a 1x1 phase matrix."""
+        ps = PauliString(0)
+        ps.phase = Phase.minus_i()
+        matrix = ps.to_matrix()
+        assert matrix.shape == (1, 1)
+        np.testing.assert_array_equal(matrix, np.array([[-1j]], dtype=complex))
+
+    def test_support(self):
+        """Test support returns ascending non-identity qubit indices."""
+        assert PauliString.from_str("XZI").support() == [1, 2]
+        assert PauliString.from_str("III").support() == []
+        assert PauliString.from_str("YIY").support() == [0, 2]
+
+    def test_len(self):
+        """Test __len__ equals num_qubits."""
+        assert len(PauliString.from_str("XZI")) == 3
+        assert len(PauliString(0)) == 0
+
+    def test_len_truthiness(self):
+        """__len__ makes an empty PauliString falsy (like empty str/list)."""
+        assert bool(PauliString(0)) is False
+        assert bool(PauliString(1)) is True
+
+    def test_iter_ascending_qubit_order(self):
+        """Test iteration yields per-qubit Paulis in ascending index (incl. I)."""
+        # "XYZI": qubit 3=X, qubit 2=Y, qubit 1=Z, qubit 0=I
+        ps = PauliString.from_str("XYZI")
+        expected = [Pauli.i(), Pauli.z(), Pauli.y(), Pauli.x()]
+        assert list(ps) == expected
+        assert [ps.get_pauli(i) for i in range(4)] == expected
+
+    def test_iter_is_lazy_and_independent(self):
+        """Test iterators have independent cursors and stop with StopIteration."""
+        ps = PauliString.from_str("XZ")
+        it1, it2 = iter(ps), iter(ps)
+        assert it1 is not it2
+        assert next(it1) == Pauli.z()
+        assert next(it2) == Pauli.z()
+        assert list(it1) == [Pauli.x()]
+        with pytest.raises(StopIteration):
+            next(it1)
+        with pytest.raises(StopIteration):
+            next(it1)
+
+    def test_iter_length_hint(self):
+        """Test __length_hint__ tracks remaining items."""
+        ps = PauliString.from_str("XZI")
+        it = iter(ps)
+        assert it.__length_hint__() == 3
+        next(it)
+        assert it.__length_hint__() == 2
+        list(it)
+        assert it.__length_hint__() == 0
+
+    def test_iter_snapshot_semantics(self):
+        """Test modifications after iterator creation don't affect iteration."""
+        ps = PauliString.from_str("IZ")  # qubit 0=Z, qubit 1=I
+        it = iter(ps)
+        ps.set_pauli(0, Pauli.x())
+        assert next(it) == Pauli.z()
+        assert next(it) == Pauli.i()
+
+    def test_getitem(self):
+        """Test __getitem__ with positive and negative indices."""
+        ps = PauliString.from_str("XZI")  # qubit 2=X, qubit 1=Z, qubit 0=I
+        assert ps[0] == Pauli.i()
+        assert ps[1] == Pauli.z()
+        assert ps[2] == Pauli.x()
+        assert ps[-1] == Pauli.x()
+        assert ps[-3] == Pauli.i()
+        with pytest.raises(IndexError):
+            ps[3]
+        with pytest.raises(IndexError):
+            ps[-4]

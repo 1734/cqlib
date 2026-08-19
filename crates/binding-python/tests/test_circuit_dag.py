@@ -25,10 +25,11 @@ from cqlib.circuit import (
     DagControlFlow,
     DagSwitchCase,
     DagWire,
+    Instruction,
     Parameter,
     ValueOperation,
 )
-from cqlib.circuit.gates import StandardGate
+from cqlib.circuit.gates import Directive, MCGate, StandardGate, UnitaryGate
 
 
 def test_dag_types_are_registered_and_exported() -> None:
@@ -39,6 +40,32 @@ def test_dag_types_are_registered_and_exported() -> None:
     assert DagSwitchCase.__module__ == "cqlib.circuit"
     assert CircuitDag.__module__ == "cqlib.circuit"
     assert DagWire.__module__ == "cqlib.circuit"
+
+
+def test_instruction_names_match_stable_core_names() -> None:
+    cases = [
+        (Instruction.from_standard_gate(StandardGate.H), "H", "standard"),
+        (Instruction.from_mc_gate(MCGate(2, StandardGate.X)), "C2-X", "mcgate"),
+        (
+            Instruction.from_unitary_gate(UnitaryGate("oracle", 1)),
+            "oracle",
+            "unitary",
+        ),
+        (
+            Instruction.from_directive(Directive.barrier()),
+            "barrier",
+            "directive",
+        ),
+        (Instruction.delay(), "delay", "delay"),
+    ]
+
+    for instruction, expected_name, expected_type in cases:
+        assert instruction.name == expected_name
+        assert instruction.instruction_type == expected_type
+
+    assert Directive.barrier().name() == "barrier"
+    assert str(Directive.measure()) == "measure"
+    assert Directive.reset().name() == "reset"
 
 
 def test_circuit_dag_basic_layers_depth_and_round_trip() -> None:
@@ -253,3 +280,34 @@ def test_invalid_node_errors_are_mapped_to_circuit_error() -> None:
 
     with pytest.raises(Exception, match="not in the DAG"):
         dag.quantum_predecessors(999_999)
+
+
+def test_instruction_repr_round_trips_for_gates_and_delay() -> None:
+    namespace = {
+        "Instruction": Instruction,
+        "MCGate": MCGate,
+        "StandardGate": StandardGate,
+    }
+    cases = [
+        Instruction.from_standard_gate(StandardGate.H),
+        Instruction.from_name("CX"),
+        Instruction.from_mc_gate(MCGate(2, StandardGate.X)),
+        Instruction.delay(),
+    ]
+
+    for instruction in cases:
+        rebuilt = eval(repr(instruction), dict(namespace))
+        assert rebuilt.name == instruction.name
+        assert rebuilt.instruction_type == instruction.instruction_type
+
+    assert repr(cases[0]) == "Instruction.from_name('H')"
+    assert repr(cases[2]) == "Instruction.from_mc_gate(MCGate(2, StandardGate.X))"
+    assert repr(cases[3]) == "Instruction.delay()"
+
+
+def test_instruction_from_name_resolves_standard_gates() -> None:
+    assert Instruction.from_name("H").name == "H"
+    assert Instruction.from_name("cx").name == "CX"
+
+    with pytest.raises(ValueError, match="unknown standard gate"):
+        Instruction.from_name("C2-X")

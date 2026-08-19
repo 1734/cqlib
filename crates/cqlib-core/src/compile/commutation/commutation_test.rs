@@ -11,7 +11,11 @@
 // that they have been altered from the originals.
 
 use super::checker::{Commutation, CommutationChecker, CommutationConfig, CommutationResult};
-use crate::circuit::{Instruction, Parameter, Qubit, StandardGate, UnitaryGate};
+use crate::circuit::gate::FrozenCircuit;
+use crate::circuit::{
+    Circuit, CircuitGate, CircuitId, ClassicalControlOp, ClassicalDataOp, ClassicalType,
+    ClassicalValue, Directive, Instruction, Parameter, Qubit, StandardGate, UnitaryGate,
+};
 use ndarray::Array2;
 use num_complex::Complex64;
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -104,6 +108,80 @@ fn disjoint_operations_commute_exactly() {
     );
 
     assert_exact(result);
+}
+
+#[test]
+fn circuit_gate_same_application_respects_signature_order() {
+    let mut definition = Circuit::new(1);
+    definition
+        .rx(Qubit::new(0), Parameter::symbol("theta"))
+        .unwrap();
+    definition
+        .ry(Qubit::new(0), Parameter::symbol("phi"))
+        .unwrap();
+
+    let ordered = Instruction::CircuitGate(Box::new(
+        CircuitGate::with_signature(
+            "G",
+            FrozenCircuit::new(definition.clone()),
+            ["theta".to_string(), "phi".to_string()],
+        )
+        .unwrap(),
+    ));
+    let reversed = Instruction::CircuitGate(Box::new(
+        CircuitGate::with_signature(
+            "G",
+            FrozenCircuit::new(definition),
+            ["phi".to_string(), "theta".to_string()],
+        )
+        .unwrap(),
+    ));
+    let checker = algebra_only_checker();
+    let qubits = [Qubit::new(0)];
+    let params = [Parameter::from(0.37), Parameter::from(-0.81)];
+
+    assert_exact(checker.check(&ordered, &qubits, &params, &ordered, &qubits, &params));
+    assert!(
+        checker
+            .check(&ordered, &qubits, &params, &reversed, &qubits, &params)
+            .is_none()
+    );
+}
+
+#[test]
+fn same_application_shortcut_excludes_side_effecting_operations() {
+    let checker = algebra_only_checker();
+    let qubits = [Qubit::new(0)];
+    let result = ClassicalValue::new(CircuitId::new(), 0, ClassicalType::Bit);
+    let cases = [
+        (Instruction::Directive(Directive::Measure), vec![]),
+        (Instruction::Directive(Directive::Reset), vec![]),
+        (Instruction::Delay, vec![Parameter::from(1.0)]),
+        (
+            Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result }),
+            vec![],
+        ),
+        (
+            Instruction::ClassicalControl(ClassicalControlOp::Break),
+            vec![],
+        ),
+    ];
+
+    for (instruction, params) in cases {
+        assert!(
+            checker
+                .check(
+                    &instruction,
+                    &qubits,
+                    &params,
+                    &instruction,
+                    &qubits,
+                    &params,
+                )
+                .is_none(),
+            "side-effecting instruction {instruction:?} used the same-application shortcut"
+        );
+    }
 }
 
 #[test]

@@ -13,9 +13,11 @@
 use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::error::{CompilerConfigError, compiler_error_to_py_err};
 use crate::compile::resource::PyResourcePolicy;
+use crate::compile::target_basis_item::PyTargetBasisItem;
 use crate::device::device_impl::PyDevice;
 use crate::device::layout::PyLayout;
-use cqlib_core::circuit::{Instruction, StandardGate};
+use crate::utils::{hash_value, python_string_literal};
+use cqlib_core::circuit::Instruction;
 use cqlib_core::compile::resource::ResourcePolicy;
 use cqlib_core::compile::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, CompilerWorkflow,
@@ -23,75 +25,6 @@ use cqlib_core::compile::{
 };
 use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-/// Python-facing target-basis item accepted by compile configuration builders.
-///
-/// The Python API accepts either case-insensitive standard-gate names for
-/// concise call sites or fully constructed `Instruction` objects when callers
-/// need to pass an instruction value directly. String names are normalized with
-/// ASCII uppercase before matching the standard-gate table; unknown names are
-/// reported as configuration errors.
-#[derive(FromPyObject)]
-pub enum PyTargetBasisItem {
-    Name(String),
-    Instruction(PyInstruction),
-}
-
-impl PyTargetBasisItem {
-    fn into_instruction(self) -> PyResult<Instruction> {
-        let name = match self {
-            Self::Name(name) => name,
-            Self::Instruction(instruction) => return Ok(instruction.inner),
-        };
-
-        let gate = match name.to_ascii_uppercase().as_str() {
-            "I" => StandardGate::I,
-            "H" => StandardGate::H,
-            "RX" => StandardGate::RX,
-            "RXX" => StandardGate::RXX,
-            "RXY" => StandardGate::RXY,
-            "RY" => StandardGate::RY,
-            "RYY" => StandardGate::RYY,
-            "RZ" => StandardGate::RZ,
-            "RZX" => StandardGate::RZX,
-            "RZZ" => StandardGate::RZZ,
-            "S" => StandardGate::S,
-            "SDG" => StandardGate::SDG,
-            "SWAP" => StandardGate::SWAP,
-            "T" => StandardGate::T,
-            "TDG" => StandardGate::TDG,
-            "U" => StandardGate::U,
-            "X" => StandardGate::X,
-            "XY" => StandardGate::XY,
-            "X2P" => StandardGate::X2P,
-            "X2M" => StandardGate::X2M,
-            "XY2P" => StandardGate::XY2P,
-            "XY2M" => StandardGate::XY2M,
-            "Y" => StandardGate::Y,
-            "Y2P" => StandardGate::Y2P,
-            "Y2M" => StandardGate::Y2M,
-            "Z" => StandardGate::Z,
-            "PHASE" => StandardGate::Phase,
-            "GPHASE" => StandardGate::GPhase,
-            "CX" => StandardGate::CX,
-            "CCX" => StandardGate::CCX,
-            "CY" => StandardGate::CY,
-            "CZ" => StandardGate::CZ,
-            "CRX" => StandardGate::CRX,
-            "CRY" => StandardGate::CRY,
-            "CRZ" => StandardGate::CRZ,
-            "FSIM" => StandardGate::FSIM,
-            _ => {
-                return Err(CompilerConfigError::new_err(format!(
-                    "unknown standard gate in compile target basis: {name:?}"
-                )));
-            }
-        };
-        Ok(Instruction::Standard(gate))
-    }
-}
 
 fn convert_target_basis(items: Vec<PyTargetBasisItem>) -> PyResult<Vec<Instruction>> {
     if items.is_empty() {
@@ -438,7 +371,7 @@ impl PyCompileTarget {
                 "CompileTarget.basis([{}])",
                 instructions
                     .iter()
-                    .map(|instruction| format!("{:?}", instruction.to_string()))
+                    .map(|instruction| python_string_literal(&instruction.name()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -460,7 +393,7 @@ impl PyCompileTarget {
                 device_target.device.name(),
                 basis
                     .iter()
-                    .map(|instruction| format!("{:?}", instruction.to_string()))
+                    .map(|instruction| python_string_literal(&instruction.name()))
                     .collect::<Vec<_>>()
                     .join(", "),
                 if device_target.initial_layout.is_some() {
@@ -516,13 +449,7 @@ impl PyCompileMode {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        match self.inner {
-            CompileMode::Normal => 0_u8,
-            CompileMode::Enhanced => 1_u8,
-        }
-        .hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -837,8 +764,7 @@ impl PyCompilerWorkflow {
     /// Runs the workflow without modifying the input circuit.
     fn run(&self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<PyCompileResult> {
         let circuit = circuit.inner.clone();
-        let config = self.inner.config().clone();
-        py.detach(move || CompilerWorkflow::new(config).run(&circuit))
+        py.detach(|| self.inner.run(&circuit))
             .map(PyCompileResult::from)
             .map_err(compiler_error_to_py_err)
     }
