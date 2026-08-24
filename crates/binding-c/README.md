@@ -22,7 +22,7 @@ gcc crates/binding-c/examples/main.c \
     -lm \
     -o target/release/cqlib_c_example
 
-./target/release/cqlib_c_example
+LD_LIBRARY_PATH=target/release ./target/release/cqlib_c_example
 ```
 
 ## API
