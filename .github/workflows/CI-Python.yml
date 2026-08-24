@@ -176,6 +176,8 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.TESTPYPI_API_TOKEN }}
+          # 用环境变量传仓库地址，绕开 args 字符串解析（之前 URL 在 args 里被吞掉）
+          MATURIN_REPOSITORY_URL: https://test.pypi.org/legacy/
         with:
           command: upload
-          args: --non-interactive --skip-existing --repository-url https://test.pypi.org/legacy/ wheels-*/*
+          args: --non-interactive --skip-existing wheels-*/*
