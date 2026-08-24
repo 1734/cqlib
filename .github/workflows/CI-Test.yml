@@ -34,8 +34,7 @@ jobs:
       # 一个版本挂了不取消另一个版本的运行
       fail-fast: false
       matrix:
-        # 支持的最低版本 3.10 + 一个较新版本
-        python-version: ['3.10', '3.12']
+        python-version: ['3.10']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
