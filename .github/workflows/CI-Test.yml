@@ -44,12 +44,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+      - name: Create virtualenv
+        # GitHub runner 上没有 venv，而 maturin develop 必须装进某个环境（报错提示也说了：建一个叫 .venv 的即可）
+        run: python -m venv .venv
       - name: Install build and test tools
-        run: python -m pip install -U pip maturin pytest numpy
+        run: .venv/bin/python -m pip install -U pip maturin pytest numpy
       - name: Build and install local extension
-        # 把本地 Rust 源码编译成原生扩展装进当前环境
-        run: maturin develop -m crates/binding-python/Cargo.toml
+        # 把本地 Rust 源码编译成原生扩展装进 .venv
+        run: .venv/bin/maturin develop -m crates/binding-python/Cargo.toml
       - name: Run main Python test suite
-        run: pytest tests/python/
+        run: .venv/bin/pytest tests/python/
       - name: Run binding Python tests
-        run: pytest crates/binding-python/tests/
+        run: .venv/bin/pytest crates/binding-python/tests/
