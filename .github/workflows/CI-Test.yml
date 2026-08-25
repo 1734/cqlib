@@ -1,9 +1,6 @@
-# 测试流水线：Rust 单元测试 + Python 绑定测试
-# 与 CI-Python.yml 分工：那个文件管打包/发布（maturin 自动生成），这个文件管测试
 name: CI-Test
 
 on:
-  # push 不限定分支：所有分支的 push 都触发测试
   push:
   pull_request:
   workflow_dispatch:
@@ -12,7 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  # ---- Rust 侧测试 ----
   rust-tests:
     name: Rust tests
     runs-on: ubuntu-latest
@@ -21,17 +17,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # 各 crate 共享一份缓存
           workspaces: . -> target
       - name: Run Rust tests
         run: cargo test --all
 
-  # ---- Python 侧测试 ----
   python-tests:
     name: Python tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
-      # 一个版本挂了不取消另一个版本的运行
       fail-fast: false
       matrix:
         python-version: ['3.10']
@@ -45,12 +38,10 @@ jobs:
         with:
           workspaces: . -> target
       - name: Create virtualenv
-        # GitHub runner 上没有 venv，而 maturin develop 必须装进某个环境（报错提示也说了：建一个叫 .venv 的即可）
         run: python -m venv .venv
       - name: Install build and test tools
         run: .venv/bin/python -m pip install -U pip maturin pytest numpy
       - name: Build and install local extension
-        # 把本地 Rust 源码编译成原生扩展装进 .venv
         run: .venv/bin/maturin develop -m crates/binding-python/Cargo.toml
       - name: Run main Python test suite
         run: .venv/bin/pytest tests/python/
