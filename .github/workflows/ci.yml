@@ -1,4 +1,6 @@
 # PR / push 触发的日常 CI：只做测试与静态检查，不构建发布产物、不发布任何内容。
+# 同时被 release.yml 以 workflow_call 复用 —— tag 触发发布时, 同样先跑完整套测试
+# 才进入构建 (需求: 自动测试在 PR 触发和 tag 触发时都要跑)。
 #
 # 覆盖:
 #   - Rust workspace 测试 (cargo test --workspace)
@@ -14,6 +16,7 @@ on:
     branches: [main, master,test1]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
