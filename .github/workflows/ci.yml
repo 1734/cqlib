@@ -1,0 +1,99 @@
+# PR / push 触发的日常 CI：只做测试与静态检查，不构建发布产物、不发布任何内容。
+#
+# 覆盖:
+#   - Rust workspace 测试 (cargo test --workspace)
+#   - 格式检查 (cargo fmt) 与 Clippy 检查
+#   - C binding: 编译静态库/动态库, 编译并运行 C 测试程序 (静态链接 + 动态链接)
+#   - Python: maturin develop 安装后运行 tests/python 与 binding 测试
+#
+# 发布构建见 release.yml (tag `v*` 触发)。
+name: CI
+
+on:
+  push:
+    branches: [main, master,test1]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-checks:
+    name: Rust fmt + clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (report only)
+        # 仅报告、不作为硬性门禁: 仓库现存 clippy 告警 (cqlib-core lib 6 个,
+        # 测试代码还有 deny-by-default 的 erasing_op 等)。修复后如想收紧,
+        # 可改为 `cargo clippy --workspace --all-targets -- -D warnings`。
+        run: cargo clippy --workspace --lib --bins
+      - name: Run Rust workspace tests
+        run: cargo test --workspace
+
+  c-binding-tests:
+    name: C binding tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Build binding-c (static + dynamic libraries)
+        run: cargo build --release -p binding-c
+      - name: Compile and run C tests (static link)
+        run: |
+          gcc crates/binding-c/tests/test_circuit.c -I crates/binding-c/include \
+            -o test_circuit_static target/release/libbinding_c.a -lm -lpthread -ldl
+          ./test_circuit_static
+      - name: Compile and run C tests (dynamic link)
+        run: |
+          gcc crates/binding-c/tests/test_circuit.c -I crates/binding-c/include \
+            -o test_circuit_dynamic -L target/release -lbinding_c -lm -lpthread -ldl \
+            -Wl,-rpath,"$PWD/target/release"
+          ./test_circuit_dynamic
+
+  python-tests:
+    name: Python tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 是声明的最低版本 (abi3-py310), 3.13 用于验证新版本兼容性
+        python-version: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Create virtualenv
+        run: python -m venv .venv
+      - name: Install build and test tools
+        run: .venv/bin/python -m pip install -U pip maturin pytest numpy
+      - name: Build and install local extension
+        run: .venv/bin/maturin develop -m crates/binding-python/Cargo.toml
+      - name: Run main Python test suite
+        run: .venv/bin/pytest tests/python/
+      - name: Run binding Python tests
+        run: .venv/bin/pytest crates/binding-python/tests/

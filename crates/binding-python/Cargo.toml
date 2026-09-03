@@ -1,6 +1,8 @@
 [package]
 name = "binding-python"
-version.workspace = true
+# Python 包版本独立于 Rust/C 版本 (对应规则: Python 用 PEP 440, Rust/C 用 semver)。
+# 此处必须为合法 semver (如 1.4.0-beta1); maturin 会归一化为 PEP 440 (PyPI 上显示为 1.4.0b1)。
+version = "1.4.0-beta1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 pyo3 = { version = "0.27", features = ["abi3-py310", "num-complex", "chrono"] }
 chrono = "0.4"
-cqlib-core = { path = "../cqlib-core", version = '0.1.0' }
+cqlib-core = { path = "../cqlib-core", version = '0.1.0-beta.1' }
 num-complex.workspace = true
 numpy.workspace = true
 smallvec.workspace = true
