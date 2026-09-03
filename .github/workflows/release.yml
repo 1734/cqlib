@@ -293,12 +293,15 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release --locked -p binding-c
+          # Rust std 在 Windows 上直接调 NT 内核 API (NtReadFile/NtCreateFile 等, 在 ntdll 里),
+          # 静态链接 .a 时消费方必须补 ntdll.lib (rustc 建 exe/dll 时自己会链, 静态库不会)。
+          # 因此 Windows 静态库使用者也需链接 ntdll.lib (应写进 C 包说明文档)。
           cl /nologo /I crates/binding-c/include crates/binding-c/tests/test_circuit.c `
-            target/release/binding_c.lib ws2_32.lib userenv.lib advapi32.lib bcrypt.lib `
+            target/release/binding_c.lib ws2_32.lib userenv.lib advapi32.lib bcrypt.lib ntdll.lib `
             /Fe:test_circuit_static.exe
           .\test_circuit_static.exe
           cl /nologo /I crates/binding-c/include crates/binding-c/tests/test_circuit.c `
-            target/release/binding_c.dll.lib ws2_32.lib userenv.lib advapi32.lib bcrypt.lib `
+            target/release/binding_c.dll.lib ws2_32.lib userenv.lib advapi32.lib bcrypt.lib ntdll.lib `
             /Fe:test_circuit_dynamic.exe
           Copy-Item target/release/binding_c.dll .
           .\test_circuit_dynamic.exe
