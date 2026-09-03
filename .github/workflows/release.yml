@@ -264,8 +264,11 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           cargo build --release --locked -p binding-c
+          # Rust std 在 macOS 上的原子等待/通知实现依赖 libc++ (__libcpp_atomic_wait 等,
+          # 来自 faer→spindle), 动态库由 rustc 自行链接, 但静态链接 .a 时消费方必须补 -lc++。
+          # 因此 macOS 静态库使用者也需在链接时加 -lc++ (应写进 C 包说明文档)。
           cc crates/binding-c/tests/test_circuit.c -I crates/binding-c/include \
-            -o test_circuit_static target/release/libbinding_c.a -framework CoreFoundation
+            -o test_circuit_static target/release/libbinding_c.a -framework CoreFoundation -lc++
           ./test_circuit_static
           cc crates/binding-c/tests/test_circuit.c -I crates/binding-c/include \
             -o test_circuit_dynamic -L target/release -lbinding_c \
@@ -325,9 +328,6 @@ jobs:
         with:
           workspaces: . -> target
       - name: cargo package (构建并校验打包内容)
-        # 注意: 当前 cqlib-core 的 include 清单缺 build.rs、src/ir/qasm2/parser.lalrpop、
-        # src/compile/knowledge/rules/*.rule 和 LICENSE.txt, 打包产物无法独立编译,
-        # 因此本步骤 (cargo package 自带 verify 构建) 会失败。修好 include 清单后才会通过。
         run: cargo package --locked -p cqlib-core
       - name: Verify the .crate compiles standalone
         # 解开 .crate, 只用包内源码 + crates.io 依赖重新构建, 证明可独立编译。

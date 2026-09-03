@@ -25,8 +25,11 @@ categories = [
     "data-structures"
 ]
 include = [
+    "build.rs",
     "src/**/*.rs",
-    "src/compile/knowledge/rule_dsl/*.rule",
+    "src/**/*.lalrpop",
+    "src/compile/knowledge/rules/*.rule",
+    "LICENSE.txt",
     "Cargo.toml",
     "README.md",
 ]
