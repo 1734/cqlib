@@ -240,8 +240,10 @@ jobs:
             -v "$PWD:/io" -w /io \
             "quay.io/pypa/$MANYLINUX_IMAGE" \
             bash -euxo pipefail -c '
+              # 用最新 stable (与其余 job 一致): Cargo.lock 里的依赖已要求 rustc >= 1.89
+              # (time 0.3.49 需 1.88, wide 1.5.0 需 1.89), 不能钉 workspace 声明的 1.85。
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --profile minimal --default-toolchain 1.85
+                | sh -s -- -y --profile minimal --default-toolchain stable
               export PATH="$HOME/.cargo/bin:$PATH"
               cargo build --release --locked -p binding-c
               gcc crates/binding-c/tests/test_circuit.c -I crates/binding-c/include \
