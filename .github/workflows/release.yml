@@ -179,6 +179,11 @@ jobs:
           - { name: windows-x86_64, runner: windows-latest }
           - { name: macos-x86_64,   runner: macos-15-intel }
           - { name: macos-arm64,    runner: macos-15 }
+    defaults:
+      run:
+        # Windows 默认 shell 是 pwsh, 不展开 *.whl 通配符, 会原样传给 pip。
+        # 统一用 bash (Windows runner 自带 Git Bash) 让三步命令在三平台行为一致。
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
