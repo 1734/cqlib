@@ -210,6 +210,6 @@ print(state.probabilities())
 
 ## 下一步
 
-- [控制流与特殊线路结构](5_control_flow_and_special.md)：把同样的读图方法用于动态控制流、非幺正指令和自定义门。
+- [控制流与特殊线路结构](5_control_flow_and_special.md)：把同样的读图方法用于动态控制流、非酉指令和自定义门。
 - [可视化执行结果](6_result_visualization.md)：在线路结构确认后，用 histogram 和 distribution 检查采样结果。
 - [可视化量子态](7_state_visualization.md)：需要解释状态本身时，用 Bloch、state city 和 Pauli vector 补充结构图。

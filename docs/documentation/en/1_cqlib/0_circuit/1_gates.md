@@ -47,7 +47,7 @@ The commonly used standard gates are introduced below by category, according to 
 
 Single-qubit non-parametric gates are the most basic class of standard gates for constructing quantum circuits. They act on a single qubit and require no angle parameter, and the matrix form and effect of the gate are already fixed at definition time.
 
-These gates perform basic transformations of quantum states, for example using the `H` gate to construct a superposition state, the `X` gate to flip a bit, the `Z`, `S` and `T` gates to adjust the phase, or the Clifford gate set to construct basic circuits that are convenient for analysis and compilation.
+These gates perform basic transformations of quantum states, for example using the `H` gate to construct a superposition state, the `X` gate to flip a bit, the `Z`, `S` and `T` gates to adjust the phase, or the Clifford gate set to construct basic circuits that are convenient for analysis and compilation and optimization.
 
 In actual use, single-qubit non-parametric gates usually serve as the basic building blocks of more complex circuits. They can be used alone for state preparation, phase correction and circuit debugging, or combined with two-qubit gates and parameterized rotation gates to construct Bell states, GHZ states, variational circuits, error-checking circuits and hardware native gate decomposition results.
 
@@ -239,7 +239,7 @@ The inversion rules of common gates are as follows:
 
 When appending an `MCGate` to a circuit, the qubit order needs to be passed in according to the convention: **all control qubits first, then the target qubits that the target gate acts on**.
 
-For example, for a three-control `X` gate, the first three qubits are control qubits and the last qubit is the target qubit. This keeps the semantics of the multi-controlled gate clear and also facilitates later gate decomposition, compilation and hardware mapping.
+For example, for a three-control `X` gate, the first three qubits are control qubits and the last qubit is the target qubit. This keeps the semantics of the multi-controlled gate clear and also facilitates later gate decomposition, compilation and optimization and hardware mapping.
 
 
 ```python
@@ -323,7 +323,7 @@ Note that `UnitaryGate` is better suited to quantum operations that already have
 
 `CircuitGate` is used to encapsulate an existing sub-circuit as a reusable composite gate. Unlike `UnitaryGate`, which describes gate behavior through a matrix, `CircuitGate` keeps the structural information of the sub-circuit, so it is better suited to expressing algorithm modules, oracles, ansatz blocks, repeated circuit structures and other quantum program fragments that need to be reused in multiple positions.
 
-In actual use, a sub-circuit can be constructed first and then converted into a `CircuitGate` through `to_gate(name)`. The resulting composite gate can be appended to other circuits like an ordinary gate, and can be expanded back into the original sub-circuit operations through `decompose()` when needed, which facilitates later circuit analysis, parameter binding, compilation or IR export.
+In actual use, a sub-circuit can be constructed first and then converted into a `CircuitGate` through `to_gate(name)`. The resulting composite gate can be appended to other circuits like an ordinary gate, and can be expanded back into the original sub-circuit operations through `decompose()` when needed, which facilitates later circuit analysis, parameter binding, compilation and optimization or IR export.
 
 ```python
 from cqlib import Circuit, Parameter
@@ -372,7 +372,7 @@ gate = CircuitGate("HadamardBlock", frozen)
 
 Besides ordinary quantum gates, a quantum circuit may also contain special instructions such as measurement, reset, barrier and delay. Such instructions usually cannot correspond to an ordinary unitary matrix, so they are represented uniformly by `Directive` in Cqlib.
 
-`Directive` is mainly used to describe auxiliary semantics during circuit execution. For example, `barrier` constrains gate reordering during compilation, `measure` reads out quantum state information as a classical result, `reset` reinitializes a qubit to |0>, and `delay` preserves the idle-wait semantics in hardware time scheduling.
+`Directive` is mainly used to describe auxiliary semantics during circuit execution. For example, `barrier` constrains gate reordering during compilation and optimization, `measure` reads out quantum state information as a classical result, `reset` reinitializes a qubit to |0>, and `delay` preserves the idle-wait semantics in hardware time scheduling.
 
 Common non-unitary instructions can be added to a circuit directly through the interfaces provided by `Circuit`:
 
@@ -417,7 +417,7 @@ Therefore, before performing `to_matrix()`, circuit equivalence validation or ga
 
 ## Low-level instructions and ValueOperation
 
-In some lower-level or more automated development scenarios, Cqlib supports constructing `Instruction` and `ValueOperation` explicitly, which provides a more flexible development approach. For example, when writing a circuit deserializer, an IR converter, compilation tests, an automated circuit generation tool or a custom front-end interface, this approach can be used to describe directly the instruction type, acting qubits, parameter list and label information of a certain operation.
+In some lower-level or more automated development scenarios, Cqlib supports constructing `Instruction` and `ValueOperation` explicitly, which provides a more flexible development approach. For example, when writing a circuit deserializer, an IR converter, compilation and optimization tests, an automated circuit generation tool or a custom front-end interface, this approach can be used to describe directly the instruction type, acting qubits, parameter list and label information of a certain operation.
 
 ```python
 from cqlib import Circuit, Qubit
@@ -440,7 +440,7 @@ print(c[0].label)
 
 Semantically, `Instruction` is used to describe "what type of instruction is executed", while `ValueOperation` is used to describe one concrete application of this instruction in a circuit, including which qubits it acts on, which parameters it uses, and whether it carries an extra label.
 
-This distinction allows Cqlib to reuse a unified data model across high-level circuit construction, low-level operation representation, IR conversion, compilation and dynamic control flow handling.
+This distinction allows Cqlib to reuse a unified data model across high-level circuit construction, low-level operation representation, IR conversion, compilation and optimization and dynamic control flow handling.
 
 ---
 

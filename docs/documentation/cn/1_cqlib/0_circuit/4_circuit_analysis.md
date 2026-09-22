@@ -177,7 +177,7 @@ matrix = op.matrix()
 print(np.allclose(matrix, np.array([[0, 1], [1, 0]], dtype=complex)))
 ```
 
-需要注意的是，该接口仅适用于普通幺正操作。
+需要注意的是，该接口仅适用于普通酉操作。
 
 ---
 

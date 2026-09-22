@@ -96,7 +96,7 @@ print(state.probabilities())
 
 ## 直接施加常用量子门
 
-`Statevector` 提供与标准门相对应的 `apply_*` 方法，包括 Pauli 门、Clifford 门、旋转门、受控门、双比特旋转门、`fSim`、`CCX` 和用户自定义幺正矩阵。
+`Statevector` 提供与标准门相对应的 `apply_*` 方法，包括 Pauli 门、Clifford 门、旋转门、受控门、双比特旋转门、`fSim`、`CCX` 和用户自定义酉矩阵。
 
 ```python
 import numpy as np

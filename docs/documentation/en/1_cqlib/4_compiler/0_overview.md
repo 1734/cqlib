@@ -1,4 +1,4 @@
-# Compilation
+# Compilation and optimization
 
 The recommended entry point for the Cqlib 2.0 Python binding is **`cqlib.compile`**: a single call completes canonicalization, knowledge rule optimization, decomposition, optional device layout and SABRE routing, and target gate set translation, plus the native instruction lowering, fixed-point optimization and validation required by a strict device target.
 

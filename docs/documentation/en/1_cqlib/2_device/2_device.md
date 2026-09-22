@@ -80,13 +80,13 @@ q0.frequency = 5.1        # 频率（GHz）
 q0.prob_meas0_prep1 = 0.02  # P(测到 0 | 制备为 1)
 q0.prob_meas1_prep0 = 0.01  # P(测到 1 | 制备为 0)
 
-# 添加本原单比特门（注意：native_instructions 是列表属性，通过 append 添加）
+# Add a native single-qubit gate (note: use add_native_instruction(); appending to native_instructions has no effect)
 x_prop = InstructionProp(
     Instruction.from_standard_gate(StandardGate.X),
     error_rate=0.001,
 )
 x_prop.length = 20.0  # 门时长（纳秒）
-q0.native_instructions.append(x_prop)
+q0.add_native_instruction(x_prop)
 
 device.add_qubit_properties(0, q0)
 
@@ -106,7 +106,7 @@ print("比特 0 局部属性已注入")
 
 **Note**:
 - The first parameter of the InstructionProp constructor must be an Instruction object, created with Instruction.from_standard_gate(StandardGate.X). Passing StandardGate.X directly is not allowed
-- QubitProp.native_instructions is a read-only list property and cannot be assigned directly (q0.native_instructions = [...] raises AttributeError); elements should be added through .append()
+- QubitProp.native_instructions is a read-only property that returns a new list on every read: it cannot be assigned directly (q0.native_instructions = [...] raises AttributeError), and calling .append() on it has no effect (only a temporary copy is modified); entries must be added through add_native_instruction()
 - EdgeProp.native_instructions is also a read-only property, and entries must be added through the add_native_instruction() method
 
 ---

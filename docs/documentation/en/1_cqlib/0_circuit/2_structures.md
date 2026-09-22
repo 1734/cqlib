@@ -1,6 +1,6 @@
 # Circuit structure and construction
 
-`Circuit` is the core circuit container in the `cqlib.circuit` module, used to represent a complete quantum program. It records qubits and the circuit operations in order, and is also responsible for maintaining parameter expressions, the global phase, classical variables, measurement results and the classical handle namespace required by dynamic circuits. Therefore, `Circuit` is both the main entry point for constructing quantum circuits and an important data foundation for later processes such as IR conversion, compilation, device mapping and result analysis.
+`Circuit` is the core circuit container in the `cqlib.circuit` module, used to represent a complete quantum program. It records qubits and the circuit operations in order, and is also responsible for maintaining parameter expressions, the global phase, classical variables, measurement results and the classical handle namespace required by dynamic circuits. Therefore, `Circuit` is both the main entry point for constructing quantum circuits and an important data foundation for later processes such as IR conversion, compilation and optimization, device mapping and result analysis.
 
 Structurally, a `Circuit` usually contains the following information:
 
@@ -11,7 +11,7 @@ Structurally, a `Circuit` usually contains the following information:
 * The classical variables and classical values used in dynamic circuits, describing measurement results and classical control logic;
 * The classical handle namespace identified by `CircuitId`, ensuring consistency of classical variables and measurement values within the circuit.
 
-Together, these structures form the basic representation of a Cqlib quantum circuit, so that the circuit keeps a consistent data semantics across different stages such as construction, composition, parameter binding, matrix conversion, IR export, compilation and dynamic control flow analysis.
+Together, these structures form the basic representation of a Cqlib quantum circuit, so that the circuit keeps a consistent data semantics across different stages such as construction, composition, parameter binding, matrix conversion, IR export, compilation and optimization and dynamic control flow analysis.
 
 
 ---
@@ -322,7 +322,7 @@ print([op.instruction.instruction.name for op in flat.operations])
 
 ## Global phase
 
-Every `Circuit` contains a `global_phase` attribute, used to record the overall global phase of the circuit. The global phase does not change the probability distribution of each computational basis state obtained from a single measurement, but it is part of the mathematical representation of a quantum circuit and is of great significance in matrix comparison, circuit equivalence determination, compilation rewriting and certain phase-sensitive algorithm analyses.
+Every `Circuit` contains a `global_phase` attribute, used to record the overall global phase of the circuit. The global phase does not change the measurement probability distribution of the computational basis states, but it is part of the mathematical representation of a quantum circuit and is of great significance in matrix comparison, circuit equivalence determination, compilation rewriting and certain phase-sensitive algorithm analyses.
 
 In Cqlib, `global_phase` is represented with `Parameter`, so it can be set to an ordinary numeric value, a symbolic parameter or a parameter expression.
 

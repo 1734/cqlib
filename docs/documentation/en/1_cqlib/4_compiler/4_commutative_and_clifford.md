@@ -176,5 +176,5 @@ In algorithm verification, statevector comparison and gate matrix comparison, it
 
 ## Next steps
 
-- [Compilation](0_overview.md): review the complete `compile()` pipeline and the configuration essentials of each stage.
+- [Compilation and optimization](0_overview.md): review the complete `compile()` pipeline and the configuration essentials of each stage.
 - [Template matching and knowledge rule optimization](3_template_optimization.md): learn how knowledge rule rewriting works together with commutation analysis.

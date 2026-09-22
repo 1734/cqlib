@@ -91,7 +91,7 @@ state.apply_cx(0, 1)
 print(entropy.entanglement_entropy_pure(state, [0]))
 ```
 
-Any single-qubit subsystem of a Bell state is close to the maximally mixed state, so the entanglement entropy is close to `1` bit. For a product state, the entanglement entropy should be close to `0`.
+The reduced density matrix of any single-qubit subsystem of a Bell state is exactly the maximally mixed state I/2, so the entanglement entropy is exactly `1` bit. For a product state, the entanglement entropy is exactly `0`.
 
 ---
 

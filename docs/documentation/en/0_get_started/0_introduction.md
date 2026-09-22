@@ -30,7 +30,7 @@ This documentation set covers the [installation tutorial](1_installation.md), th
 Cqlib uses three languages, Rust, Python and C, and follows the design idea of "a unified core with layered interfaces", ensuring consistency of capability while accommodating the usage habits of different development scenarios:
 
 - **[Rust](../../../api/en/rust/0_overview.md)**  
-  As the core implementation layer, it carries key capabilities such as quantum circuits, gates and instructions, the parameter system, intermediate representation, device modeling, quantum information, error mitigation and compilation.
+  As the core implementation layer, it carries key capabilities such as quantum circuits, gates and instructions, the parameter system, intermediate representation, device modeling, quantum information, error mitigation and compilation and optimization.
 
 - **[Python](../../../api/en/python/0_overview.md)**  
   Aimed at algorithm development and rapid prototyping, providing a more efficient and intuitive Python interface, convenient for interactive use and fast iteration.
@@ -52,7 +52,7 @@ The core capabilities of Cqlib consist of the following eight modules:
   For describing information related to quantum devices, including device topology, the mapping from logical qubits to physical qubits, calibration properties, noise models and execution results, providing the data foundation for backend adaptation and noise-aware compilation.
 - [Quantum Information](../1_cqlib/3_qis/0_overview.md)
   Provides tools related to quantum states, operators and quantum information processing, including statevector, density matrix, stabilizer simulation, Pauli operators, Hamiltonian, quantum evolution and information metrics.
-- [Compilation](../1_cqlib/4_compiler/0_overview.md)
+- [Compilation and optimization](../1_cqlib/4_compiler/0_overview.md)
   For transforming high-level quantum circuits into circuit forms better suited to execution on a target device; supports gate decomposition, topological layout, routing mapping, template matching, swap optimization and Clifford-related optimization.
 - [Visualization](../1_cqlib/5_visualization/0_overview.md)
   For displaying the structure of quantum circuits; supports Unicode text diagrams and SVG rendering, making it easy to inspect circuit hierarchy, gate operation order and overall structure.

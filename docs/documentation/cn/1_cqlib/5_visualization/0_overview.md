@@ -64,7 +64,7 @@ draw_figure(circuit, output_path="assets/bell.png")
 2. [生成 PNG 线路图](2_draw_figure.md)：为 Notebook、文档站和报告生成图形文件。
 3. [Notebook 与文档集成](3_notebook_and_docs.md)：在 Notebook 和 Markdown 中保存、引用可视化结果。
 4. [复杂线路的可视化策略](4_visualization_practices.md)：处理参数化线路、映射前后对比和大线路展示。
-5. [控制流与特殊线路结构](5_control_flow_and_special.md)：阅读动态控制流、非幺正指令和自定义门图形。
+5. [控制流与特殊线路结构](5_control_flow_and_special.md)：阅读动态控制流、非酉指令和自定义门图形。
 6. [可视化执行结果](6_result_visualization.md)：用柱状图和概率分布查看采样结果。
 7. [可视化量子态](7_state_visualization.md)：用 Bloch、state city 和 Pauli vector 理解状态。
 

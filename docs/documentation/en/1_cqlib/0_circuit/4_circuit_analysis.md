@@ -1,6 +1,6 @@
 # Circuit analysis and transformation
 
-After Circuit construction is complete, the circuit usually still needs to go through further analysis, validation and transformation processes. Depending on actual needs, the operation sequence can be inspected, gate types counted, symbolic parameters bound, composite gates expanded, an inverse circuit generated, the circuit converted into a matrix representation, or the circuit structure checked for consistency. These capabilities are an important foundation connecting circuit construction, algorithm validation, IR conversion, compilation and backend execution.
+After Circuit construction is complete, the circuit usually still needs to go through further analysis, validation and transformation processes. Depending on actual needs, the operation sequence can be inspected, gate types counted, symbolic parameters bound, composite gates expanded, an inverse circuit generated, the circuit converted into a matrix representation, or the circuit structure checked for consistency. These capabilities are an important foundation connecting circuit construction, algorithm validation, IR conversion, compilation and optimization, and backend execution.
 
 This page gives a systematic introduction to the common interfaces related to circuit analysis and structure transformation in `cqlib.circuit`, and explains how a circuit is inspected, reused, transformed and validated after construction.
 

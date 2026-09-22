@@ -38,7 +38,7 @@ print("振幅阻尼有效:", amp.is_valid())        # True
 
 **Note**:
 - SingleQubitNoise has no .kind property. To distinguish noise types, the noise type must be tracked through the construction method
-- pauli(px, py, pz) requires px + py + pz <= 1, otherwise is_valid() returns False
+- pauli(px, py, pz) requires px + py + pz <= 1, otherwise the constructor raises ValueError
 
 ---
 
@@ -185,4 +185,4 @@ print("噪声通道数:", len(channels))
 
 - [Execution result and status](5_result.md): become familiar with the complete lifecycle and error handling of Outcome, Status and ExecutionResult
 - [Quantum Information](../3_qis/0_overview.md): master the basics such as Statevector, DensityMatrix and Pauli
-- [Compilation](../4_compiler/0_overview.md): learn about the layout, routing and optimization of the compilation pipeline
+- [Compilation and optimization](../4_compiler/0_overview.md): learn about the layout, routing and optimization of the compilation pipeline

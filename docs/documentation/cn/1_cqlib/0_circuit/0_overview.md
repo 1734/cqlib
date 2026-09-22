@@ -1,6 +1,6 @@
 # 量子线路
 
-`cqlib.circuit` 是 Cqlib 中描述量子程序的基础模块。它负责表达量子比特、门操作、参数表达式、复合线路、非幺正指令、测量结果以及由经典表达式驱动的动态控制流。后续的 [IR 转换](../1_ir/0_overview.md)、[QIS 模拟](../3_qis/0_overview.md)、[编译优化](../4_compiler/0_overview.md)、[设备映射](../2_device/0_overview.md)和[可视化](../5_visualization/0_overview.md)模块，通常都以 `Circuit` 作为输入或中间表示。
+`cqlib.circuit` 是 Cqlib 中描述量子程序的基础模块。它负责表达量子比特、门操作、参数表达式、复合线路、非酉指令、测量结果以及由经典表达式驱动的动态控制流。后续的 [IR 转换](../1_ir/0_overview.md)、[QIS 模拟](../3_qis/0_overview.md)、[编译优化](../4_compiler/0_overview.md)、[设备映射](../2_device/0_overview.md)和[可视化](../5_visualization/0_overview.md)模块，通常都以 `Circuit` 作为输入或中间表示。
 
 ---
 
@@ -14,9 +14,9 @@
 | `Circuit` | 量子线路容器，保存量子比特、参数、经典值和操作序列 | `Circuit(...)` |
 | `StandardGate` | Cqlib 内置标准门集合，包括 Pauli、Clifford、旋转门、双比特门等 | `StandardGate.H`, `StandardGate.RX(theta)` |
 | `MCGate` | 多控制门，把一个标准门提升为带多个控制比特的门 | `MCGate(2, StandardGate.X())` |
-| `UnitaryGate` | 用户自定义幺正门，可通过数值矩阵、符号矩阵或不可变子线路定义 | `UnitaryGate("Oracle", 2)` |
+| `UnitaryGate` | 用户自定义酉门，可通过数值矩阵、符号矩阵或不可变子线路定义 | `UnitaryGate("Oracle", 2)` |
 | `CircuitGate` | 由子线路转换得到的复合门 | `sub.to_gate("Block")` |
-| `Directive` | 非幺正指令，如 barrier、measure、reset | `circuit.measure(0)` |
+| `Directive` | 非酉指令，如 barrier、measure、reset | `circuit.measure(0)` |
 | `Parameter` | 符号参数表达式 | `Parameter("theta")` |
 | `ClassicalType` / `ClassicalExpr` | 动态线路中的经典类型与经典表达式 | `ClassicalType.bit()`, `m.expr()` |
 | `ValueOperation` | 完整操作表示：指令 + 比特 + 参数 + 可选标签 | `circuit.operations[0]` |

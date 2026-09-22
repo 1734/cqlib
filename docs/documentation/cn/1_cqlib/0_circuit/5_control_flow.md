@@ -330,7 +330,7 @@ c.switch(ClassicalExpr.uint_literal(2, 1), build_switch)
 
 ---
 
-## 校验与作用域
+## 结构校验
 
 与普通线性线路相比，控制流结构对线路内部一致性的要求更高。因此，在构造包含控制流的线路后，建议调用 `validate()` 对线路进行结构校验。
 

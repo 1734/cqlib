@@ -91,7 +91,7 @@ state.apply_cx(0, 1)
 print(entropy.entanglement_entropy_pure(state, [0]))
 ```
 
-Bell 态任意一个单比特子系统都接近最大混合态，因此纠缠熵接近 `1` bit。对于乘积态，纠缠熵应接近 `0`。
+Bell 态任意一个单比特子系统的约化密度矩阵恰好是最大混合态 I/2，因此纠缠熵恰好为 `1` bit。对于乘积态，纠缠熵恰好为 `0`。
 
 ---
 

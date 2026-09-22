@@ -66,7 +66,7 @@ print(circuit.num_qubits)
 print(len(circuit.operations))
 ```
 
-The loaded object is a standard Cqlib `Circuit`, which can continue to be used for visualization, simulation, compilation or export again.
+The loaded object is a standard Cqlib `Circuit`, which can continue to be used for visualization, simulation, compilation and optimization or export again.
 
 ## 4. Loading from a QCIS file
 
@@ -203,7 +203,7 @@ compiled = circuit.decompose()
 text = qcis.dumps(compiled)
 ```
 
-If it still fails, the decomposed circuit still contains instructions that QCIS cannot express, and compilation or target gate set mapping is required first.
+If it still fails, the decomposed circuit still contains instructions that QCIS cannot express, and compilation and optimization or target gate set mapping is required first.
 
 ## 12. Troubleshooting common errors
 

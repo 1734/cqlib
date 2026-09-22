@@ -38,7 +38,7 @@ print("振幅阻尼有效:", amp.is_valid())        # True
 
 **注意**：
 - SingleQubitNoise 没有 .kind 属性。要区分噪声类型，需自行通过构造方法跟踪
-- pauli(px, py, pz) 要求 px + py + pz <= 1，否则 is_valid() 返回 False
+- pauli(px, py, pz) 要求 px + py + pz <= 1，否则构造时抛出 ValueError
 
 ---
 

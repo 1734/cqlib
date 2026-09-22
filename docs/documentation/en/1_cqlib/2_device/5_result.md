@@ -147,5 +147,5 @@ except ValueError as e:
 ## Next steps
 
 - [Quantum Information](../3_qis/0_overview.md): master the basics such as Statevector, DensityMatrix and Pauli
-- [Compilation](../4_compiler/0_overview.md): learn about the layout, routing and optimization of the compilation pipeline
+- [Compilation and optimization](../4_compiler/0_overview.md): learn about the layout, routing and optimization of the compilation pipeline
 - [Visualization](../5_visualization/0_overview.md): learn about circuit drawing and result visualization

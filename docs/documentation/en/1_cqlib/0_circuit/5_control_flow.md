@@ -330,7 +330,7 @@ c.switch(ClassicalExpr.uint_literal(2, 1), build_switch)
 
 ---
 
-## Validation and scope
+## Structure validation
 
 Compared with an ordinary linear circuit, a control flow structure has higher requirements on the internal consistency of the circuit. Therefore, after a circuit containing control flow is constructed, calling `validate()` to perform structural validation on the circuit is recommended.
 

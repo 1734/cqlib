@@ -52,7 +52,7 @@ vd = em.VirtualDistillation(circuit, copies=2)
 copy_swap = vd.build_copy_swap_circuit()
 ```
 
-- 输出线路宽度为 `copies`；
+- 输出线路宽度为 `copies` × 基础线路宽度；
 - 内部通过 pairwise `SWAP` 耦合各拷贝寄存器；
 - 原始 `circuit` 不会被修改。
 

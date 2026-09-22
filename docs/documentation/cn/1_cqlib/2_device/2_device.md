@@ -80,13 +80,13 @@ q0.frequency = 5.1        # 频率（GHz）
 q0.prob_meas0_prep1 = 0.02  # P(测到 0 | 制备为 1)
 q0.prob_meas1_prep0 = 0.01  # P(测到 1 | 制备为 0)
 
-# 添加本原单比特门（注意：native_instructions 是列表属性，通过 append 添加）
+# 添加本原单比特门（注意：必须用 add_native_instruction()，向 native_instructions 追加不会生效）
 x_prop = InstructionProp(
     Instruction.from_standard_gate(StandardGate.X),
     error_rate=0.001,
 )
 x_prop.length = 20.0  # 门时长（纳秒）
-q0.native_instructions.append(x_prop)
+q0.add_native_instruction(x_prop)
 
 device.add_qubit_properties(0, q0)
 
@@ -106,7 +106,7 @@ print("比特 0 局部属性已注入")
 
 **注意**：
 - InstructionProp 构造器的第一个参数必须是 Instruction 对象，使用 Instruction.from_standard_gate(StandardGate.X) 创建。不允许直接传入 StandardGate.X
-- QubitProp.native_instructions 是只读列表属性，不能直接赋值（q0.native_instructions = [...] 会抛出 AttributeError），应通过 .append() 添加元素
+- QubitProp.native_instructions 是只读属性，每次读取都返回新列表：既不能直接赋值（q0.native_instructions = [...] 会抛出 AttributeError），对它调用 .append() 也不会生效（改的是临时副本），必须用 add_native_instruction() 添加元素
 - EdgeProp.native_instructions 也是只读属性，需通过 add_native_instruction() 方法添加
 
 ---

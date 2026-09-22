@@ -52,7 +52,7 @@ vd = em.VirtualDistillation(circuit, copies=2)
 copy_swap = vd.build_copy_swap_circuit()
 ```
 
-- The output circuit width is `copies`;
+- The output circuit width is `copies` × the base circuit width;
 - The copy registers are coupled internally through pairwise `SWAP`;
 - The original `circuit` is not modified.
 

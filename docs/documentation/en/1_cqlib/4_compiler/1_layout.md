@@ -133,4 +133,4 @@ print("swaps:", routed.swap_count)
 ## Next steps
 
 - [SABRE routing mapping](2_sabre_mapping.md): pass the layout result to `route_sabre` or `route_with_layout` to complete physical routing.
-- [Compilation](0_overview.md): review the `compile()` workflow and how the compilation stages relate to each other.
+- [Compilation and optimization](0_overview.md): review the `compile()` workflow and how the compilation stages relate to each other.

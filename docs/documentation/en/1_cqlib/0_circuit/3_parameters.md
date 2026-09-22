@@ -278,7 +278,7 @@ Note in particular that `replace()` and `substitute()` perform symbolic expressi
 
 ## Equivalence checking
 
-In parameterized circuits, symbolic matrices and compilation, it is sometimes necessary to determine whether two `Parameter` expressions represent the same mathematical meaning. Here, Cqlib provides a fairly conservative equivalence checking interface. "Conservative" means that when the interface returns `True`, the two expressions can be regarded as provably equivalent under the current rules and tolerance; when the interface returns `False`, it does not necessarily mean that the two expressions are definitely not equivalent — it may also mean only that the current symbolic rules cannot prove them equal.
+In parameterized circuits, symbolic matrices and compilation and optimization, it is sometimes necessary to determine whether two `Parameter` expressions represent the same mathematical meaning. Here, Cqlib provides a fairly conservative equivalence checking interface. "Conservative" means that when the interface returns `True`, the two expressions can be regarded as provably equivalent under the current rules and tolerance; when the interface returns `False`, it does not necessarily mean that the two expressions are definitely not equivalent — it may also mean only that the current symbolic rules cannot prove them equal.
 
 ```python
 from cqlib import Parameter
@@ -302,9 +302,9 @@ Note that equivalence checking usually depends on expression simplification, alg
 
 ## State checking methods
 
-`Parameter` provides a set of state checking methods, used to determine whether an expression contains free symbols, whether it is a constant, whether it is equal to a particular value, or whether it can be treated as a single symbol. These methods are commonly used in scenarios such as parameter validation, compilation, circuit canonicalization, pre-binding checks and symbolic matrix handling.
+`Parameter` provides a set of state checking methods, used to determine whether an expression contains free symbols, whether it is a constant, whether it is equal to a particular value, or whether it can be treated as a single symbol. These methods are commonly used in scenarios such as parameter validation, compilation and optimization, circuit canonicalization, pre-binding checks and symbolic matrix handling.
 
-Through these interfaces, whether a parameter expression meets the requirements of the current flow can be confirmed in advance before matrix computation, circuit conversion or backend execution. For example, before numeric matrix computation it is usually necessary to confirm that no unbound symbol exists in the circuit; during compilation it may be necessary to identify whether the global phase is zero, or to determine whether a certain rotation angle can be eliminated.
+Through these interfaces, whether a parameter expression meets the requirements of the current flow can be confirmed in advance before matrix computation, circuit conversion or backend execution. For example, before numeric matrix computation it is usually necessary to confirm that no unbound symbol exists in the circuit; during compilation and optimization it may be necessary to identify whether the global phase is zero, or to determine whether a certain rotation angle can be eliminated.
 
 The commonly used state checking methods are as follows:
 

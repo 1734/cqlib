@@ -1,6 +1,6 @@
 # Quantum Circuit
 
-`cqlib.circuit` is the basic module for describing quantum programs in Cqlib. It is responsible for expressing qubits, gate operations, parameter expressions, composite circuits, non-unitary instructions, measurement results and dynamic control flow driven by classical expressions. The later [IR conversion](../1_ir/0_overview.md), [QIS simulation](../3_qis/0_overview.md), [compilation](../4_compiler/0_overview.md), [device mapping](../2_device/0_overview.md) and [visualization](../5_visualization/0_overview.md) modules usually take `Circuit` as input or as an intermediate representation.
+`cqlib.circuit` is the basic module for describing quantum programs in Cqlib. It is responsible for expressing qubits, gate operations, parameter expressions, composite circuits, non-unitary instructions, measurement results and dynamic control flow driven by classical expressions. The later [IR conversion](../1_ir/0_overview.md), [QIS simulation](../3_qis/0_overview.md), [compilation and optimization](../4_compiler/0_overview.md), [device mapping](../2_device/0_overview.md) and [visualization](../5_visualization/0_overview.md) modules usually take `Circuit` as input or as an intermediate representation.
 
 ---
 
@@ -40,7 +40,7 @@ c.barrier([0, 1, 2])
 c.reset(2)
 ```
 
-Static circuits apply to scenarios such as algorithm prototype validation, compilation, QIS simulation and IR export. For a purely unitary circuit that contains no measurement, reset or control flow, the circuit can be further converted into a matrix representation for small-scale circuit validation.
+Static circuits apply to scenarios such as algorithm prototype validation, compilation and optimization, QIS simulation and IR export. For a purely unitary circuit that contains no measurement, reset or control flow, the circuit can be further converted into a matrix representation for small-scale circuit validation.
 
 ### 2. Parameterized circuits
 
@@ -85,7 +85,7 @@ main.append_circuit_gate(bell_gate, [2, 3])
 flat = main.decompose()
 ```
 
-`CircuitGate` is suitable for expressing reusable modules in an algorithm, such as entanglement blocks, feature-mapping blocks and oracle subroutines. In addition, `decompose()` can expand a composite gate into basic operations, which facilitates later matrix validation, compilation or IR export.
+`CircuitGate` is suitable for expressing reusable modules in an algorithm, such as entanglement blocks, feature-mapping blocks and oracle subroutines. In addition, `decompose()` can expand a composite gate into basic operations, which facilitates later matrix validation, compilation and optimization or IR export.
 
 ### 4. Custom gates and multi-controlled gates
 
