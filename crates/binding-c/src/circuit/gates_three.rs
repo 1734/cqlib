@@ -10,17 +10,17 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! C binding for Cqlib quantum computing library.
+use crate::circuit::{CCircuit, apply_three};
+use cqlib_core::circuit::Circuit;
 
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+// =====  Section 2.1.5: Three-qubit gate  =====
 
-pub mod circuit;
-pub mod compile;
-pub mod device;
-pub mod error;
-pub mod error_mitigation;
-pub mod ir;
-pub mod qis;
-pub mod visualization;
-
-pub use error::cqlib_string_free;
+#[unsafe(no_mangle)]
+pub extern "C" fn circuit_ccx(
+    ptr: *mut CCircuit,
+    control1: u32,
+    control2: u32,
+    target: u32,
+) -> i32 {
+    apply_three(ptr, control1, control2, target, Circuit::ccx)
+}

@@ -10,17 +10,12 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! C binding for Cqlib quantum computing library.
+//! C ABI for IR module (QASM2/QASM3/QCIS load and dump).
 
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+pub mod qasm2;
+pub mod qasm3;
+pub mod qcis;
 
-pub mod circuit;
-pub mod compile;
-pub mod device;
-pub mod error;
-pub mod error_mitigation;
-pub mod ir;
-pub mod qis;
-pub mod visualization;
-
-pub use error::cqlib_string_free;
+pub use qasm2::{qasm2_dump, qasm2_dumps, qasm2_load, qasm2_loads};
+pub use qasm3::{qasm3_dump, qasm3_dumps, qasm3_load, qasm3_loads};
+pub use qcis::{qcis_dump, qcis_dumps, qcis_load, qcis_loads};

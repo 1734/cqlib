@@ -10,17 +10,10 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! C binding for Cqlib quantum computing library.
+//! C ABI for circuit visualization (text drawing, SVG figure, matrix export).
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-pub mod circuit;
-pub mod compile;
-pub mod device;
-pub mod error;
-pub mod error_mitigation;
-pub mod ir;
-pub mod qis;
-pub mod visualization;
+pub mod circuit_render;
 
-pub use error::cqlib_string_free;
+pub use circuit_render::*;
