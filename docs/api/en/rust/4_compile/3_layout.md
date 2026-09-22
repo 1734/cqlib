@@ -26,7 +26,7 @@ Precomputed entry points:
 
 - `analyze_circuit_for_layout(circuit: &Circuit) -> CircuitLayoutAnalysis`
 - `prepare_sabre_circuit(circuit: &Circuit) -> PreparedSabreCircuit`
-- `prepare_sabre_device_target(device: &Device) -> Result<PreparedSabreDeviceTarget, CompilerError>`
+- `prepare_sabre_device_target(device: &Device) -> Result<PreparedSabreTarget, CompilerError>`
 - `trivial_layout_prepared(analysis: &CircuitLayoutAnalysis, physical: &PhysicalLayoutGraph, objective: &LayoutObjective) -> Result<LayoutResult, CompilerError>`
 - `greedy_layout_prepared(...)`: the same as above.
 - `vf2_perfect_layout_prepared(analysis, physical, objective, config) -> Result<LayoutResult, CompilerError>`
@@ -184,10 +184,10 @@ The device physical layout graph:
 - `supports_directed_coupling(&self, a, b) -> bool`
 - `has_fidelity_data(&self) -> bool`, `has_readout_error_data(&self) -> bool`, `has_two_qubit_error_data(&self) -> bool`
 
-### PreparedSabreCircuit / PreparedSabreDeviceTarget
+### PreparedSabreCircuit / PreparedSabreTarget
 
 - `PreparedSabreCircuit`: returned by `prepare_sabre_circuit()`, carrying the circuit analysis (`analysis()`, `logical_qubits()`).
-- `PreparedSabreDeviceTarget`: returned by `prepare_sabre_device_target()`, carrying the physical graph through `physical()`.
+- `PreparedSabreTarget`: returned by `prepare_sabre_device_target()`, carrying the physical graph through `physical()`.
 
 ---
 

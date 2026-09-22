@@ -79,6 +79,7 @@ The current export focuses on the core gate set, and the export fidelity of comp
 ```c
 const char *src =
     "OPENQASM 3.0;\n"
+    "include \"stdgates.inc\";\n"
     "qubit[2] q;\n"
     "h q[0];\n"
     "cx q[0], q[1];\n";

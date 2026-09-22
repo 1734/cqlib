@@ -95,6 +95,8 @@ The `gate_set` of `fold_circuits()` determines the folding scope:
 
 The instruction name is taken from the `Instruction` passed in, so it can first be constructed by standard gate name:
 
+The `zne` in the examples below is a `ZNEMitigation` instance.
+
 ```python
 from cqlib.circuit import Instruction, StandardGate
 

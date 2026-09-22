@@ -2,6 +2,8 @@
 
 Measurements on real quantum devices have readout errors. When obtaining results, `cqlib-tianyan` can use device calibration data to correct measurement counts for readout error. This capability is controlled by `CalibrationMode`.
 
+The `backend` in the examples below is a `TianyanBackend` instance; see [Backend and device configuration](2_backend_device.md) for how to obtain one.
+
 Corresponding import:
 
 ```python

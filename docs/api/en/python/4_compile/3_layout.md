@@ -29,7 +29,7 @@ from cqlib.compile.transform.layout import (
     DistanceTable,
     PhysicalLayoutGraph,
     PreparedSabreCircuit,
-    PreparedSabreDeviceTarget,
+    PreparedSabreTarget,
 )
 ```
 
@@ -77,13 +77,13 @@ For scenarios that lay out repeatedly, the circuit analysis or device preparatio
 
 - `analyze_circuit_for_layout(circuit) -> CircuitLayoutAnalysis`: circuit interaction graph analysis.
 - `prepare_sabre_circuit(circuit) -> PreparedSabreCircuit`: SABRE circuit preprocessing.
-- `prepare_sabre_device_target(device) -> PreparedSabreDeviceTarget`: device physical graph preprocessing.
+- `prepare_sabre_device_target(device) -> PreparedSabreTarget`: device physical graph preprocessing.
 - `trivial_layout_prepared(analysis, physical, objective=None) -> LayoutResult`
 - `greedy_layout_prepared(analysis, physical, objective=None) -> LayoutResult`
 - `vf2_perfect_layout_prepared(analysis, physical, objective=None, config=None) -> LayoutResult`
 - `sabre_layout_prepared(prepared, prepared_target, objective=None, config=None) -> LayoutResult`
 
-Here `analysis` is a `CircuitLayoutAnalysis`, `physical` is a `PhysicalLayoutGraph`, `prepared` is a `PreparedSabreCircuit`, and `prepared_target` is a `PreparedSabreDeviceTarget`.
+Here `analysis` is a `CircuitLayoutAnalysis`, `physical` is a `PhysicalLayoutGraph`, `prepared` is a `PreparedSabreCircuit`, and `prepared_target` is a `PreparedSabreTarget`.
 
 Example:
 
@@ -277,7 +277,7 @@ Attributes:
 - `analysis -> CircuitLayoutAnalysis`
 - `logical_qubits -> list[Qubit]`
 
-### PreparedSabreDeviceTarget
+### PreparedSabreTarget
 
 Device physical graph preprocessing result, returned by `prepare_sabre_device_target()`.
 

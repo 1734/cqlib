@@ -29,7 +29,7 @@ from cqlib.compile.transform.layout import (
     DistanceTable,
     PhysicalLayoutGraph,
     PreparedSabreCircuit,
-    PreparedSabreDeviceTarget,
+    PreparedSabreTarget,
 )
 ```
 
@@ -77,13 +77,13 @@ SABRE 布局：使用 SABRE 启发式细化候选布局。
 
 - `analyze_circuit_for_layout(circuit) -> CircuitLayoutAnalysis`：线路交互图分析。
 - `prepare_sabre_circuit(circuit) -> PreparedSabreCircuit`：SABRE 线路预处理。
-- `prepare_sabre_device_target(device) -> PreparedSabreDeviceTarget`：设备物理图预处理。
+- `prepare_sabre_device_target(device) -> PreparedSabreTarget`：设备物理图预处理。
 - `trivial_layout_prepared(analysis, physical, objective=None) -> LayoutResult`
 - `greedy_layout_prepared(analysis, physical, objective=None) -> LayoutResult`
 - `vf2_perfect_layout_prepared(analysis, physical, objective=None, config=None) -> LayoutResult`
 - `sabre_layout_prepared(prepared, prepared_target, objective=None, config=None) -> LayoutResult`
 
-其中 `analysis` 为 `CircuitLayoutAnalysis`，`physical` 为 `PhysicalLayoutGraph`，`prepared` 为 `PreparedSabreCircuit`，`prepared_target` 为 `PreparedSabreDeviceTarget`。
+其中 `analysis` 为 `CircuitLayoutAnalysis`，`physical` 为 `PhysicalLayoutGraph`，`prepared` 为 `PreparedSabreCircuit`，`prepared_target` 为 `PreparedSabreTarget`。
 
 示例：
 
@@ -277,7 +277,7 @@ SABRE 线路预处理结果，由 `prepare_sabre_circuit()` 返回。
 - `analysis -> CircuitLayoutAnalysis`
 - `logical_qubits -> list[Qubit]`
 
-### PreparedSabreDeviceTarget
+### PreparedSabreTarget
 
 设备物理图预处理结果，由 `prepare_sabre_device_target()` 返回。
 

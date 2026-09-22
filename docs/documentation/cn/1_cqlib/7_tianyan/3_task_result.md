@@ -6,6 +6,8 @@
 
 Python 绑定中的任务提交接口接收 QCIS 字符串列表：
 
+下文示例中的 `backend` 为 `TianyanBackend` 实例，获取方式见 [后端与设备配置](2_backend_device.md)。
+
 ```python
 qcis = "H Q1\nM Q1"
 task = backend.run([qcis], shots=1000)

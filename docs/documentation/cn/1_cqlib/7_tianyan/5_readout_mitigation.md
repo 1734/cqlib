@@ -2,6 +2,8 @@
 
 真实量子设备的测量存在读取误差。`cqlib-tianyan` 在获取结果时可以利用设备校准数据对测量计数做读取误差矫正。该能力由 `CalibrationMode` 控制。
 
+下文示例中的 `backend` 为 `TianyanBackend` 实例，获取方式见 [后端与设备配置](2_backend_device.md)。
+
 对应导入：
 
 ```python

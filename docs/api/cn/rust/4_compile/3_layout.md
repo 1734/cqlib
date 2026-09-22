@@ -26,7 +26,7 @@ use cqlib_core::compile::transform::layout::{
 
 - `analyze_circuit_for_layout(circuit: &Circuit) -> CircuitLayoutAnalysis`
 - `prepare_sabre_circuit(circuit: &Circuit) -> PreparedSabreCircuit`
-- `prepare_sabre_device_target(device: &Device) -> Result<PreparedSabreDeviceTarget, CompilerError>`
+- `prepare_sabre_device_target(device: &Device) -> Result<PreparedSabreTarget, CompilerError>`
 - `trivial_layout_prepared(analysis: &CircuitLayoutAnalysis, physical: &PhysicalLayoutGraph, objective: &LayoutObjective) -> Result<LayoutResult, CompilerError>`
 - `greedy_layout_prepared(...)`：同上。
 - `vf2_perfect_layout_prepared(analysis, physical, objective, config) -> Result<LayoutResult, CompilerError>`
@@ -184,10 +184,10 @@ pub struct CircuitLayoutAnalysis {
 - `supports_directed_coupling(&self, a, b) -> bool`
 - `has_fidelity_data(&self) -> bool`、`has_readout_error_data(&self) -> bool`、`has_two_qubit_error_data(&self) -> bool`
 
-### PreparedSabreCircuit / PreparedSabreDeviceTarget
+### PreparedSabreCircuit / PreparedSabreTarget
 
 - `PreparedSabreCircuit`：由 `prepare_sabre_circuit()` 返回，携带线路分析（`analysis()`、`logical_qubits()`）。
-- `PreparedSabreDeviceTarget`：由 `prepare_sabre_device_target()` 返回，携带 `physical()` 物理图。
+- `PreparedSabreTarget`：由 `prepare_sabre_device_target()` 返回，携带 `physical()` 物理图。
 
 ---
 

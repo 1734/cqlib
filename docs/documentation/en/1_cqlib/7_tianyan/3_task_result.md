@@ -6,6 +6,8 @@ The basic unit of circuit execution on the Tianyan platform is the task. In `cql
 
 The task submission interface in the Python bindings accepts a list of QCIS strings:
 
+The `backend` in the examples below is a `TianyanBackend` instance; see [Backend and device configuration](2_backend_device.md) for how to obtain one.
+
 ```python
 qcis = "H Q1\nM Q1"
 task = backend.run([qcis], shots=1000)

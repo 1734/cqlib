@@ -43,7 +43,7 @@ pip install cqlib
 
 After installation completes, verify it as follows:
 
-```python
+```bash
 python -m pip show cqlib
 ```
 If the version information is printed correctly, the installation succeeded.

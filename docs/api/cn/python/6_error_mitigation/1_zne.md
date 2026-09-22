@@ -95,6 +95,8 @@ from cqlib.error_mitigation.zne import (
 
 指令名取自传入的 `Instruction`，因此可先按标准门名构造：
 
+下文示例中的 `zne` 为 `ZNEMitigation` 实例。
+
 ```python
 from cqlib.circuit import Instruction, StandardGate
 
