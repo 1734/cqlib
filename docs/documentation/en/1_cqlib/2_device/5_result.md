@@ -11,19 +11,19 @@ Outcome uses little-endian bit order: the rightmost character of the string corr
 ```python
 from cqlib.device import Outcome
 
-# 从比特字符串创建（小端序：最右 = Qubit 0）
+# create from a bit string (little-endian: rightmost = Qubit 0)
 o = Outcome("101")
-print("比特 0 是否为 1:", o.is_one(0))   # True
-print("比特 1 是否为 1:", o.is_one(1))   # False
-print("完整比特串 (3):", o.to_bitstring(3))  # "101"
+print("is bit 0 one:", o.is_one(0))   # True
+print("is bit 1 one:", o.is_one(1))   # False
+print("full bitstring (3):", o.to_bitstring(3))  # "101"
 
-# 从比特字符串构造（与直接构造等价）
+# construct from a bit string (equivalent to direct construction)
 o2 = Outcome.from_bitstring("101")
 print("o == o2:", o == o2)  # True
 
-# 从索引列表构造（指定哪些位置的比特为 1）
+# construct from an index list (specifying which bit positions are 1)
 o3 = Outcome.from_indices(width=3, indices=[0, 2])
-print("索引构造:", o3.to_bitstring(3))  # "101"
+print("constructed from indices:", o3.to_bitstring(3))  # "101"
 ```
 
 **Notes**:
@@ -54,10 +54,10 @@ c = Status.completed()
 f = Status.failed("backend down", 500)
 x = Status.cancelled()
 
-print("queued:", q.kind, "终态?", q.is_terminal())
-print("completed:", c.kind, "成功?", c.is_success())
+print("queued:", q.kind, "terminal?", q.is_terminal())
+print("completed:", c.kind, "success?", c.is_success())
 print("failed:", f.kind, f.error_msg, f.error_code)
-print("cancelled:", x.kind, "终态?", x.is_terminal())
+print("cancelled:", x.kind, "terminal?", x.is_terminal())
 ```
 
 **Notes**:
@@ -74,21 +74,21 @@ print("cancelled:", x.kind, "终态?", x.is_terminal())
 from cqlib.device import ExecutionResult
 
 result = ExecutionResult("q-task-001", [0, 1], 1000, 2, "Tianyan-176-2")
-print("创建时状态:", result.status.kind)  # queued
+print("status on creation:", result.status.kind)  # queued
 
-# 标记为运行中
+# mark as running
 result.start()
-print("启动后状态:", result.status.kind)  # running
+print("status after start:", result.status.kind)  # running
 
-# 完成并填入测量计数
+# finish and fill in the measurement counts
 result.finish({"00": 600, "11": 400})
-result.calc_probabilities()  # 计算概率分布
+result.calc_probabilities()  # compute the probability distribution
 
-print("任务 ID:", result.task_id)
-print("测量次数:", result.shots)
-print("计数结果:", result.counts)
-print("概率分布:", result.probabilities)
-print("后端名称:", result.backend)
+print("task ID:", result.task_id)
+print("shots:", result.shots)
+print("counts:", result.counts)
+print("probabilities:", result.probabilities)
+print("backend:", result.backend)
 ```
 
 ### Constructing directly from counts
@@ -104,8 +104,8 @@ result = ExecutionResult.from_counts(
     counts={"00": 512, "11": 512},
     backend="simulator",
 )
-print("状态:", result.status.kind)        # completed（已自动完成）
-print("概率分布:", result.probabilities)  # {"00": 0.5, "11": 0.5}
+print("status:", result.status.kind)        # completed (finished automatically)
+print("probabilities:", result.probabilities)  # {"00": 0.5, "11": 0.5}
 ```
 
 ---
@@ -115,17 +115,17 @@ print("概率分布:", result.probabilities)  # {"00": 0.5, "11": 0.5}
 ```python
 from cqlib.device import ExecutionResult
 
-# 失败场景
+# failure scenario
 f = ExecutionResult("task-fail", [0], 10, 1, None)
 f.fail("timeout", 408)
-print("失败状态:", f.status.kind)              # failed
-print("错误消息:", f.status.error_msg)          # timeout
-print("错误码:", f.status.error_code)           # 408
+print("failed status:", f.status.kind)              # failed
+print("error message:", f.status.error_msg)          # timeout
+print("error code:", f.status.error_code)           # 408
 
-# 取消场景
+# cancellation scenario
 c = ExecutionResult("task-cancel", [0], 10, 1, None)
 c.cancel()
-print("取消状态:", c.status.kind)               # cancelled
+print("cancelled status:", c.status.kind)               # cancelled
 ```
 
 ---
@@ -137,9 +137,9 @@ from cqlib.device import ExecutionResult
 
 r = ExecutionResult("bad", [0], 10, 1, None)
 try:
-    r.finish({"2": 1})  # "2" 不是有效的二进制字符串
+    r.finish({"2": 1})  # "2" is not a valid binary string
 except ValueError as e:
-    print("无效计数:", e)
+    print("invalid counts:", e)
 ```
 
 ---

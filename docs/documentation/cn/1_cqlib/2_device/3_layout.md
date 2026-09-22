@@ -52,10 +52,10 @@ print("物理比特列表:", layout.physical_qubits)
 print("空闲物理比特:", layout.vacant_physical_qubits)
 
 # 正向查询：逻辑 → 物理
-print("逻辑 0 映射到物理:", layout.get_physical(0))   # Qubit(11)
+print("逻辑 0 映射到物理:", layout.get_physical(0))   # P11
 
 # 反向查询：物理 → 逻辑
-print("物理 11 映射到逻辑:", layout.get_logical(11))  # Qubit(0)
+print("物理 11 映射到逻辑:", layout.get_logical(11))  # L0
 
 # 查询物理比特是否空闲
 print("物理 10 是否空闲:", layout.is_physical_vacant(10))  # False（被逻辑 1 占用）
@@ -88,14 +88,14 @@ print("绑定后空闲:", layout.num_vacant_physical)  # 10
 
 # unbind：解绑逻辑比特，释放物理比特
 released = layout.unbind(0)
-print("解绑后释放:", released)                    # Qubit(11)
+print("解绑后释放:", released)                    # P11
 print("解绑后空闲:", layout.num_vacant_physical)  # 11
 
 # swap_physical：交换两个物理比特上承载的逻辑比特（核心路由操作）
 layout3 = Layout.from_pairs([(0, 11), (1, 12)], physical_count=13)
 layout3.swap_physical(11, 12)
-print("SWAP 后物理 11→逻辑:", layout3.get_logical(11))  # Qubit(1)
-print("SWAP 后物理 12→逻辑:", layout3.get_logical(12))  # Qubit(0)
+print("SWAP 后物理 11→逻辑:", layout3.get_logical(11))  # L1
+print("SWAP 后物理 12→逻辑:", layout3.get_logical(12))  # L0
 ```
 
 **边界条件**：

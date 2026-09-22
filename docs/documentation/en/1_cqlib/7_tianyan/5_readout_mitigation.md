@@ -15,8 +15,8 @@ from cqlib_tianyan import CalibrationMode
 Ideally, if a qubit is truly in `|0>`, the measurement result should always be `0`; if it is truly in `|1>`, the measurement result should always be `1`. But hardware readout has errors:
 
 ```text
-真实 0 -> 可能读成 1
-真实 1 -> 可能读成 0
+true 0 -> may be read as 1
+true 1 -> may be read as 0
 ```
 
 Platform calibration data usually gives the readout fidelity of each qubit:
@@ -87,13 +87,13 @@ raw_results = task.wait_raw(timeout_secs=120.0)
 ## 5. Specifying the correction mode explicitly
 
 ```python
-# 自动矫正
+# automatic correction
 task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="auto")
 
-# 强制矫正
+# forced correction
 task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="enabled")
 
-# 禁用矫正
+# no correction
 task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="disabled")
 ```
 
@@ -138,8 +138,8 @@ task = backend.run([qcis], shots=1000)
 calibrated = task.wait(timeout_secs=120.0)
 raw = task.wait_raw(timeout_secs=120.0)
 
-print("矫正后:", calibrated[0].counts, calibrated[0].probabilities)
-print("原始值:", raw[0].counts, raw[0].probabilities)
+print("corrected:", calibrated[0].counts, calibrated[0].probabilities)
+print("raw:", raw[0].counts, raw[0].probabilities)
 ```
 
 Note: the corrected counts are still returned in `ExecutionResult`, in the `counts` field, and `probabilities` are the probabilities normalized from counts.

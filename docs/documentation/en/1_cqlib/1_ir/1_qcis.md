@@ -73,7 +73,7 @@ The loaded object is a standard Cqlib `Circuit`, which can continue to be used f
 ```python
 from cqlib.ir import qcis
 
-# 先把上文的 QCIS 文本写成待读取的文件
+# first write the QCIS text above to a file to be read
 qcis.dump(qcis.loads(qcis_code), "input.qcis")
 
 circuit = qcis.load("input.qcis")

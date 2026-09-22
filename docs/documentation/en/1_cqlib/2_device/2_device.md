@@ -31,8 +31,8 @@ device.default_readout_error = 0.05
 device.default_single_qubit_error = 0.001
 device.default_two_qubit_error = 0.01
 
-print("设备名:", device.name)
-print("寄存器比特数:", len(device.qubits))
+print("device name:", device.name)
+print("register qubit count:", len(device.qubits))
 ```
 
 **Note**: global defaults are used only for subsequent fallback queries. If no local value is set for a qubit, calling get_t1(q) returns default_t1.
@@ -44,19 +44,19 @@ Device provides factory methods for quickly constructing common topology structu
 ```python
 from cqlib.device import Device
 
-d1 = Device.line("line_dev", num_qubits=5)                    # 单向线型
-d2 = Device.bidirectional_line("bi_line", num_qubits=5)      # 双向线型
-d3 = Device.ring("ring_dev", num_qubits=4)                    # 双向环形
-d4 = Device.star("star_dev", num_qubits=5, center=0)         # 双向星形
-d5 = Device.grid("grid_dev", rows=3, cols=4)                  # 双向网格（行主序）
-d6 = Device.from_edges("custom", num_qubits=4, edges=[(0, 1), (1, 2)])  # 自定义有向边
+d1 = Device.line("line_dev", num_qubits=5)                    # unidirectional line
+d2 = Device.bidirectional_line("bi_line", num_qubits=5)      # bidirectional line
+d3 = Device.ring("ring_dev", num_qubits=4)                    # bidirectional ring
+d4 = Device.star("star_dev", num_qubits=5, center=0)         # bidirectional star
+d5 = Device.grid("grid_dev", rows=3, cols=4)                  # bidirectional grid (row-major order)
+d6 = Device.from_edges("custom", num_qubits=4, edges=[(0, 1), (1, 2)])  # custom directed edges
 
-print("线型:", d1.num_usable_qubits)
-print("双向线型:", d2.num_usable_qubits)
-print("环形:", d3.num_usable_qubits)
-print("星形:", d4.num_usable_qubits)
-print("网格:", d5.num_usable_qubits)
-print("自定义:", d6.num_usable_qubits)
+print("line:", d1.num_usable_qubits)
+print("bidirectional line:", d2.num_usable_qubits)
+print("ring:", d3.num_usable_qubits)
+print("star:", d4.num_usable_qubits)
+print("grid:", d5.num_usable_qubits)
+print("custom:", d6.num_usable_qubits)
 ```
 
 ---
@@ -70,27 +70,27 @@ from cqlib.device import Device, EdgeProp, InstructionProp, QubitProp, Topology
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
 device = Device("dev", [0, 1, 2], topo)
 
-# ---- 单比特标定 ----
+# ---- single-qubit calibration ----
 q0 = QubitProp(readout_error=0.02)
-q0.t1 = 80.0              # T1 弛豫时间（微秒）
-q0.t2 = 70.0              # T2 退相干时间（微秒）
-q0.frequency = 5.1        # 频率（GHz）
+q0.t1 = 80.0              # T1 relaxation time (microseconds)
+q0.t2 = 70.0              # T2 decoherence time (microseconds)
+q0.frequency = 5.1        # frequency (GHz)
 
-# 设置测量判别误差
-q0.prob_meas0_prep1 = 0.02  # P(测到 0 | 制备为 1)
-q0.prob_meas1_prep0 = 0.01  # P(测到 1 | 制备为 0)
+# set the measurement discrimination error
+q0.prob_meas0_prep1 = 0.02  # P(measure 0 | prepare 1)
+q0.prob_meas1_prep0 = 0.01  # P(measure 1 | prepare 0)
 
 # Add a native single-qubit gate (note: use add_native_instruction(); appending to native_instructions has no effect)
 x_prop = InstructionProp(
     Instruction.from_standard_gate(StandardGate.X),
     error_rate=0.001,
 )
-x_prop.length = 20.0  # 门时长（纳秒）
+x_prop.length = 20.0  # gate duration (nanoseconds)
 q0.add_native_instruction(x_prop)
 
 device.add_qubit_properties(0, q0)
 
-# ---- 耦合边标定 ----
+# ---- coupling edge calibration ----
 cx_prop = InstructionProp(
     Instruction.from_standard_gate(StandardGate.CX),
     error_rate=0.015,
@@ -101,7 +101,7 @@ edge = EdgeProp()
 edge.add_native_instruction(cx_prop)
 device.add_edge_properties(0, 1, edge)
 
-print("比特 0 局部属性已注入")
+print("local properties of qubit 0 injected")
 ```
 
 **Note**:
@@ -122,22 +122,22 @@ device = Device("dev", [0, 1, 2], topo)
 device.default_t1 = 50.0
 device.default_single_qubit_error = 0.001
 
-# 未设置局部值时回退至默认
-print("比特 1 的 T1（回退默认）:", device.get_t1(1))
+# falls back to the default when no local value is set
+print("T1 of qubit 1 (default fallback):", device.get_t1(1))
 
-# 为比特 0 设置局部标定后，局部值优先
+# after setting local calibration for qubit 0, the local value takes priority
 q0_prop = QubitProp(readout_error=0.02)
 q0_prop.t1 = 80.0
 device.add_qubit_properties(0, q0_prop)
-print("比特 0 的 T1（局部值）:", device.get_t1(0))
+print("T1 of qubit 0 (local value):", device.get_t1(0))
 
-# 查询单比特门误差率（注意：第三个参数需传入 Instruction 对象）
+# query the single-qubit gate error rate (note: the third parameter must be an Instruction object)
 x_inst = Instruction.from_standard_gate(StandardGate.X)
-print("比特 0 的 X 门误差（回退默认）:", device.single_qubit_error(0, x_inst))
+print("X gate error of qubit 0 (default fallback):", device.single_qubit_error(0, x_inst))
 
-# 查询读出误差（全局默认）
+# query the readout error (global default)
 device.default_readout_error = 0.05
-print("比特 0 的读出误差（回退默认）:", device.get_readout_error(0))
+print("readout error of qubit 0 (default fallback):", device.get_readout_error(0))
 ```
 
 **Fallback chain**:
@@ -156,12 +156,12 @@ from cqlib.device import Device, Topology
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
 device = Device("dev", [0, 1, 2], topo)
 
-# 标记比特 2 为无效（离线/故障）
-device.invalid_qubits = [2]   # 注意：使用列表，不是集合
+# mark qubit 2 as invalid (offline/faulty)
+device.invalid_qubits = [2]   # note: use a list, not a set
 
-print("可用比特数:", device.num_usable_qubits)  # 2
-print("可用比特列表:", device.usable_qubits)     # [Qubit(0), Qubit(1)]
-print("比特 2 是否可用:", device.is_usable_qubit(2))  # False
+print("number of usable qubits:", device.num_usable_qubits)  # 2
+print("usable qubit list:", device.usable_qubits)     # [PhysicalQubit(0), PhysicalQubit(1)]
+print("is qubit 2 usable:", device.is_usable_qubit(2))  # False
 ```
 
 ---
@@ -177,12 +177,12 @@ device = Device("dev", [0, 1, 2], topo)
 try:
     device.add_qubit_properties(99, QubitProp(0.01))
 except ValueError as e:
-    print("添加不存在的比特属性:", e)
+    print("adding properties for a nonexistent qubit:", e)
 
 try:
     device.add_edge_properties(0, 9, EdgeProp())
 except ValueError as e:
-    print("添加不存在的边属性:", e)
+    print("adding properties for a nonexistent edge:", e)
 ```
 
 ---

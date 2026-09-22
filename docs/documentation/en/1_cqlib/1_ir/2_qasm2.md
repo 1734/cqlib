@@ -93,7 +93,7 @@ The output is normalized, and the spaces, comments, register names or layout of 
 ```python
 from cqlib.ir import qasm2
 
-# 先把上文的 QASM 文本写成待读取的文件
+# first write the QASM text above to a file to be read
 qasm2.dump(qasm2.loads(qasm_code), "input.qasm")
 
 circuit = qasm2.load("input.qasm")

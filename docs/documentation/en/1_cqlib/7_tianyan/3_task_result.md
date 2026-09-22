@@ -79,7 +79,7 @@ print(task.submitted_at)
 ```python
 partial_results = task.status()
 
-print(f"已完成 {len(partial_results)} / {len(task.task_ids)}")
+print(f"completed {len(partial_results)} / {len(task.task_ids)}")
 for result in partial_results:
     print(result.task_id, result.counts)
 ```

@@ -160,7 +160,7 @@ device = Device("dev", [0, 1, 2], topo)
 device.invalid_qubits = [2]   # 注意：使用列表，不是集合
 
 print("可用比特数:", device.num_usable_qubits)  # 2
-print("可用比特列表:", device.usable_qubits)     # [Qubit(0), Qubit(1)]
+print("可用比特列表:", device.usable_qubits)     # [PhysicalQubit(0), PhysicalQubit(1)]
 print("比特 2 是否可用:", device.is_usable_qubit(2))  # False
 ```
 

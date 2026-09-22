@@ -150,9 +150,9 @@ Note: the conversion succeeds only when the gates and semantics in the OpenQASM 
 
 ```mermaid
 flowchart TD
-    A["构建 Circuit 或准备已有 QCIS 程序"] --> B["qcis.loads / qcis.dumps 验证"]
-    B --> C["可视化检查"]
-    C --> D["选择 TianyanBackend"]
+    A["Build a Circuit or prepare an existing QCIS program"] --> B["validate with qcis.loads / qcis.dumps"]
+    B --> C["Visualization check"]
+    C --> D["Select a TianyanBackend"]
     D --> E["backend.run"]
     E --> F["TaskHandle.wait"]
     F --> G["ExecutionResult counts/probabilities"]

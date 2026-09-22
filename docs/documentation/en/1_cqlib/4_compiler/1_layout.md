@@ -32,8 +32,8 @@ device = Device.line("line-5", 5)
 objective = LayoutObjective.topology_only()
 
 result = vf2_perfect_layout(circuit, device, objective)
-print(result.layout)                    # 逻辑 → 物理映射
-print(result.diagnostics.is_perfect)    # 是否所有交互都邻接
+print(result.layout)                    # logical -> physical mapping
+print(result.diagnostics.is_perfect)    # whether all interactions are adjacent
 ```
 
 If there is no perfect embedding, `vf2_perfect_layout` raises a `ValueError`; in that case switch to `greedy_layout` or `sabre_layout`, and then hand over to `route_sabre` or `route_with_layout`.

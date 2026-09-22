@@ -27,9 +27,9 @@ Working in an isolated environment is recommended to avoid dependency conflicts:
 ```bash
 python -m venv cqlib-env
 
-# 激活环境 (Windows)
+# activate the environment (Windows)
 cqlib-env\Scripts\activate
-# 激活环境 (Linux/macOS)
+# activate the environment (Linux/macOS)
 source cqlib-env/bin/activate
 ```
 
@@ -92,11 +92,11 @@ cd cqlib
 Use the `maturin` cross-language tool to compile the Rust core into a Python module:
 
 ```bash
-# 1. 安装构建工具
+# 1. install the build tools
 pip install -U maturin
 
-# 2. 编译并安装到当前环境
-# --release 参数可确保获得最佳运行性能
+# 2. compile and install into the current environment
+# the --release flag ensures the best runtime performance
 maturin develop --release -m crates/binding-python/Cargo.toml
 ```
 This command installs the locally built version into the current virtual environment.
@@ -104,10 +104,10 @@ This command installs the locally built version into the current virtual environ
 ### Step 4: build the Rust core and the C interface (optional)
 
 ```bash
-# 构建核心库
+# build the core library
 cargo build --release
 
-# 构建 C 接口 ABI（可选）
+# build the C interface ABI (optional)
 cargo build -p binding-c --release
 ```
 

@@ -36,7 +36,7 @@ for backend in platform.list_backends():
     print(f"status={backend.status}")
     print(f"toll={backend.toll}")
 
-# 选定后端后，再查询其设备配置中的物理比特总数
+# after the backend is selected, query the total physical qubit count in its device configuration
 backend = platform.get_backend("tianyan-287")
 print(f"qubits={backend.num_qubits()}")
 ```
@@ -61,14 +61,14 @@ It is recommended to check before submission:
 backend = platform.get_backend("tianyan-287")
 
 if not backend.is_available():
-    raise RuntimeError(f"后端不可用: {backend.status}")
+    raise RuntimeError(f"backend unavailable: {backend.status}")
 ```
 
 A direct comparison is also possible:
 
 ```python
 if backend.status == "running":
-    print("后端可提交")
+    print("backend can accept submissions")
 ```
 
 ## 4. Billing type
@@ -83,7 +83,7 @@ if backend.status == "running":
 
 ```python
 if backend.toll == "paid":
-    print("该后端可能消耗额度，请确认后再提交")
+    print("this backend may consume quota, confirm before submitting")
 ```
 
 ## 5. Getting a specific backend
@@ -124,7 +124,7 @@ Typical flow:
 backend = platform.get_backend("tianyan-287")
 device = backend.device_config()
 
-# 后续可把 device 交给编译或分析模块使用
+# the device can later be passed to the compilation or analysis module
 ```
 
 ## 8. Backend selection recommendations

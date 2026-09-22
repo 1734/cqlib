@@ -37,7 +37,7 @@ circuit.cx(0, 1)
 
 print(circuit.num_qubits)   # 2
 print(len(circuit))         # 2
-print(circuit.operations)   # 查看底层 Operation 列表
+print(circuit.operations)   # view the underlying Operation list
 ```
 
 ## 2. View the circuit as a text diagram

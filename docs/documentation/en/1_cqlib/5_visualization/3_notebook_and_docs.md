@@ -43,7 +43,7 @@ After saving the PNG, reference it directly in Markdown:
 After referencing the image, the check points of this circuit diagram can be recorded below the figure:
 
 ```markdown
-图 1 展示了 Bell 态制备线路：先对 q0 施加 H 门，再以 q0 为控制位、q1 为目标位施加 CX 门。
+Figure 1 shows the Bell state preparation circuit: first apply an H gate to q0, then apply a CX gate with q0 as the control and q1 as the target.
 ```
 
 A quantum circuit diagram usually needs to state the control qubits, target qubits, measurement positions and bit order clearly. Otherwise the figure only shows the circuit shape and cannot convey a verification conclusion.

@@ -26,14 +26,14 @@ bitflip = SingleQubitNoise.bit_flip(0.01)
 amp = SingleQubitNoise.amplitude_damping(gamma=0.05)
 phase = SingleQubitNoise.phase_damping(0.1)
 
-# Kraus 算符导出
+# Kraus operator export
 kraus = sq.to_kraus()
-print("Kraus 算符数:", len(kraus))          # 4
-print("Kraus 矩阵形状:", kraus[0].shape)    # (2, 2)
+print("number of Kraus operators:", len(kraus))          # 4
+print("Kraus matrix shape:", kraus[0].shape)    # (2, 2)
 
-# 有效性校验
-print("去极化噪声有效:", sq.is_valid())       # True
-print("振幅阻尼有效:", amp.is_valid())        # True
+# validity check
+print("depolarizing noise valid:", sq.is_valid())       # True
+print("amplitude damping valid:", amp.is_valid())        # True
 ```
 
 **Note**:
@@ -48,20 +48,20 @@ print("振幅阻尼有效:", amp.is_valid())        # True
 from cqlib.device import SingleQubitNoise, TwoQubitNoise
 from cqlib.qis import Pauli
 
-# 去极化噪声（15 个非单位 Pauli 算符等概率）
+# depolarizing noise (15 non-identity Pauli operators, equally probable)
 tq = TwoQubitNoise.depolarizing(0.01)
-print("去极化 Kraus 形状:", tq.to_kraus()[0].shape)  # (4, 4)
+print("depolarizing Kraus shape:", tq.to_kraus()[0].shape)  # (4, 4)
 
-# 独立噪声（每个比特各自独立施加单比特噪声）
+# independent noise (single-qubit noise applied independently to each qubit)
 bind = TwoQubitNoise.independent(
     SingleQubitNoise.phase_flip(0.02),
     SingleQubitNoise.bit_flip(0.03),
 )
-print("独立噪声 Kraus 形状:", bind.to_kraus()[0].shape)
+print("independent noise Kraus shape:", bind.to_kraus()[0].shape)
 
-# 关联 Pauli 噪声
+# correlated Pauli noise
 corr = TwoQubitNoise.correlated_pauli(Pauli.x(), Pauli.x(), p=0.01)
-print("关联 Pauli Kraus 形状:", corr.to_kraus()[0].shape)
+print("correlated Pauli Kraus shape:", corr.to_kraus()[0].shape)
 ```
 
 **Pauli constructor notes** (all are static methods that return a Pauli object):
@@ -83,9 +83,9 @@ ReadoutError describes the discrimination error in the measurement process:
 from cqlib.device import ReadoutError
 
 ro = ReadoutError(p_0_given_1=0.02, p_1_given_0=0.01)
-print("P(测到 0 | 制备为 1):", ro.p_0_given_1)  # 0.02
-print("P(测到 1 | 制备为 0):", ro.p_1_given_0)  # 0.01
-print("读出误差是否有效:", ro.is_valid())          # True
+print("P(measure 0 | prepare 1):", ro.p_0_given_1)  # 0.02
+print("P(measure 1 | prepare 0):", ro.p_1_given_0)  # 0.01
+print("readout error valid:", ro.is_valid())          # True
 ```
 
 ---
@@ -100,24 +100,24 @@ from cqlib.device import NoiseModel, OperationKey, ReadoutError, SingleQubitNois
 
 nm = NoiseModel()
 
-# 添加噪声（所有 add_* 方法返回 None，参数校验不通过时抛出 ValueError）
+# add noise (all add_* methods return None and raise ValueError when parameter validation fails)
 nm.add_readout_error(0, ReadoutError(0.02, 0.01))
 nm.add_single_qubit_error(StandardGate.X, 0, SingleQubitNoise.bit_flip(0.005))
 nm.add_two_qubit_error(StandardGate.CX, 0, 1, TwoQubitNoise.depolarizing(0.02))
 
-# 读出误差查询
+# readout error query
 ro = nm.get_readout_error(0)
-print("读出误差:", ro)
+print("readout error:", ro)
 
-# 单比特噪声查询（通过 OperationKey）
+# single-qubit noise query (through an OperationKey)
 skey = OperationKey.new_single(StandardGate.X, 0)
 errs = nm.get_single_qubit_errors(skey)
-print("X 门噪声通道数:", len(errs))
+print("X gate noise channel count:", len(errs))
 
-# 双比特噪声查询
+# two-qubit noise query
 tkey = OperationKey.new_double(StandardGate.CX, 0, 1)
 errs2 = nm.get_two_qubit_errors(tkey)
-print("CX 门噪声通道数:", len(errs2))
+print("CX gate noise channel count:", len(errs2))
 ```
 
 **Notes**:
@@ -140,16 +140,16 @@ from cqlib.device import NoiseModel, SingleQubitNoise, TwoQubitNoise
 nm = NoiseModel()
 
 try:
-    # 概率超出 [0, 1] 范围
+    # probability outside the range [0, 1]
     nm.add_single_qubit_error(StandardGate.X, 0, SingleQubitNoise.bit_flip(1.5))
 except ValueError as e:
-    print("无效概率被拦截:", e)
+    print("invalid probability rejected:", e)
 
 try:
-    # 双比特门作用在同一比特上
+    # two-qubit gate acting on the same qubit
     nm.add_two_qubit_error(StandardGate.CX, 0, 0, TwoQubitNoise.depolarizing(0.01))
 except ValueError as e:
-    print("无效配置被拦截:", e)
+    print("invalid configuration rejected:", e)
 ```
 
 ---
@@ -169,14 +169,14 @@ device.default_single_qubit_error = 0.001
 noise = NoiseModel()
 noise.add_single_qubit_error(StandardGate.H, 0, SingleQubitNoise.depolarizing(0.002))
 
-# Device 查询（注意需要 Instruction 对象）
+# Device query (note that an Instruction object is required)
 h_inst = Instruction.from_standard_gate(StandardGate.H)
-print("设备报告的 H 门误差:", device.single_qubit_error(0, h_inst))
+print("H gate error reported by the device:", device.single_qubit_error(0, h_inst))
 
-# NoiseModel 查询噪声通道
+# NoiseModel noise channel query
 skey = OperationKey.new_single(StandardGate.H, 0)
 channels = noise.get_single_qubit_errors(skey)
-print("噪声通道数:", len(channels))
+print("noise channel count:", len(channels))
 ```
 
 ---

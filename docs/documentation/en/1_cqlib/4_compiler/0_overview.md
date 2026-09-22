@@ -61,10 +61,10 @@ from cqlib.compile.sabre import SabreConfig
 objective = LayoutObjective.topology_only()
 config = SabreConfig.deterministic_seeded(42)
 
-# 1) 仅布局（不插 SWAP）
+# 1) layout only (no SWAP insertion)
 layout_result = vf2_perfect_layout(circuit, device, objective)
 
-# 2) 布局 + 路由（插 SWAP）
+# 2) layout + routing (with SWAP insertion)
 route_result = route_sabre(circuit, device, objective, config)
 print("swap_count:", route_result.swap_count)
 ```
@@ -82,23 +82,23 @@ print("swap_count:", route_result.swap_count)
 ## Pipeline overview
 
 ```text
-逻辑线路 (Circuit)
-  → canonicalize.input
-  → decompose.definitions
-  → optimize.pre_decomposition
-  → decompose.unitary / decompose.mc_gates
-  → canonicalize.after_decomposition
-  → optimize.post_decomposition
-  → decompose.routing_basis                         [物理目标]
-  → route.sabre                                     [物理目标]
-  → post-routing resynthesis / cleanup              [Enhanced + 物理目标]
-  → translate.target_basis / target cleanup         [显式目标门集]
-  → canonicalize.output
-  → lower.device_instructions                       [严格 Device 目标]
-  → native-input canonicalization / fixed point     [严格 Device 目标]
-  → validate.device / validate.topology             [按目标类型]
-  → select.sabre_pareto_beam                        [Enhanced + 严格 Device 目标]
-  → result.circuit
+Logical circuit (Circuit)
+  ->canonicalize.input
+  ->decompose.definitions
+  ->optimize.pre_decomposition
+  ->decompose.unitary / decompose.mc_gates
+  ->canonicalize.after_decomposition
+  ->optimize.post_decomposition
+  -> decompose.routing_basis                        [physical target]
+  -> route.sabre                                    [physical target]
+  -> post-routing resynthesis / cleanup             [Enhanced + physical target]
+  -> translate.target_basis / target cleanup        [explicit target gate set]
+  ->canonicalize.output
+  -> lower.device_instructions                      [strict Device target]
+  -> native-input canonicalization / fixed point    [strict Device target]
+  -> validate.device / validate.topology            [by target type]
+  -> select.sabre_pareto_beam                       [Enhanced + strict Device target]
+  ->result.circuit
 ```
 
 `canonicalize.output` only ends the tidying of the generic output representation. For a strict `Device` target,
@@ -110,15 +110,15 @@ Enhanced strict device compilation saves an immutable pre-routing prefix before 
 ordinary complete compilation result as candidate 0:
 
 ```text
-保存 pre-routing prefix
-  → candidate 0：route + 完整后缀 + validate.device
-  → bounded SABRE Pareto beam
-      → 每个探索候选从同一 prefix 开始
-      → route + 同一完整后缀 + validate.device
-  → select.sabre_pareto_beam
-      ├─ 存在满足契约的改进候选：选择已验证的 winner
-      └─ 否则：保留已验证的 candidate 0
-  → result.circuit
+Save the pre-routing prefix
+  -> candidate 0: route + full suffix + validate.device
+  ->bounded SABRE Pareto beam
+      -> each explored candidate starts from the same prefix
+      -> route + the same full suffix + validate.device
+  ->select.sabre_pareto_beam
+      ├─ an improved candidate satisfying the contract exists: select the validated winner
+      └─ otherwise: keep the validated candidate 0
+  ->result.circuit
 ```
 
 A candidate must satisfy the exact Pareto contract in every control-flow scope and must strictly improve either
@@ -203,14 +203,14 @@ from cqlib.compile.transform.decompose import (
     decompose_unitaries,
 )
 
-# 多控门分解（受设备容量约束）
+# multi-controlled gate decomposition (constrained by device capacity)
 result = decompose_mc_gates_for_device(
     circuit,
     device,
     resource_policy=ResourcePolicy(max_pre_layout_clean_ancillas=2),
 )
 
-# 矩阵酉门分解
+# matrix unitary gate decomposition
 unitary_result = decompose_unitaries(circuit)
 ```
 

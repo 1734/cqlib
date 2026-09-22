@@ -144,7 +144,7 @@ from cqlib_tianyan import TianyanPlatform, TianyanError
 try:
     platform = TianyanPlatform.login("invalid_api_key")
 except Exception as exc:
-    print(f"登录失败: {exc}")
+    print(f"login failed: {exc}")
 ```
 
 In the current Python abi3 bindings, it is recommended to catch `Exception` in practice and then handle it according to the error message.

@@ -7,7 +7,7 @@ From the usage chain, it sits between "circuit construction / IR conversion" and
 ```mermaid
 flowchart LR
     A["Cqlib Circuit"] --> B["cqlib.ir.qcis.dumps"]
-    C["已有 QCIS 程序"] --> D["QCIS 线路文本"]
+    C["Existing QCIS program"] --> D["QCIS circuit text"]
     B --> D
     D --> E["cqlib_tianyan.TianyanBackend.run"]
     E --> F["TaskHandle"]
@@ -44,11 +44,11 @@ The relationship between `cqlib-tianyan` and the Cqlib core modules is as follow
 Recommended workflow:
 
 ```text
-Circuit 构建
--> QCIS 导出
--> Tianyan 后端提交
--> TaskHandle 等待结果
--> ExecutionResult 分析
+Circuit construction
+-> QCIS export
+-> Tianyan backend submission
+-> TaskHandle waits for results
+-> ExecutionResult analysis
 ```
 
 ## 3. Installation and environment

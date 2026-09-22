@@ -101,7 +101,7 @@ c = Circuit(1)
 flag = c.var(ClassicalType.bool())
 flag_expr = ClassicalExpr.var(flag)
 
-# 等价的便捷写法
+# equivalent shorthand
 same_flag_expr = flag.expr()
 ```
 
@@ -296,7 +296,7 @@ c = Circuit(1)
 loop_var = c.var(ClassicalType.uint(3))
 
 def body(builder, index_expr):
-    # index_expr 是读取 loop_var 的 UInt 表达式
+    # index_expr is a UInt expression that reads loop_var
     builder.rx(0, 0.25)
 
 c.for_uint(

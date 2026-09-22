@@ -78,9 +78,9 @@ print("是否包含比特 2:", topo.contains_qubit(2))    # True
 print("是否包含比特 9:", topo.contains_qubit(9))    # False
 
 # 邻接关系查询
-print("比特 1 的后继（出边）:", topo.successors(1))           # [Qubit(2)]
-print("比特 1 的前驱（入边）:", topo.predecessors(1))         # [Qubit(0)]
-print("比特 1 的无向邻居:", topo.neighbors_undirected(1))     # [Qubit(0), Qubit(2)]
+print("比特 1 的后继（出边）:", topo.successors(1))           # [PhysicalQubit(2)]
+print("比特 1 的前驱（入边）:", topo.predecessors(1))         # [PhysicalQubit(0)]
+print("比特 1 的无向邻居:", topo.neighbors_undirected(1))     # [PhysicalQubit(0), PhysicalQubit(2)]
 print("比特 1 的出度:", topo.out_degree(1))                   # 1
 print("比特 1 的入度:", topo.in_degree(1))                    # 1
 
@@ -116,7 +116,7 @@ print("添加后耦合数:", topo.num_couplings)  # 4
 
 # 移除去向耦合（仅移除指定方向）
 topo.remove_couplings([(2, 3)])
-print("移除后耦合数:", topo.num_couplings)  # 2（移除了耦合 (3,4)）
+print("移除后耦合数:", topo.num_couplings)  # 3（移除了耦合 (2,3)）
 
 # 移除比特（连带所有关联耦合一起移除）
 topo.remove_qubits([4])

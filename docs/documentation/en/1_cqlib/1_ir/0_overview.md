@@ -15,9 +15,9 @@ The core internal object of Cqlib is `Circuit`. An external text format (such as
 
 ```mermaid
 flowchart LR
-    A["QCIS 文本"] --> D["cqlib.ir.qcis.loads/load"]
-    B["OpenQASM 2.0 文本"] --> E["cqlib.ir.qasm2.loads/load"]
-    C["OpenQASM 3.0 文本"] --> F["cqlib.ir.qasm3.loads/load"]
+    A["QCIS text"] --> D["cqlib.ir.qcis.loads/load"]
+    B["OpenQASM 2.0 text"] --> E["cqlib.ir.qasm2.loads/load"]
+    C["OpenQASM 3.0 text"] --> F["cqlib.ir.qasm3.loads/load"]
     D --> G["Cqlib Circuit"]
     E --> G
     F --> G
@@ -88,10 +88,10 @@ from cqlib.circuit import ClassicalType
 
 circuit = Circuit(2)
 
-# 只产生一个测量结果值，不指定用户变量。
+# only produces a measurement result value, without specifying a user variable.
 measurement = circuit.measure(0)
 
-# 创建用户可见的 classical bit，并把测量结果写入其中。
+# create a user-visible classical bit and write the measurement result into it.
 bit = circuit.var(ClassicalType.bit())
 circuit.measure_into(1, bit)
 ```

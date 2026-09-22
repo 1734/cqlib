@@ -140,7 +140,7 @@ result = mitigation.get_mitigated(
 )
 
 print(result.expectation)
-print(result.variance)  # ZNE 为 None
+print(result.variance)  # None for ZNE
 ```
 
 ---

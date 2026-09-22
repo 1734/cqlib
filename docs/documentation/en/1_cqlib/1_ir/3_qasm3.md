@@ -83,7 +83,7 @@ The exporter generates normalized text, and does not preserve the spaces, commen
 ```python
 from cqlib.ir import qasm3
 
-# 先把上文的 QASM 文本写成待读取的文件
+# first write the QASM text above to a file to be read
 qasm3.dump(qasm3.loads(qasm_code), "input.qasm")
 
 circuit = qasm3.load("input.qasm")

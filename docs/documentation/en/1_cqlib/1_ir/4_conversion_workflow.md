@@ -3,7 +3,7 @@
 The IR module of Cqlib can serve as a conversion hub between QCIS, OpenQASM 2.0, OpenQASM 3.0 and external frameworks. All conversions follow the same principle:
 
 ```text
-外部格式 A -> Cqlib Circuit -> 外部格式 B
+External format A -> Cqlib Circuit -> External format B
 ```
 
 In other words, conversion is not string replacement: the input format is first parsed into a structured `Circuit`, and then the target format exporter regenerates the text.
@@ -15,11 +15,11 @@ flowchart LR
     A["QCIS"] --> C["Cqlib Circuit"]
     B["OpenQASM 2.0"] --> C
     D["OpenQASM 3.0"] --> C
-    E["外部量子线路工具"] --> F["OpenQASM 2/3 text"] --> C
+    E["External circuit tools"] --> F["OpenQASM 2/3 text"] --> C
     C --> G["QCIS"]
     C --> H["OpenQASM 2.0"]
     C --> I["OpenQASM 3.0"]
-    C --> J["可视化 / 仿真 / 编译 / 硬件适配"]
+    C --> J["Visualization / Simulation / Compilation / Hardware adaptation"]
 ```
 
 ## 2. Converting QCIS to OpenQASM 3.0
@@ -135,11 +135,11 @@ Note: the conversion succeeds only when the features used by the QASM3 circuit c
 An external quantum circuit tool can exchange circuits with Cqlib in the same way as long as it can import or export OpenQASM text:
 
 ```text
-外部线路对象 -> OpenQASM 文本 -> cqlib.ir.qasm2/qasm3.loads -> Cqlib Circuit
+External circuit object -> OpenQASM text -> cqlib.ir.qasm2/qasm3.loads -> Cqlib Circuit
 ```
 
 ```text
-Cqlib Circuit -> cqlib.ir.qasm2/qasm3.dumps -> OpenQASM 文本 -> 外部线路对象
+Cqlib Circuit -> cqlib.ir.qasm2/qasm3.dumps -> OpenQASM text -> External circuit object
 ```
 
 Using OpenQASM text as the tool boundary is recommended, rather than coupling the internal circuit objects of both sides directly. This reduces the complexity of dependencies, and also makes it convenient to save input and output files in CI and perform regression tests.

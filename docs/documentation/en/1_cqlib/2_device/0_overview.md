@@ -37,10 +37,10 @@ from cqlib.device import (
     SingleQubitNoise, Topology, TwoQubitNoise,
 )
 
-# 1) 定义硬件拓扑：比特列表 + (控制, 目标, 门名称) 三元组
+# 1) define the hardware topology: qubit list + (control, target, gate name) triples
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
 
-# 2) 创建设备，设置全局默认标定参数
+# 2) create the device and set the global default calibration parameters
 device = Device("demo_backend", [0, 1, 2], topo)
 device.default_t1 = 50.0
 device.default_t2 = 35.0
@@ -48,7 +48,7 @@ device.default_readout_error = 0.05
 device.default_single_qubit_error = 0.001
 device.default_two_qubit_error = 0.01
 
-# 3) 注入局部标定参数（会覆盖全局默认值）
+# 3) inject local calibration parameters (they override the global defaults)
 q0_prop = QubitProp(readout_error=0.02)
 q0_prop.t1 = 80.0
 q0_prop.t2 = 70.0
@@ -63,37 +63,37 @@ edge_prop = EdgeProp()
 edge_prop.add_native_instruction(cx_prop)
 device.add_edge_properties(0, 1, edge_prop)
 
-# 4) 布局映射：逻辑比特 → 物理比特
+# 4) layout mapping: logical qubits -> physical qubits
 layout = Layout.from_pairs([(0, 11), (1, 10)], physical_count=13)
 layout.swap_physical(11, 12)
 
-# 5) 噪声模型配置
+# 5) noise model configuration
 noise = NoiseModel()
 noise.add_readout_error(0, ReadoutError(0.02, 0.01))
 noise.add_single_qubit_error(StandardGate.X, 0, SingleQubitNoise.bit_flip(0.005))
 noise.add_two_qubit_error(StandardGate.CX, 0, 1, TwoQubitNoise.depolarizing(0.02))
 
-# 6) 任务执行结果
+# 6) task execution result
 result = ExecutionResult("task-1", [0, 1], 100, 2, "demo_backend")
 result.start()
 result.finish({"00": 60, "11": 40})
 result.calc_probabilities()
 
-# 7) 查询与验证输出
-print("设备名:", device.name)
-print("比特 0 的 T1（局部值）:", device.get_t1(0))
-print("比特 2 的 T1（回退至全局默认）:", device.get_t1(2))
-print("可用比特数:", device.num_usable_qubits)
-print("逻辑→物理映射:", layout.l2p_map)
-print("比特 0 读出误差:", noise.get_readout_error(0))
-print("任务状态:", result.status.kind)
-print("概率分布:", result.probabilities)
+# 7) query and verification output
+print("device name:", device.name)
+print("T1 of qubit 0 (local value):", device.get_t1(0))
+print("T1 of qubit 2 (falls back to the global default):", device.get_t1(2))
+print("number of usable qubits:", device.num_usable_qubits)
+print("logical -> physical mapping:", layout.l2p_map)
+print("readout error of qubit 0:", noise.get_readout_error(0))
+print("task status:", result.status.kind)
+print("probability distribution:", result.probabilities)
 
-# 通过 OperationKey 查询噪声通道
+# query noise channels through OperationKey
 skey = OperationKey.new_single(StandardGate.X, 0)
 qubit_noises = noise.get_single_qubit_errors(skey)
 if qubit_noises:
-    print("X 门噪声通道数:", len(qubit_noises))
+    print("number of X gate noise channels:", len(qubit_noises))
 ```
 
 **Notes**:

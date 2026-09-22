@@ -19,7 +19,7 @@ from cqlib.qis import Hamiltonian, PauliString
 Each `ErrorMitigation` instance follows a fixed lifecycle:
 
 ```text
-创建 → run() → get_mitigated() → 结束
+create -> run() -> get_mitigated() -> end
 ```
 
 | Rule | Description |
@@ -120,9 +120,9 @@ em.MitigationMethod.virtual_distillation(em.VirtualDistillationConfig(2))
 
 ```python
 def estimator(run_circuit, observable, shots):
-    # run_circuit: 可能是折叠线路或 copy-swap 线路
-    # observable: Hamiltonian 或 None（VD 分母）
-    # shots: int 或 None
+    # run_circuit: may be a folded circuit or a copy-swap circuit
+    # observable: a Hamiltonian or None (VD denominator)
+    # shots: an int or None
     return (expectation, variance)
 ```
 

@@ -18,14 +18,14 @@ from cqlib.device import Topology
 topo = Topology(
     [0, 1, 2],
     [
-        (0, 1, "CX"),   # 比特 0 → 比特 1 方向执行 CX
-        (1, 2, "CZ"),   # 比特 1 → 比特 2 方向执行 CZ
+        (0, 1, "CX"),   # CX applied in the qubit 0 -> qubit 1 direction
+        (1, 2, "CZ"),   # CZ applied in the qubit 1 -> qubit 2 direction
     ],
 )
 
-print("比特总数:", topo.num_qubits)
-print("耦合总数:", topo.num_couplings)
-print("节点列表:", topo.qubits)
+print("qubit count:", topo.num_qubits)
+print("coupling count:", topo.num_couplings)
+print("node list:", topo.qubits)
 ```
 
 **Note**: the couplings parameter of the constructor requires (control, target, name) triples, and the two-element form is not supported.
@@ -37,9 +37,9 @@ Topology currently provides the line factory, used to create a line topology qui
 ```python
 from cqlib.device import Topology
 
-# 线型: 0 → 1 → 2 → 3（单向链）
+# Line topology: 0 -> 1 -> 2 -> 3 (a one-way chain)
 line_topo = Topology.line([0, 1, 2, 3])
-print("线型耦合数:", line_topo.num_couplings)
+print("line coupling count:", line_topo.num_couplings)
 ```
 
 **Notes**:
@@ -51,10 +51,10 @@ print("线型耦合数:", line_topo.num_couplings)
 ```python
 from cqlib.device import Topology
 
-# 表示 0 和 1 互为控制/目标位（双向耦合）
+# Qubits 0 and 1 act as each other's control and target (bidirectional coupling)
 topo = Topology([0, 1], [(0, 1, "CX"), (1, 0, "CX")])
-print("支持 0→1:", topo.supports_directed_coupling(0, 1))   # True
-print("支持 1→0:", topo.supports_directed_coupling(1, 0))   # True
+print("supports 0->1:", topo.supports_directed_coupling(0, 1))   # True
+print("supports 1->0:", topo.supports_directed_coupling(1, 0))   # True
 ```
 
 ---
@@ -66,27 +66,27 @@ from cqlib.device import Topology
 
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
 
-# 连通性判断
-print("有向耦合 0→1:", topo.supports_directed_coupling(0, 1))  # True
-print("有向耦合 1→0:", topo.supports_directed_coupling(1, 0))  # False
-print("任一方向存在:", topo.supports_coupling_either_direction(0, 1))  # True
-print("耦合名称 0→1:", topo.get_coupling_name(0, 1))    # "CX"
-print("耦合名称 2→1（反向不存在）:", topo.get_coupling_name(2, 1))  # None
+# Connectivity checks
+print("directed coupling 0->1:", topo.supports_directed_coupling(0, 1))  # True
+print("directed coupling 1->0:", topo.supports_directed_coupling(1, 0))  # False
+print("either direction present:", topo.supports_coupling_either_direction(0, 1))  # True
+print("coupling name 0->1:", topo.get_coupling_name(0, 1))    # "CX"
+print("coupling name 2->1 (reverse absent):", topo.get_coupling_name(2, 1))  # None
 
-# 查询比特是否存在
-print("是否包含比特 2:", topo.contains_qubit(2))    # True
-print("是否包含比特 9:", topo.contains_qubit(9))    # False
+# Check whether a qubit exists
+print("contains qubit 2:", topo.contains_qubit(2))    # True
+print("contains qubit 9:", topo.contains_qubit(9))    # False
 
-# 邻接关系查询
-print("比特 1 的后继（出边）:", topo.successors(1))           # [Qubit(2)]
-print("比特 1 的前驱（入边）:", topo.predecessors(1))         # [Qubit(0)]
-print("比特 1 的无向邻居:", topo.neighbors_undirected(1))     # [Qubit(0), Qubit(2)]
-print("比特 1 的出度:", topo.out_degree(1))                   # 1
-print("比特 1 的入度:", topo.in_degree(1))                    # 1
+# Adjacency queries
+print("successors of qubit 1 (out edges):", topo.successors(1))           # [PhysicalQubit(2)]
+print("predecessors of qubit 1 (in edges):", topo.predecessors(1))         # [PhysicalQubit(0)]
+print("undirected neighbours of qubit 1:", topo.neighbors_undirected(1))     # [PhysicalQubit(0), PhysicalQubit(2)]
+print("out-degree of qubit 1:", topo.out_degree(1))                   # 1
+print("in-degree of qubit 1:", topo.in_degree(1))                    # 1
 
-# 无向边列表（undirected_edges 是方法，需加括号调用）
+# Undirected edge list (undirected_edges is a method and needs parentheses)
 edges = topo.undirected_edges()
-print("无向边列表:", edges)
+print("undirected edge list:", edges)
 ```
 
 **Notes**:
@@ -106,22 +106,22 @@ from cqlib.device import Topology
 
 topo = Topology([0, 1, 2], [(0, 1, "CX"), (1, 2, "CZ")])
 
-# 添加新比特
+# Add new qubits
 topo.add_qubits([3, 4])
-print("添加后比特数:", topo.num_qubits)  # 5
+print("qubit count after adding:", topo.num_qubits)  # 5
 
-# 添加新耦合（注意：新增边也需要三元组）
+# Add new couplings (note: new edges also need the triple form)
 topo.add_couplings([(2, 3, "CX"), (3, 4, "CZ")])
-print("添加后耦合数:", topo.num_couplings)  # 4
+print("coupling count after adding:", topo.num_couplings)  # 4
 
-# 移除去向耦合（仅移除指定方向）
+# Remove couplings (only the given direction is removed)
 topo.remove_couplings([(2, 3)])
-print("移除后耦合数:", topo.num_couplings)  # 2（移除了耦合 (3,4)）
+print("coupling count after removal:", topo.num_couplings)  # 3 (coupling (2,3) removed)
 
-# 移除比特（连带所有关联耦合一起移除）
+# Remove qubits (all associated couplings are removed with them)
 topo.remove_qubits([4])
-print("移除后比特数:", topo.num_qubits)     # 4
-print("移除后耦合数:", topo.num_couplings)  # 2（移除了耦合 (3,4)）
+print("qubit count after removal:", topo.num_qubits)     # 4
+print("coupling count after removal:", topo.num_couplings)  # 2 (coupling (3,4) removed)
 ```
 
 **Edge cases**:

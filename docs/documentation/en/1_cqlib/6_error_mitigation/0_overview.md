@@ -53,7 +53,7 @@ mitigation = em.ErrorMitigation(
 )
 
 def estimator(run_circuit, observable, shots):
-    # 替换为模拟器或真实后端的期望值估计
+    # replace with an expectation-value estimate from a simulator or a real backend
     return (0.5 * len(run_circuit.operations), 0.0)
 
 mitigation.run(hamiltonian, em.RunArgs.zne(shots=128), estimator)
@@ -99,14 +99,14 @@ Cqlib does **not** provide a built-in simulator or backend estimator; connect `e
 ## Data flow overview
 
 ```text
-原始 Circuit + Hamiltonian
+Original Circuit + Hamiltonian
   ↓
-构造缓解线路族（ZNE 折叠 / VD copy-swap）
+Construct the mitigation circuit family (ZNE folding / VD copy-swap)
   ↓
-estimator 逐条执行并返回 (expectation, variance)
+estimator runs each circuit and returns (expectation, variance)
   ↓
-ZNE：外推到 noise_factor = 0
-VD：计算 numerator / denominator 比值
+ZNE: extrapolate to noise_factor = 0
+VD: compute the numerator / denominator ratio
   ↓
 MitigatedResult(expectation, variance?)
 ```
