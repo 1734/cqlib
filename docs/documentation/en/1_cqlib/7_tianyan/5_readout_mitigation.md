@@ -50,10 +50,10 @@ assert mode == "auto"
 In most cases a string can be passed directly:
 
 ```python
-task = backend.run_with_mode(
+task = backend.run(
     circuits=["H Q1\nM Q1"],
     shots=1000,
-    mode="disabled",
+    calibration_mode="disabled",
 )
 ```
 
@@ -63,45 +63,45 @@ task = backend.run_with_mode(
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-results = task.wait(timeout_secs=120.0)
+results = task.wait(timeout=120.0)
 ```
 
 The `auto` mode applies readout error correction automatically when the conditions are met.
 
 ## 4. Getting raw results
 
-To obtain raw counts only without any correction, use `run_raw`:
+To obtain raw counts only without any correction, pass `calibration_mode="disabled"` at submission time:
 
 ```python
-task = backend.run_raw(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait(timeout_secs=120.0)
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="disabled")
+raw_results = task.wait(timeout=120.0)
 ```
 
 Or use `wait_raw` on an existing task:
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait_raw(timeout_secs=120.0)
+raw_results = task.wait_raw(timeout=120.0)
 ```
 
 ## 5. Specifying the correction mode explicitly
 
 ```python
 # automatic correction
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="auto")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="auto")
 
 # forced correction
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="enabled")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="enabled")
 
 # no correction
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="disabled")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="disabled")
 ```
 
 A `CalibrationMode` object can also be passed:
 
 ```python
 mode = CalibrationMode("disabled")
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode=mode)
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode=mode)
 ```
 
 ## 6. Qubit count threshold of the auto mode
@@ -123,7 +123,7 @@ Therefore the `auto` mode applies correction automatically only when the number 
 If forced correction is genuinely required, use:
 
 ```python
-task = backend.run_with_mode(circuits, shots=1000, mode="enabled")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="enabled")
 ```
 
 However, this requires the caller to confirm that memory resources are sufficient.
@@ -135,8 +135,8 @@ qcis = "H Q1\nM Q1"
 
 task = backend.run([qcis], shots=1000)
 
-calibrated = task.wait(timeout_secs=120.0)
-raw = task.wait_raw(timeout_secs=120.0)
+calibrated = task.wait(timeout=120.0)
+raw = task.wait_raw(timeout=120.0)
 
 print("corrected:", calibrated[0].counts, calibrated[0].probabilities)
 print("raw:", raw[0].counts, raw[0].probabilities)

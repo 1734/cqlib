@@ -25,7 +25,7 @@ flowchart LR
 | Platform authentication | `TianyanPlatform.login`, `from_credentials` | Log in with an API Key, with local credential storage and automatic refresh |
 | Backend discovery | `list_backends`, `get_backend` | Obtain available quantum backends, device status, billing type and qubit count |
 | Device configuration | `TianyanBackend.device_config` | Download device information such as topology, calibration and readout error, returning a `cqlib.device.Device` |
-| Task submission | `run`, `run_raw`, `run_with_mode`, `submit` | Submit QCIS circuits, with batch submission support |
+| Task submission | `run`, `submit` (`run_raw` and `run_with_mode` are deprecated) | Submit QCIS circuits, with batch submission support |
 | Result retrieval | `TaskHandle.status`, `wait`, `wait_raw` | Query task status, block until results are available, and return the Cqlib unified result object |
 | Readout error correction | `CalibrationMode` | Correct measurement counts for readout error based on device calibration data |
 
@@ -80,7 +80,7 @@ backend = platform.get_backend("tianyan-287")
 qcis = "H Q1\nM Q1"
 task = backend.run([qcis], shots=1000)
 
-results = task.wait(timeout_secs=120.0, poll_interval_secs=5.0)
+results = task.wait(timeout=120.0, poll_interval=5.0)
 result = results[0]
 
 print(result.task_id)
@@ -113,7 +113,7 @@ classDiagram
         +toll
         +num_qubits()
         +is_available()
-        +run(circuits, shots)
+        +run(circuits, shots, calibration_mode)
         +run_raw(circuits, shots)
         +run_with_mode(circuits, shots, mode)
         +device_config()
@@ -124,8 +124,8 @@ classDiagram
         +shots
         +submitted_at
         +status()
-        +wait(timeout_secs, poll_interval_secs)
-        +wait_raw(timeout_secs, poll_interval_secs)
+        +wait(timeout, poll_interval)
+        +wait_raw(timeout, poll_interval)
     }
     class ExecutionResult {
         +task_id
@@ -138,6 +138,7 @@ classDiagram
     TianyanPlatform --> TianyanBackend
     TianyanBackend --> TaskHandle
     TaskHandle --> ExecutionResult
+    note for TianyanBackend "run_raw and run_with_mode are deprecated; use run(..., calibration_mode=...) instead"
 ```
 
 ## Next steps

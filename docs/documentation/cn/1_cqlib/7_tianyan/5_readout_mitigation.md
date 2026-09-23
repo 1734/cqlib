@@ -50,10 +50,10 @@ assert mode == "auto"
 大多数情况下可以直接传字符串：
 
 ```python
-task = backend.run_with_mode(
+task = backend.run(
     circuits=["H Q1\nM Q1"],
     shots=1000,
-    mode="disabled",
+    calibration_mode="disabled",
 )
 ```
 
@@ -63,45 +63,45 @@ task = backend.run_with_mode(
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-results = task.wait(timeout_secs=120.0)
+results = task.wait(timeout=120.0)
 ```
 
 `auto` 模式会在满足条件时自动应用读取误差矫正。
 
 ## 4. 获取原始结果
 
-如果只想获取原始计数，不希望做任何矫正，可以使用 `run_raw`：
+如果只想获取原始计数，不希望做任何矫正，提交时指定 `calibration_mode="disabled"`：
 
 ```python
-task = backend.run_raw(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait(timeout_secs=120.0)
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="disabled")
+raw_results = task.wait(timeout=120.0)
 ```
 
 或者在已有任务上使用 `wait_raw`：
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait_raw(timeout_secs=120.0)
+raw_results = task.wait_raw(timeout=120.0)
 ```
 
 ## 5. 显式指定矫正模式
 
 ```python
 # 自动矫正
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="auto")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="auto")
 
 # 强制矫正
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="enabled")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="enabled")
 
 # 禁用矫正
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode="disabled")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="disabled")
 ```
 
 也可以传 `CalibrationMode` 对象：
 
 ```python
 mode = CalibrationMode("disabled")
-task = backend.run_with_mode(["H Q1\nM Q1"], shots=1000, mode=mode)
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode=mode)
 ```
 
 ## 6. auto 模式的比特数阈值
@@ -123,7 +123,7 @@ O(4^n)
 如果确实需要强制矫正，可以使用：
 
 ```python
-task = backend.run_with_mode(circuits, shots=1000, mode="enabled")
+task = backend.run(["H Q1\nM Q1"], shots=1000, calibration_mode="enabled")
 ```
 
 但这要求调用方自己确认内存资源足够。
@@ -135,8 +135,8 @@ qcis = "H Q1\nM Q1"
 
 task = backend.run([qcis], shots=1000)
 
-calibrated = task.wait(timeout_secs=120.0)
-raw = task.wait_raw(timeout_secs=120.0)
+calibrated = task.wait(timeout=120.0)
+raw = task.wait_raw(timeout=120.0)
 
 print("矫正后:", calibrated[0].counts, calibrated[0].probabilities)
 print("原始值:", raw[0].counts, raw[0].probabilities)

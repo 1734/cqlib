@@ -25,7 +25,7 @@ flowchart LR
 | 平台认证 | `TianyanPlatform.login`、`from_credentials` | 使用 API Key 登录，支持本地凭据保存和自动刷新 |
 | 后端发现 | `list_backends`、`get_backend` | 获取可用量子后端、设备状态、计费类型、比特数 |
 | 设备配置 | `TianyanBackend.device_config` | 下载拓扑、校准、读出误差等设备信息，返回 `cqlib.device.Device` |
-| 任务提交 | `run`、`run_raw`、`run_with_mode`、`submit` | 提交 QCIS 线路，支持批量提交 |
+| 任务提交 | `run`、`submit`（`run_raw`、`run_with_mode` 已弃用） | 提交 QCIS 线路，支持批量提交 |
 | 结果获取 | `TaskHandle.status`、`wait`、`wait_raw` | 查询任务状态，阻塞等待结果，返回 Cqlib 统一结果对象 |
 | 读取误差矫正 | `CalibrationMode` | 根据设备校准数据对测量计数做读取误差矫正 |
 
@@ -80,7 +80,7 @@ backend = platform.get_backend("tianyan-287")
 qcis = "H Q1\nM Q1"
 task = backend.run([qcis], shots=1000)
 
-results = task.wait(timeout_secs=120.0, poll_interval_secs=5.0)
+results = task.wait(timeout=120.0, poll_interval=5.0)
 result = results[0]
 
 print(result.task_id)
@@ -113,7 +113,7 @@ classDiagram
         +toll
         +num_qubits()
         +is_available()
-        +run(circuits, shots)
+        +run(circuits, shots, calibration_mode)
         +run_raw(circuits, shots)
         +run_with_mode(circuits, shots, mode)
         +device_config()
@@ -124,8 +124,8 @@ classDiagram
         +shots
         +submitted_at
         +status()
-        +wait(timeout_secs, poll_interval_secs)
-        +wait_raw(timeout_secs, poll_interval_secs)
+        +wait(timeout, poll_interval)
+        +wait_raw(timeout, poll_interval)
     }
     class ExecutionResult {
         +task_id
@@ -138,6 +138,7 @@ classDiagram
     TianyanPlatform --> TianyanBackend
     TianyanBackend --> TaskHandle
     TaskHandle --> ExecutionResult
+    note for TianyanBackend "run_raw 与 run_with_mode 已弃用，改用 run(..., calibration_mode=...)"
 ```
 
 ## 下一步
